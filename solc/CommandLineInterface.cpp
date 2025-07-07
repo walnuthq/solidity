@@ -342,6 +342,24 @@ void CommandLineInterface::handleIROptimized(std::string const& _contractName)
 	}
 }
 
+void CommandLineInterface::handleMLIR(std::string const& _contractName)
+{
+	solAssert(CompilerInputModes.count(m_options.input.mode) == 1);
+
+	// Output MLIR only when --mlir-optimize flag is used AND --print-mlir is set or output dir is specified
+	if (!m_options.optimizer.mlirOptimize)
+		return;
+
+	// Only output to file if output directory is specified
+	// The --print-mlir flag is already handled in CompilerStack
+	if (m_options.output.dir.empty())
+		return;
+
+	std::optional<std::string> const& mlir = m_compiler->mlirIR(_contractName);
+	if (mlir.has_value())
+		createFile(m_compiler->filesystemFriendlyName(_contractName) + ".mlir", mlir.value());
+}
+
 void CommandLineInterface::handleIROptimizedAst(std::string const& _contractName)
 {
 	solAssert(CompilerInputModes.count(m_options.input.mode) == 1);
@@ -936,6 +954,11 @@ void CommandLineInterface::compile()
 		m_compiler->setRemappings(m_options.input.remappings);
 		m_compiler->setLibraries(m_options.linker.libraries);
 		m_compiler->setViaIR(m_options.output.viaIR);
+		m_compiler->setMLIROptimize(m_options.optimizer.mlirOptimize);
+		m_compiler->setPrintMLIR(m_options.optimizer.printMLIR);
+		m_compiler->setPrintMLIRYul(m_options.optimizer.printMLIRYul);
+		if (m_options.optimizer.mlirFile.has_value())
+			m_compiler->setMLIRFile(m_options.optimizer.mlirFile.value());
 		m_compiler->setEVMVersion(m_options.output.evmVersion);
 		m_compiler->setEOFVersion(m_options.output.eofVersion);
 		m_compiler->setRevertStringBehaviour(m_options.output.revertStrings);
@@ -1437,7 +1460,8 @@ void CommandLineInterface::outputCompilationResults()
 
 	CompilerOutputs astOutputSelection;
 	astOutputSelection.astCompactJson = true;
-	if (m_options.compiler.outputs != CompilerOutputs() && m_options.compiler.outputs != astOutputSelection)
+	
+	if ((m_options.compiler.outputs != CompilerOutputs() && m_options.compiler.outputs != astOutputSelection) || m_options.optimizer.mlirOptimize)
 	{
 		// Currently AST is the only output allowed with --stop-after parsing. For all of the others
 		// we can safely assume that full compilation was performed and successful.
@@ -1458,6 +1482,7 @@ void CommandLineInterface::outputCompilationResults()
 			handleIRAst(contract);
 			handleIROptimized(contract);
 			handleIROptimizedAst(contract);
+			handleMLIR(contract);
 			handleYulCFGExport(contract);
 			handleSignatureHashes(contract);
 			handleMetadata(contract);

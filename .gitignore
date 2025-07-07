@@ -67,3 +67,7 @@ emscripten_build/
 # OS specific local files
 .DS_Store
 Thumbs.db
+
+test/mlir/mlir_test_output
+test/mlir/Output
+

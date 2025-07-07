@@ -101,6 +101,12 @@ set(sources
 	codegen/ir/IRLValue.h
 	codegen/ir/IRVariable.cpp
 	codegen/ir/IRVariable.h
+	codegen/mlir/MLIRGenerator.cpp
+	codegen/mlir/MLIRGenerator.h
+	codegen/mlir/MLIRToYulLowering.cpp
+	codegen/mlir/MLIRToYulLowering.h
+	codegen/mlir/Passes/StorageCachingPass.cpp
+	codegen/mlir/Passes/StorageCachingPass.h
 	experimental/analysis/Analysis.cpp
 	experimental/analysis/Analysis.h
 	formal/ArraySlicePredicate.cpp
@@ -218,8 +224,31 @@ set(sources
 	experimental/codegen/IRGeneratorForStatements.h
 )
 
+# Add MLIR dialect subdirectory if MLIR is available
+if(MLIR_FOUND)
+    add_subdirectory(codegen/mlir/Dialect)
+endif()
+
 add_library(solidity ${sources})
 target_link_libraries(solidity PUBLIC yul evmasm langutil smtutil solutil Boost::boost fmt::fmt-header-only Threads::Threads)
+
+# Link with MLIR if available
+if(MLIR_FOUND)
+    target_link_libraries(solidity PUBLIC ${MLIR_LIBRARIES})
+    target_include_directories(solidity PUBLIC ${MLIR_INCLUDE_DIRS})
+    target_compile_definitions(solidity PUBLIC ${MLIR_DEFINITIONS})
+    
+    # Link with Solidity dialect
+    target_link_libraries(solidity PUBLIC SolidityDialect)
+    
+    # Disable warnings for MLIR files  
+    set_source_files_properties(
+        codegen/mlir/MLIRGenerator.cpp
+        codegen/mlir/MLIRToYulLowering.cpp
+        codegen/mlir/Passes/StorageCachingPass.cpp
+        PROPERTIES COMPILE_FLAGS "-Wno-error -w"
+    )
+endif()
 if (EMSCRIPTEN)
     if(NOT ${Z3_FOUND})
             message(FATAL_ERROR "Z3 library must be present for EMSCRIPTEN build")

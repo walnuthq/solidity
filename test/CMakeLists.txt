@@ -232,3 +232,8 @@ endif()
 
 add_subdirectory(tools)
 add_subdirectory(evmc)
+
+# Add MLIR tests if MLIR support is enabled
+if(SOLIDITY_HAS_MLIR)
+    add_subdirectory(mlir)
+endif()

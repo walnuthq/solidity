@@ -12,6 +12,18 @@ set(sources main.cpp)
 add_executable(solc ${sources})
 target_link_libraries(solc PRIVATE solcli)
 
+# Link MLIR libraries directly to solc executable if available
+if(MLIR_FOUND)
+    find_library(MLIR_IR_LIB MLIRIR HINTS /opt/homebrew/opt/llvm@20/lib)
+    find_library(MLIR_FUNC_LIB MLIRFunc HINTS /opt/homebrew/opt/llvm@20/lib)
+    find_library(MLIR_ARITH_LIB MLIRArith HINTS /opt/homebrew/opt/llvm@20/lib)
+    find_library(MLIR_SUPPORT_LIB MLIRSupport HINTS /opt/homebrew/opt/llvm@20/lib)
+    
+    if(MLIR_IR_LIB AND MLIR_FUNC_LIB AND MLIR_ARITH_LIB AND MLIR_SUPPORT_LIB)
+        target_link_libraries(solc PRIVATE ${MLIR_IR_LIB} ${MLIR_FUNC_LIB} ${MLIR_ARITH_LIB} ${MLIR_SUPPORT_LIB})
+    endif()
+endif()
+
 include(GNUInstallDirs)
 install(TARGETS solc DESTINATION "${CMAKE_INSTALL_BINDIR}")
 

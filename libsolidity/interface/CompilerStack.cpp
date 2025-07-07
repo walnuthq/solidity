@@ -63,6 +63,7 @@
 
 #include <libsolidity/codegen/ir/Common.h>
 #include <libsolidity/codegen/ir/IRGenerator.h>
+#include <libsolidity/codegen/mlir/MLIRGenerator.h>
 
 #include <libstdlib/stdlib.h>
 
@@ -227,6 +228,12 @@ void CompilerStack::setViaIR(bool _viaIR)
 {
 	solAssert(m_stackState < ParsedAndImported, "Must set viaIR before parsing.");
 	m_viaIR = _viaIR;
+}
+
+void CompilerStack::setMLIROptimize(bool _mlirOptimize)
+{
+	solAssert(m_stackState < ParsedAndImported, "Must set mlirOptimize before parsing.");
+	m_mlirOptimize = _mlirOptimize;
 }
 
 void CompilerStack::setEVMVersion(langutil::EVMVersion _version)
@@ -769,17 +776,94 @@ bool CompilerStack::compile(State _stopAfter)
 
 					try
 					{
-						if (pipelineConfig.needIR(m_viaIR))
-							generateIR(*contract, pipelineConfig.needIRCodegenOnly(m_viaIR));
-						if (pipelineConfig.needBytecode())
+						if (m_mlirOptimize)
 						{
-							if (m_viaIR)
-								generateEVMFromIR(*contract);
-							else
+							// Generate MLIR from AST
+							MLIRGenerator generator(*this, m_evmVersion, m_optimiserSettings);
+							auto mlirModule = generator.generate(*contract);
+							
+							// Store the generated MLIR for output
+							m_contracts[contract->fullyQualifiedName()].mlirIR = mlirModule;
+							
+							// Print MLIR if requested
+							if (m_printMLIR)
+								std::cerr << "\n=== Generated MLIR ===\n" << mlirModule << "\n=== End of MLIR ===\n\n";
+							
+							// Lower MLIR to Yul AST (includes optimization)
+							// Pass the print flag to show MLIR after each optimization pass
+							auto yulObject = generator.lowerToYul(mlirModule, m_printMLIR, m_mlirFile);
+							
+							// Integrate the generated Yul AST into the compilation pipeline
+							Contract& compiledContract = m_contracts[contract->fullyQualifiedName()];
+							
+							// Create YulStack with the generated AST
+							try
 							{
-								if (m_experimentalAnalysis)
-									solThrow(CompilerError, "Legacy codegen after experimental analysis is unsupported.");
-								compileContract(*contract, otherCompilers);
+								// Convert AST to string for now (until YulStack supports direct AST input)
+								std::string yulCode = yulObject->toString(m_debugInfoSelection, this);
+								
+								// Print Yul if requested
+								if (m_printMLIRYul)
+									std::cerr << "\n=== Generated Yul from MLIR ===\n" << yulCode << "\n=== End of Yul ===\n\n";
+								
+								// Set the generated Yul as the contract's IR
+								compiledContract.yulIR = yulCode;
+								
+								YulStack stack = loadGeneratedIR(*compiledContract.yulIR);
+								
+								// Optimize the generated Yul using the same optimizer as the regular pipeline
+								stack.optimize();
+								
+								// Store optimized version (required for generateEVMFromIR)
+								compiledContract.yulIROptimized = stack.print();
+								
+								// Generate bytecode from the MLIR-generated Yul
+								if (pipelineConfig.needBytecode())
+								{
+									// Force IR-based compilation for MLIR path
+									generateEVMFromIR(*contract);
+								}
+							}
+							catch (Error const& _error)
+							{
+								// If MLIR-generated Yul fails, fall back to regular compilation
+								std::string errorMsg = "Failed to compile MLIR-generated Yul. Falling back to regular compilation.\nError: ";
+								errorMsg += _error.what();
+								m_errorReporter.warning(
+									9999_error,
+									contract->location(),
+									errorMsg
+								);
+								
+								// Reset and fall back
+								compiledContract.yulIR.reset();
+								compiledContract.yulIROptimized.reset();
+								
+								if (pipelineConfig.needIR(m_viaIR))
+									generateIR(*contract, pipelineConfig.needIRCodegenOnly(m_viaIR));
+								if (pipelineConfig.needBytecode())
+								{
+									if (m_viaIR)
+										generateEVMFromIR(*contract);
+									else
+										compileContract(*contract, otherCompilers);
+								}
+							}
+						}
+						else
+						{
+							if (pipelineConfig.needIR(m_viaIR))
+								generateIR(*contract, pipelineConfig.needIRCodegenOnly(m_viaIR));
+							if (pipelineConfig.needBytecode())
+							{
+								if (m_viaIR)
+									generateEVMFromIR(*contract);
+								else
+								{
+									if (m_experimentalAnalysis)
+										solThrow(CompilerError, "Legacy codegen after experimental analysis is unsupported.");
+									compileContract(*contract, otherCompilers);
+								}
 							}
 						}
 					}
@@ -1020,6 +1104,12 @@ std::optional<std::string> const& CompilerStack::yulIROptimized(std::string cons
 {
 	solAssert(m_stackState == CompilationSuccessful, "Compilation was not successful.");
 	return contract(_contractName).yulIROptimized;
+}
+
+std::optional<std::string> const& CompilerStack::mlirIR(std::string const& _contractName) const
+{
+	solAssert(m_stackState == CompilationSuccessful, "Compilation was not successful.");
+	return contract(_contractName).mlirIR;
 }
 
 std::optional<Json> CompilerStack::yulIROptimizedAst(std::string const& _contractName) const

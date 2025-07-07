@@ -236,6 +236,10 @@ struct CommandLineOptions
 	{
 		bool optimizeEvmasm = false;
 		bool optimizeYul = false;
+		bool mlirOptimize = false;
+		bool printMLIR = false;
+		bool printMLIRYul = false;
+		std::optional<std::string> mlirFile;
 		std::optional<unsigned> expectedExecutionsPerDeployment;
 		std::optional<std::string> yulSteps;
 	} optimizer;

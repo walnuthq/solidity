@@ -1,0 +1,23 @@
+@LIT_SITE_CFG_IN_HEADER@
+
+import sys
+
+config.llvm_tools_dir = "@LLVM_TOOLS_DIR@"
+config.llvm_libs_dir = "@LLVM_LIBS_DIR@"
+config.solidity_obj_root = "@CMAKE_BINARY_DIR@"
+config.solidity_src_root = "@CMAKE_SOURCE_DIR@"
+config.solc_executable = "@CMAKE_BINARY_DIR@/solc/solc"
+config.filecheck_executable = "@LLVM_TOOLS_DIR@/FileCheck"
+config.solidity_has_mlir = @SOLIDITY_HAS_MLIR@
+
+# Support substitution of the tools_dir with user parameters.
+try:
+    config.llvm_tools_dir = config.llvm_tools_dir % lit_config.params
+except KeyError:
+    e = sys.exc_info()[1]
+    key, = e.args
+    lit_config.fatal("unable to find %r parameter, use '--param=%s=VALUE'" % (key,key))
+
+# Let the main config do the real work.
+lit_config.load_config(config, "@CMAKE_CURRENT_SOURCE_DIR@/lit.cfg.py")
+EOF < /dev/null

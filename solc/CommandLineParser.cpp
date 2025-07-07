@@ -86,6 +86,10 @@ static std::string const g_strNoImportCallback = "no-import-callback";
 static std::string const g_strOptimize = "optimize";
 static std::string const g_strOptimizeRuns = "optimize-runs";
 static std::string const g_strOptimizeYul = "optimize-yul";
+static std::string const g_strMlirOptimize = "mlir-optimize";
+static std::string const g_strMlirFile = "mlir-file";
+static std::string const g_strPrintMLIR = "print-mlir";
+static std::string const g_strPrintMLIRYul = "print-mlir-yul";
 static std::string const g_strYulOptimizations = "yul-optimizations";
 static std::string const g_strOutputDir = "output-dir";
 static std::string const g_strOverwrite = "overwrite";
@@ -251,6 +255,9 @@ bool CommandLineOptions::operator==(CommandLineOptions const& _other) const noex
 		metadata.literalSources == _other.metadata.literalSources &&
 		optimizer.optimizeEvmasm == _other.optimizer.optimizeEvmasm &&
 		optimizer.optimizeYul == _other.optimizer.optimizeYul &&
+		optimizer.mlirOptimize == _other.optimizer.mlirOptimize &&
+		optimizer.printMLIR == _other.optimizer.printMLIR &&
+		optimizer.printMLIRYul == _other.optimizer.printMLIRYul &&
 		optimizer.expectedExecutionsPerDeployment == _other.optimizer.expectedExecutionsPerDeployment &&
 		optimizer.yulSteps == _other.optimizer.yulSteps &&
 		modelChecker.initialize == _other.modelChecker.initialize &&
@@ -849,6 +856,23 @@ General Information)").c_str(),
 			g_strNoOptimizeYul + " is specified.").c_str()
 		)
 		(
+			g_strMlirOptimize.c_str(),
+			"Enable MLIR optimizer. Translates the AST to MLIR, applies optimizations, and lowers back to Yul."
+		)
+		(
+			g_strMlirFile.c_str(),
+			po::value<std::string>()->value_name("path"),
+			"Write the optimized MLIR intermediate representation to the specified file."
+		)
+		(
+			g_strPrintMLIR.c_str(),
+			"Print the generated MLIR intermediate representation."
+		)
+		(
+			g_strPrintMLIRYul.c_str(),
+			"Print the Yul code generated from MLIR lowering."
+		)
+		(
 			g_strNoOptimizeYul.c_str(),
 			"Disable Yul optimizer (independently of the EVM assembly optimizer)."
 		)
@@ -1266,6 +1290,11 @@ void CommandLineParser::processArgs()
 		(m_args.count(g_strOptimize) > 0 && m_args.count(g_strNoOptimizeYul) == 0) ||
 		m_args.count(g_strOptimizeYul) > 0
 	);
+	m_options.optimizer.mlirOptimize = (m_args.count(g_strMlirOptimize) > 0);
+	m_options.optimizer.printMLIR = (m_args.count(g_strPrintMLIR) > 0);
+	m_options.optimizer.printMLIRYul = (m_args.count(g_strPrintMLIRYul) > 0);
+	if (m_args.count(g_strMlirFile))
+		m_options.optimizer.mlirFile = m_args[g_strMlirFile].as<std::string>();
 	if (!m_args[g_strOptimizeRuns].defaulted())
 		m_options.optimizer.expectedExecutionsPerDeployment = m_args.at(g_strOptimizeRuns).as<unsigned>();
 

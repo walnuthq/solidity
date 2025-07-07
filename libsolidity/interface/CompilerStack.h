@@ -222,6 +222,19 @@ public:
 	/// Sets the pipeline to go through the Yul IR or not.
 	/// Must be set before parsing.
 	void setViaIR(bool _viaIR);
+	
+	/// Sets whether to use MLIR optimization pipeline.
+	/// Must be set before parsing.
+	void setMLIROptimize(bool _mlirOptimize);
+	
+	/// Sets whether to print MLIR output.
+	void setPrintMLIR(bool _printMLIR) { m_printMLIR = _printMLIR; }
+	
+	/// Sets whether to print MLIR-generated Yul output.
+	void setPrintMLIRYul(bool _printMLIRYul) { m_printMLIRYul = _printMLIRYul; }
+	
+	/// Sets the file path to write optimized MLIR output.
+	void setMLIRFile(std::string const& _mlirFile) { m_mlirFile = _mlirFile; }
 
 	/// Set the EVM version used before running compile.
 	/// When called without an argument it will revert to the default version.
@@ -333,6 +346,9 @@ public:
 	std::optional<Json> yulIROptimizedAst(std::string const& _contractName) const;
 
 	std::optional<Json> yulCFGJson(std::string const& _contractName) const;
+
+	/// @returns the MLIR representation of a contract.
+	std::optional<std::string> const& mlirIR(std::string const& _contractName) const;
 
 	/// @returns the assembled object for a contract.
 	virtual evmasm::LinkerObject const& object(std::string const& _contractName) const override;
@@ -459,6 +475,7 @@ private:
 		evmasm::LinkerObject runtimeObject; ///< Runtime object.
 		std::optional<std::string> yulIR; ///< Yul IR code straight from the code generator.
 		std::optional<std::string> yulIROptimized; ///< Reparsed and possibly optimized Yul IR code.
+		std::optional<std::string> mlirIR; ///< MLIR code generated from AST.
 		util::LazyInit<std::string const> metadata; ///< The metadata json that will be hashed into the chain.
 		util::LazyInit<Json const> abi;
 		util::LazyInit<Json const> storageLayout;
@@ -607,6 +624,10 @@ private:
 	RevertStrings m_revertStrings = RevertStrings::Default;
 	State m_stopAfter = State::CompilationSuccessful;
 	bool m_viaIR = false;
+	bool m_mlirOptimize = false;
+	bool m_printMLIR = false;
+	bool m_printMLIRYul = false;
+	std::string m_mlirFile;
 	langutil::EVMVersion m_evmVersion;
 	std::optional<uint8_t> m_eofVersion;
 	ModelCheckerSettings m_modelCheckerSettings;
