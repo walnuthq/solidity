@@ -2237,13 +2237,13 @@ public:
 		return "!solidity.uint<256>";
 	}
 	
-	std::shared_ptr<yul::Object> lowerToYul(std::string const& _mlirModule, bool _printIntermediateMLIR = false, std::string const& _mlirFile = "")
+	std::shared_ptr<yul::Object> lowerToYul(std::string const& _mlirModule, bool _printIntermediateMLIR = false, std::string const& _mlirFile = "", bool _runAnalysis = false)
 	{
 		// Use the MLIRToYulLowering class to perform the conversion
 		MLIRToYulLowering lowering;
-		
+
 		// First optimize the MLIR module
-		std::string optimizedModule = lowering.optimize(_mlirModule, _printIntermediateMLIR, _mlirFile);
+		std::string optimizedModule = lowering.optimize(_mlirModule, _printIntermediateMLIR, _mlirFile, _runAnalysis);
 		
 		// Then lower to Yul
 		auto yulObject = lowering.lower(optimizedModule);
@@ -2323,7 +2323,7 @@ std::string MLIRGenerator::generate(ContractDefinition const& _contract)
 
 std::shared_ptr<yul::Object> MLIRGenerator::lowerToYul(std::string const& _mlirModule, bool _printIntermediateMLIR, std::string const& _mlirFile)
 {
-	return m_impl->lowerToYul(_mlirModule, _printIntermediateMLIR, _mlirFile);
+	return m_impl->lowerToYul(_mlirModule, _printIntermediateMLIR, _mlirFile, m_optimiserSettings.mlirAnalyze);
 }
 
 // ASTVisitor implementations

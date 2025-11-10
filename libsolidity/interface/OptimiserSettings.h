@@ -136,6 +136,8 @@ struct OptimiserSettings
 	bool optimizeStackAllocation = false;
 	/// Yul optimiser with default settings. Will only run on certain parts of the code for now.
 	bool runYulOptimiser = false;
+	/// Run MLIR security analysis passes.
+	bool mlirAnalyze = false;
 	/// Sequence of optimisation steps to be performed by Yul optimiser.
 	/// Note that there are some hard-coded steps in the optimiser and you cannot disable
 	/// them just by setting this to an empty string. Set @a runYulOptimiser to false if you want

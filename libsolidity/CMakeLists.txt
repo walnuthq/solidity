@@ -105,6 +105,8 @@ set(sources
 	codegen/mlir/MLIRGenerator.h
 	codegen/mlir/MLIRToYulLowering.cpp
 	codegen/mlir/MLIRToYulLowering.h
+	codegen/mlir/Passes/AccessControlAnalysisPass.cpp
+	codegen/mlir/Passes/AccessControlAnalysisPass.h
 	codegen/mlir/Passes/StorageCachingPass.cpp
 	codegen/mlir/Passes/StorageCachingPass.h
 	experimental/analysis/Analysis.cpp
@@ -241,10 +243,11 @@ if(MLIR_FOUND)
     # Link with Solidity dialect
     target_link_libraries(solidity PUBLIC SolidityDialect)
     
-    # Disable warnings for MLIR files  
+    # Disable warnings for MLIR files
     set_source_files_properties(
         codegen/mlir/MLIRGenerator.cpp
         codegen/mlir/MLIRToYulLowering.cpp
+        codegen/mlir/Passes/AccessControlAnalysisPass.cpp
         codegen/mlir/Passes/StorageCachingPass.cpp
         PROPERTIES COMPILE_FLAGS "-Wno-error -w"
     )

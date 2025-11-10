@@ -87,6 +87,7 @@ static std::string const g_strOptimize = "optimize";
 static std::string const g_strOptimizeRuns = "optimize-runs";
 static std::string const g_strOptimizeYul = "optimize-yul";
 static std::string const g_strMlirOptimize = "mlir-optimize";
+static std::string const g_strMlirAnalyze = "mlir-analyze";
 static std::string const g_strMlirFile = "mlir-file";
 static std::string const g_strPrintMLIR = "print-mlir";
 static std::string const g_strPrintMLIRYul = "print-mlir-yul";
@@ -256,6 +257,7 @@ bool CommandLineOptions::operator==(CommandLineOptions const& _other) const noex
 		optimizer.optimizeEvmasm == _other.optimizer.optimizeEvmasm &&
 		optimizer.optimizeYul == _other.optimizer.optimizeYul &&
 		optimizer.mlirOptimize == _other.optimizer.mlirOptimize &&
+		optimizer.mlirAnalyze == _other.optimizer.mlirAnalyze &&
 		optimizer.printMLIR == _other.optimizer.printMLIR &&
 		optimizer.printMLIRYul == _other.optimizer.printMLIRYul &&
 		optimizer.expectedExecutionsPerDeployment == _other.optimizer.expectedExecutionsPerDeployment &&
@@ -281,6 +283,8 @@ OptimiserSettings CommandLineOptions::optimiserSettings() const
 		// NOTE: Standard JSON disables optimizeStackAllocation by default when yul optimizer is disabled.
 		// --optimize --no-optimize-yul on the CLI does not have that effect.
 		settings.optimizeStackAllocation = true;
+
+	settings.mlirAnalyze = optimizer.mlirAnalyze;
 
 	if (optimizer.expectedExecutionsPerDeployment.has_value())
 		settings.expectedExecutionsPerDeployment = optimizer.expectedExecutionsPerDeployment.value();
@@ -860,6 +864,10 @@ General Information)").c_str(),
 			"Enable MLIR optimizer. Translates the AST to MLIR, applies optimizations, and lowers back to Yul."
 		)
 		(
+			g_strMlirAnalyze.c_str(),
+			"Enable MLIR security analysis. Runs analysis passes on MLIR to detect security issues (requires --mlir-optimize)."
+		)
+		(
 			g_strMlirFile.c_str(),
 			po::value<std::string>()->value_name("path"),
 			"Write the optimized MLIR intermediate representation to the specified file."
@@ -1291,6 +1299,7 @@ void CommandLineParser::processArgs()
 		m_args.count(g_strOptimizeYul) > 0
 	);
 	m_options.optimizer.mlirOptimize = (m_args.count(g_strMlirOptimize) > 0);
+	m_options.optimizer.mlirAnalyze = (m_args.count(g_strMlirAnalyze) > 0);
 	m_options.optimizer.printMLIR = (m_args.count(g_strPrintMLIR) > 0);
 	m_options.optimizer.printMLIRYul = (m_args.count(g_strPrintMLIRYul) > 0);
 	if (m_args.count(g_strMlirFile))

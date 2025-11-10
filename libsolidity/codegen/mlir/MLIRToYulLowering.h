@@ -51,8 +51,9 @@ public:
 	/// @param _mlirModule The MLIR module to optimize
 	/// @param _printIntermediateMLIR Whether to print MLIR after each pass
 	/// @param _mlirFile Path to write the optimized MLIR (empty string to skip)
+	/// @param _runAnalysis Whether to run security analysis passes
 	/// @returns Optimized MLIR module
-	std::string optimize(std::string const& _mlirModule, bool _printIntermediateMLIR = false, std::string const& _mlirFile = "");
+	std::string optimize(std::string const& _mlirModule, bool _printIntermediateMLIR = false, std::string const& _mlirFile = "", bool _runAnalysis = false);
 
 private:
 	class MLIRToYulLoweringImpl;

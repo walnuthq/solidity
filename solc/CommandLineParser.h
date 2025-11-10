@@ -237,6 +237,7 @@ struct CommandLineOptions
 		bool optimizeEvmasm = false;
 		bool optimizeYul = false;
 		bool mlirOptimize = false;
+		bool mlirAnalyze = false;
 		bool printMLIR = false;
 		bool printMLIRYul = false;
 		std::optional<std::string> mlirFile;

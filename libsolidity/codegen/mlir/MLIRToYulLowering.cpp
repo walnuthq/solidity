@@ -59,6 +59,7 @@
 
 #include <libsolidity/codegen/mlir/Dialect/SolidityDialect.h>
 #include <libsolidity/codegen/mlir/Passes/StorageCachingPass.h>
+#include <libsolidity/codegen/mlir/Passes/AccessControlAnalysisPass.h>
 
 #endif // SOLIDITY_HAS_MLIR
 
@@ -101,14 +102,28 @@ public:
 #endif
 	}
 	
-	std::string optimize(std::string const& _mlirModule, bool _printIntermediateMLIR = false, std::string const& _mlirFile = "")
+	std::string optimize(std::string const& _mlirModule, bool _printIntermediateMLIR = false, std::string const& _mlirFile = "", bool _runAnalysis = false)
 	{
 #ifdef SOLIDITY_HAS_MLIR
 		// Parse MLIR module
 		auto module = parseMLIR(_mlirModule);
 		if (!module)
 			return _mlirModule;
-		
+
+		// Set up diagnostic handler to capture warnings from MLIR passes
+		std::vector<std::string> mlirWarnings;
+		auto diagHandler = std::make_unique<mlir::ScopedDiagnosticHandler>(
+			m_context.get(),
+			[&mlirWarnings](mlir::Diagnostic& diag) -> mlir::LogicalResult {
+				if (diag.getSeverity() == mlir::DiagnosticSeverity::Warning) {
+					// Extract just the message string, not the full diagnostic with location
+					mlirWarnings.push_back(diag.str());
+					return mlir::success();  // Mark as handled
+				}
+				return mlir::failure();  // Let other diagnostics be handled normally
+			}
+		);
+
 		// Create a pass manager and add optimization passes
 		mlir::PassManager pm(m_context.get());
 		
@@ -138,7 +153,12 @@ public:
 		
 		// Add our custom storage caching pass at module level
 		pm.addPass(mlir::solidity::createStorageCachingPass());
-		
+
+		// Add security analysis pass if requested
+		if (_runAnalysis) {
+			pm.addPass(mlir::solidity::createAccessControlAnalysisPass());
+		}
+
 		// Add standard MLIR optimization passes
 		// Note: CSE needs to run on func::FuncOp, but we don't have those in Solidity dialect
 		// pm.addNestedPass<mlir::func::FuncOp>(mlir::createCSEPass());  // Would need func::FuncOp
@@ -151,11 +171,18 @@ public:
 			// If optimization fails, return the original module
 			return _mlirModule;
 		}
-		
+
 		if (_printIntermediateMLIR) {
 			llvm::errs() << "\n=== MLIR Optimization Pipeline Complete ===\n";
 		}
-		
+
+		// Output collected warnings from MLIR passes
+		for (const auto& warning : mlirWarnings) {
+			// Format: "Warning: <message>"
+			// Extract the actual warning message (MLIR diagnostics have location info we don't need)
+			std::cerr << "Warning: " << warning << "\n";
+		}
+
 		// Convert optimized module back to string
 		std::string optimizedModule;
 		llvm::raw_string_ostream stream(optimizedModule);
@@ -3700,9 +3727,9 @@ std::shared_ptr<yul::Object> MLIRToYulLowering::lower(std::string const& _mlirMo
 	return m_impl->lower(_mlirModule);
 }
 
-std::string MLIRToYulLowering::optimize(std::string const& _mlirModule, bool _printIntermediateMLIR, std::string const& _mlirFile)
+std::string MLIRToYulLowering::optimize(std::string const& _mlirModule, bool _printIntermediateMLIR, std::string const& _mlirFile, bool _runAnalysis)
 {
-	return m_impl->optimize(_mlirModule, _printIntermediateMLIR, _mlirFile);
+	return m_impl->optimize(_mlirModule, _printIntermediateMLIR, _mlirFile, _runAnalysis);
 }
 
 } // namespace solidity::frontend
