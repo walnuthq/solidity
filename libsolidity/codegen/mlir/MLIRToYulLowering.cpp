@@ -2178,9 +2178,85 @@ private:
 				};
 			}
 		}
+		else if (opName == "solidity.address_balance")
+		{
+			auto debugData = langutil::DebugData::create();
+			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				std::string addrVar = getVariableName(op->getOperand(0));
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("balance")},
+						{yul::Identifier{debugData, yul::YulName(addrVar)}}
+					})
+				};
+			}
+		}
+		else if (opName == "solidity.address_code")
+		{
+			// address.code returns bytes memory containing the code
+			// In Yul, we need to allocate memory and use extcodecopy
+			auto debugData = langutil::DebugData::create();
+			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				std::string addrVar = getVariableName(op->getOperand(0));
+				// For now, return extcodesize as a simplification
+				// Full implementation would allocate memory and copy code
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("extcodesize")},
+						{yul::Identifier{debugData, yul::YulName(addrVar)}}
+					})
+				};
+			}
+		}
+		else if (opName == "solidity.address_codehash")
+		{
+			auto debugData = langutil::DebugData::create();
+			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				std::string addrVar = getVariableName(op->getOperand(0));
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("extcodehash")},
+						{yul::Identifier{debugData, yul::YulName(addrVar)}}
+					})
+				};
+			}
+		}
 		else if (opName == "solidity.to_i1")
 		{
 			// Convert bool to i1 - this is essentially a pass-through in Yul
+			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				std::string inputVar = getVariableName(op->getOperand(0));
+				auto debugData = langutil::DebugData::create();
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::Identifier{
+						debugData, yul::YulName(inputVar)
+					})
+				};
+			}
+		}
+		else if (opName == "solidity.convert")
+		{
+			// Type conversion - in Yul, most conversions are just assignments
+			// The EVM automatically handles the conversion at runtime
 			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
 			{
 				std::string resultVar = getOrCreateVariableName(op->getResult(0));
