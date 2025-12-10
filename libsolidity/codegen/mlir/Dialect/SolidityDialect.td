@@ -419,6 +419,17 @@ def Solidity_ToI1Op : Solidity_Op<"to_i1", [Pure]> {
   let assemblyFormat = "$input attr-dict `:` type($input) `->` type($output)";
 }
 
+def Solidity_ConvertOp : Solidity_Op<"convert", [Pure]> {
+  let summary = "Type conversion between Solidity types";
+  let description = [{
+    Converts a value from one Solidity type to another.
+    Used for explicit type conversions like address(x), uint256(x), etc.
+  }];
+  let arguments = (ins Solidity_AnyType:$input);
+  let results = (outs Solidity_AnyType:$output);
+  let assemblyFormat = "$input attr-dict `:` type($input) `->` type($output)";
+}
+
 // Array operations
 def Solidity_ArrayPushOp : Solidity_Op<"array_push"> {
   let summary = "Push element to dynamic array";
@@ -458,12 +469,43 @@ def Solidity_MemberAccessOp : Solidity_Op<"member_access", [Pure]> {
   let description = [{
     Accesses a member of a struct or a property (like length) of an array.
   }];
-  let arguments = (ins 
+  let arguments = (ins
     Solidity_AnyType:$object,
     StrAttr:$member
   );
   let results = (outs Solidity_AnyType:$result);
   let assemblyFormat = "$object $member attr-dict `:` type($object) `->` type($result)";
+}
+
+// Address member access operations
+def Solidity_AddressBalanceOp : Solidity_Op<"address_balance", [Pure]> {
+  let summary = "Get balance of an address";
+  let description = [{
+    Returns the balance in wei of the given address.
+  }];
+  let arguments = (ins Solidity_AddressType:$address);
+  let results = (outs Solidity_UIntType:$balance);
+  let assemblyFormat = "$address attr-dict `:` type($address) `->` type($balance)";
+}
+
+def Solidity_AddressCodeOp : Solidity_Op<"address_code", [Pure]> {
+  let summary = "Get code at an address";
+  let description = [{
+    Returns the contract code at the given address as a bytes array.
+  }];
+  let arguments = (ins Solidity_AddressType:$address);
+  let results = (outs Solidity_ArrayType:$code);
+  let assemblyFormat = "$address attr-dict `:` type($address) `->` type($code)";
+}
+
+def Solidity_AddressCodehashOp : Solidity_Op<"address_codehash", [Pure]> {
+  let summary = "Get codehash of an address";
+  let description = [{
+    Returns the keccak256 hash of the contract code at the given address.
+  }];
+  let arguments = (ins Solidity_AddressType:$address);
+  let results = (outs Solidity_BytesType:$codehash);
+  let assemblyFormat = "$address attr-dict `:` type($address) `->` type($codehash)";
 }
 
 // Control flow operations

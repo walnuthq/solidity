@@ -19,6 +19,7 @@
 #include <libsolidity/codegen/mlir/MLIRGenerator.h>
 #include <libsolidity/codegen/mlir/MLIRToYulLowering.h>
 #include <libsolidity/ast/AST.h>
+#include <libsolidity/ast/ASTAnnotations.h>
 #include <libsolidity/ast/Types.h>
 #include <libsolidity/interface/CompilerStack.h>
 
@@ -803,7 +804,36 @@ public:
 				memberState.addTypes(translateSolidityType(*_expr.annotation().type));
 				return m_builder->create(memberState)->getResult(0);
 			}
-			
+			// Handle address member access (balance, code, codehash)
+			else if (dynamic_cast<AddressType const*>(baseType))
+			{
+				if (memberName == "balance")
+				{
+					mlir::OperationState balanceState(loc, "solidity.address_balance");
+					balanceState.addOperands(base);
+					balanceState.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
+					return m_builder->create(balanceState)->getResult(0);
+				}
+				else if (memberName == "code")
+				{
+					mlir::OperationState codeState(loc, "solidity.address_code");
+					codeState.addOperands(base);
+					// bytes is a dynamic array of uint8, size -1 indicates dynamic
+					codeState.addTypes(mlir::solidity::ArrayType::get(
+						mlir::solidity::UIntType::get(m_context.get(), 8),
+						/*size=*/-1
+					));
+					return m_builder->create(codeState)->getResult(0);
+				}
+				else if (memberName == "codehash")
+				{
+					mlir::OperationState codehashState(loc, "solidity.address_codehash");
+					codehashState.addOperands(base);
+					codehashState.addTypes(mlir::solidity::BytesType::get(m_context.get(), 32));
+					return m_builder->create(codehashState)->getResult(0);
+				}
+			}
+
 			// Return base for unhandled member access
 			return base;
 		}
@@ -902,8 +932,25 @@ public:
 					return nullptr;
 				}
 			}
+
+			// Handle type conversions (e.g., address(this), uint256(x))
+			if (funcCall->annotation().kind.set() && *funcCall->annotation().kind == FunctionCallKind::TypeConversion)
+			{
+				// Get the argument to convert
+				if (!funcCall->arguments().empty())
+				{
+					auto argValue = generateSolidityExpression(*funcCall->arguments()[0]);
+					auto targetType = translateSolidityType(*funcCall->annotation().type);
+
+					// Create a type conversion operation
+					mlir::OperationState convertState(loc, "solidity.convert");
+					convertState.addOperands(argValue);
+					convertState.addTypes(targetType);
+					return m_builder->create(convertState)->getResult(0);
+				}
+			}
 		}
-		
+
 		// Return dummy value for unhandled cases
 		// Create a default value to avoid segfaults
 		auto dummyType = mlir::solidity::UIntType::get(m_context.get(), 256);
