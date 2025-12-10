@@ -925,11 +925,14 @@ public:
 				mlir::OperationState uncheckedState(loc, "solidity.unchecked");
 				uncheckedState.addRegion();
 				auto uncheckedOp = m_builder->create(uncheckedState);
-				
+
 				// Generate body region with overflow checking disabled
 				m_builder->setInsertionPointToEnd(&uncheckedOp->getRegion(0).emplaceBlock());
 				for (auto const& stmt : block->statements())
 					generateSolidityStatement(*stmt);
+
+				// Reset insertion point after the unchecked block
+				m_builder->setInsertionPointAfter(uncheckedOp);
 			}
 			else
 			{
@@ -1585,6 +1588,51 @@ public:
 		{
 			if (varDeclStmt->initialValue())
 			{
+				auto const& declarations = varDeclStmt->declarations();
+
+				// Check if this is tuple destructuring (multiple declarations)
+				// For cases like: (bool ok, ) = msg.sender.call{value: bal}("")
+				if (declarations.size() > 1)
+				{
+					// For tuple destructuring, create values with correct types for each declaration
+					// The initialValue might return a tuple, but we handle each component separately
+					for (auto const& decl : declarations)
+					{
+						if (decl)
+						{
+							// Create a value with the declaration's actual type
+							auto declType = translateSolidityType(*decl->type());
+							auto declLoc = this->loc(*decl);
+
+							// Generate a placeholder value with the correct type
+							// This handles cases like low-level calls returning (bool, bytes)
+							if (dynamic_cast<BoolType const*>(decl->type()))
+							{
+								// For bool declarations, create a bool constant (will be set by the call)
+								mlir::OperationState boolState(declLoc, "solidity.constant");
+								boolState.addAttribute("value", m_builder->getBoolAttr(false));
+								boolState.addTypes(mlir::solidity::BoolType::get(m_context.get()));
+								auto boolValue = m_builder->create(boolState)->getResult(0);
+								m_valueMap[decl->id()] = boolValue;
+							}
+							else
+							{
+								// For other types, create appropriate placeholder
+								mlir::OperationState constState(declLoc, "solidity.constant");
+								constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
+								constState.addTypes(declType);
+								auto value = m_builder->create(constState)->getResult(0);
+								m_valueMap[decl->id()] = value;
+							}
+						}
+					}
+					// Generate the actual expression (e.g., the low-level call)
+					// This is done for side effects
+					generateSolidityExpression(*varDeclStmt->initialValue());
+					return mlir::Value();
+				}
+
+				// Single declaration.
 				auto value = generateSolidityExpression(*varDeclStmt->initialValue());
 				if (!value)
 				{
@@ -1597,7 +1645,7 @@ public:
 					constState.addTypes(type);
 					value = m_builder->create(constState)->getResult(0);
 				}
-				for (auto const& decl : varDeclStmt->declarations())
+				for (auto const& decl : declarations)
 				{
 					if (decl)
 						m_valueMap[decl->id()] = value;

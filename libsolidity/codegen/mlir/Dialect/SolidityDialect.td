@@ -467,7 +467,7 @@ def Solidity_MemberAccessOp : Solidity_Op<"member_access", [Pure]> {
 }
 
 // Control flow operations
-def Solidity_UncheckedOp : Solidity_Op<"unchecked", [RecursiveMemoryEffects]> {
+def Solidity_UncheckedOp : Solidity_Op<"unchecked", [RecursiveMemoryEffects, NoTerminator]> {
   let summary = "Unchecked arithmetic block";
   let description = [{
     Represents an unchecked block where arithmetic operations don't check for overflow.
