@@ -952,14 +952,14 @@ public:
 		}
 
 		// Return dummy value for unhandled cases
-		// Create a default value to avoid segfaults
-		auto dummyType = mlir::solidity::UIntType::get(m_context.get(), 256);
+		// Create a default value with the correct type to avoid type mismatches
+		auto dummyType = translateSolidityType(*_expr.annotation().type);
 		mlir::OperationState constState(loc, "solidity.constant");
 		constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
 		constState.addTypes(dummyType);
 		return m_builder->create(constState)->getResult(0);
 	}
-	
+
 	mlir::Value generateSolidityStatement(Statement const& _stmt)
 	{
 		auto loc = this->loc(_stmt);
@@ -1627,6 +1627,18 @@ public:
 			}
 			return nullptr; // Return null to indicate we've handled the terminator
 		}
+		else if (auto* revertStmt = dynamic_cast<RevertStatement const*>(&_stmt))
+		{
+			// Handle revert statement with custom error
+			mlir::OperationState revertState(loc, "solidity.revert");
+			// Get the error name from the function call if possible
+			if (auto* ident = dynamic_cast<Identifier const*>(&revertStmt->errorCall().expression()))
+			{
+				revertState.addAttribute("reason", m_builder->getStringAttr(ident->name()));
+			}
+			m_builder->create(revertState);
+			return nullptr; // Revert is a terminator
+		}
 		else if (auto* exprStmt = dynamic_cast<ExpressionStatement const*>(&_stmt))
 		{
 			return generateSolidityExpression(exprStmt->expression());
@@ -2168,16 +2180,16 @@ public:
 				return base;
 			}
 		}
-		
+
 		// Return dummy value for unhandled cases
-		// Create a default value to avoid segfaults
-		auto dummyType = mlir::solidity::UIntType::get(m_context.get(), 256);
+		// Create a default value with the correct type to avoid type mismatches
+		auto dummyType = translateType(*_expr.annotation().type);
 		mlir::OperationState constState(loc, "solidity.constant");
 		constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
 		constState.addTypes(dummyType);
 		return m_builder->create(constState)->getResult(0);
 	}
-	
+
 	void generateStatement(Statement const& _stmt)
 	{
 		auto loc = this->loc(_stmt);
