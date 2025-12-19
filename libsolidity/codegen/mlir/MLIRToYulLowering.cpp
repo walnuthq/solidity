@@ -1457,6 +1457,9 @@ private:
 					numResults = funcOp->getNumResults();
 				}
 				
+				// Construct unique function name with param count for overloaded functions
+				std::string uniqueFuncName = "fun_" + funcName + "_" + std::to_string(numParams);
+
 				if (numResults > 0)
 				{
 					// Call function and store result
@@ -1465,7 +1468,7 @@ private:
 						{{debugData, yul::YulName("ret")}},
 						std::make_unique<yul::Expression>(yul::FunctionCall{
 							debugData,
-							yul::Identifier{debugData, yul::YulName("fun_" + funcName)},
+							yul::Identifier{debugData, yul::YulName(uniqueFuncName)},
 							args
 						})
 					});
@@ -1521,7 +1524,7 @@ private:
 						debugData,
 						yul::FunctionCall{
 							debugData,
-							yul::Identifier{debugData, yul::YulName("fun_" + funcName)},
+							yul::Identifier{debugData, yul::YulName(uniqueFuncName)},
 							args
 						}
 					});
@@ -1586,20 +1589,30 @@ private:
 	std::optional<yul::FunctionDefinition> generateExternalFunctionWrapper(mlir::Operation* funcOp)
 	{
 		auto debugData = langutil::DebugData::create();
-		
+
 		// Get function name
 		std::string funcName = "unknown";
 		if (auto nameAttr = funcOp->getAttrOfType<mlir::StringAttr>("sym_name"))
 			funcName = nameAttr.getValue().str();
-		
-		// External wrapper name
-		std::string wrapperName = "external_fun_" + funcName + "_9"; // Adding ID like regular pipeline
-		
+
+		// Get number of parameters for unique naming
+		int numParams = 0;
+		if (auto typeAttr = funcOp->getAttrOfType<mlir::TypeAttr>("function_type"))
+		{
+			auto funcType = typeAttr.getValue().cast<mlir::FunctionType>();
+			numParams = funcType.getInputs().size();
+		}
+
+		// External wrapper name with param count for overloaded functions
+		std::string wrapperName = "external_fun_" + funcName + "_" + std::to_string(numParams);
+		// Internal function name with param count
+		std::string internalFuncName = "fun_" + funcName + "_" + std::to_string(numParams);
+
 		yul::NameWithDebugDataList params; // No parameters for external wrapper
 		yul::NameWithDebugDataList returns; // No returns for external wrapper
-		
+
 		std::vector<yul::Statement> bodyStatements;
-		
+
 		// Add callvalue check for non-payable functions
 		std::vector<yul::Statement> revertBody;
 		revertBody.push_back(yul::ExpressionStatement{
@@ -1610,7 +1623,7 @@ private:
 				{}
 			}
 		});
-		
+
 		yul::If callvalueCheck{debugData};
 		callvalueCheck.condition = std::make_unique<yul::Expression>(yul::FunctionCall{
 			debugData,
@@ -1620,14 +1633,9 @@ private:
 		callvalueCheck.body = yul::Block{debugData, std::move(revertBody)};
 		bodyStatements.push_back(std::move(callvalueCheck));
 		
-		// Get function parameters
-		int numParams = 0;
+		// Decode function parameters from calldata
 		std::vector<yul::Expression> decodedParams;
-		if (auto typeAttr = funcOp->getAttrOfType<mlir::TypeAttr>("function_type"))
 		{
-			auto funcType = typeAttr.getValue().cast<mlir::FunctionType>();
-			numParams = funcType.getInputs().size();
-			
 			// Decode parameters from calldata
 			for (int i = 0; i < numParams; ++i)
 			{
@@ -1691,13 +1699,13 @@ private:
 		
 		if (numResults > 0)
 		{
-			// let ret_0 := fun_funcName(param_0, param_1, ...)
+			// let ret_0 := fun_funcName_N(param_0, param_1, ...)
 			bodyStatements.push_back(yul::VariableDeclaration{
 				debugData,
 				{{debugData, yul::YulName("ret_0")}},
 				std::make_unique<yul::Expression>(yul::FunctionCall{
 					debugData,
-					yul::Identifier{debugData, yul::YulName("fun_" + funcName)},
+					yul::Identifier{debugData, yul::YulName(internalFuncName)},
 					decodedParams
 				})
 			});
@@ -1754,7 +1762,7 @@ private:
 				debugData,
 				yul::FunctionCall{
 					debugData,
-					yul::Identifier{debugData, yul::YulName("fun_" + funcName)},
+					yul::Identifier{debugData, yul::YulName(internalFuncName)},
 					decodedParams
 				}
 			});
@@ -1778,30 +1786,36 @@ private:
 		std::string funcName = "unknown";
 		if (auto nameAttr = funcOp->getAttrOfType<mlir::StringAttr>("sym_name"))
 			funcName = nameAttr.getValue().str();
-		
+
 		// Skip special functions
 		if (funcName == "receive" || funcName == "fallback" || funcName == "_")
 			return std::nullopt;
-		
-		// Prefix function name to avoid conflicts
-		std::string safeFuncName = "fun_" + funcName;
-		
-		// Set current function context for scoping
-		m_currentFunction = safeFuncName;
-		m_functionVarCounter = 0; // Reset function-local variable counter
-		
-		// Initialize function-scoped variable mapping
-		if (m_functionScopedNames.find(safeFuncName) == m_functionScopedNames.end()) {
-			m_functionScopedNames[safeFuncName] = std::map<void*, yul::YulName>();
-		}
-		
-		// Parameters
-		yul::NameWithDebugDataList params;
+
+		// Get number of parameters first for unique naming of overloaded functions
 		int numParams = 0;
 		if (funcOp->getNumRegions() > 0 && !funcOp->getRegion(0).empty())
 		{
 			auto& entryBlock = funcOp->getRegion(0).front();
 			numParams = entryBlock.getNumArguments();
+		}
+
+		// Prefix function name with parameter count to avoid conflicts for overloaded functions
+		std::string safeFuncName = "fun_" + funcName + "_" + std::to_string(numParams);
+
+		// Set current function context for scoping
+		m_currentFunction = safeFuncName;
+		m_functionVarCounter = 0; // Reset function-local variable counter
+
+		// Initialize function-scoped variable mapping
+		if (m_functionScopedNames.find(safeFuncName) == m_functionScopedNames.end()) {
+			m_functionScopedNames[safeFuncName] = std::map<void*, yul::YulName>();
+		}
+
+		// Parameters
+		yul::NameWithDebugDataList params;
+		if (funcOp->getNumRegions() > 0 && !funcOp->getRegion(0).empty())
+		{
+			auto& entryBlock = funcOp->getRegion(0).front();
 			
 			for (int i = 0; i < numParams; ++i)
 			{
@@ -3435,14 +3449,14 @@ private:
 	std::optional<yul::Statement> processFunctionCallOpToAST(mlir::Operation* op)
 	{
 		auto debugData = langutil::DebugData::create();
-		
+
 		std::string funcName = "unknown";
 		if (auto nameAttr = op->getAttrOfType<mlir::StringAttr>("callee"))
 			funcName = nameAttr.getValue().str();
-		
-		// Prefix function name unless it's a builtin
+
+		// Prefix function name with param count unless it's a builtin (for overloaded functions)
 		if (!isYulBuiltin(funcName))
-			funcName = "fun_" + funcName;
+			funcName = "fun_" + funcName + "_" + std::to_string(op->getNumOperands());
 		
 		std::vector<yul::Expression> args;
 		for (unsigned i = 0; i < op->getNumOperands(); ++i)
