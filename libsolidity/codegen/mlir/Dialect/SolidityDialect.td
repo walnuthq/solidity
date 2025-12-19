@@ -364,9 +364,8 @@ def Solidity_ForOp : Solidity_Op<"for", [RecursiveMemoryEffects]> {
 }
 
 // Return operation
-def Solidity_ReturnOp : Solidity_Op<"return", [
-    Pure, HasParent<"FunctionOp">, Terminator
-  ]> {
+// Note: HasParent<"FunctionOp"> removed to allow returns inside nested regions (if blocks, etc.)
+def Solidity_ReturnOp : Solidity_Op<"return", [Pure, Terminator]> {
   let summary = "Return from function";
   let arguments = (ins Variadic<Solidity_AnyType>:$operands);
   let assemblyFormat = "($operands^ `:` type($operands))? attr-dict";
