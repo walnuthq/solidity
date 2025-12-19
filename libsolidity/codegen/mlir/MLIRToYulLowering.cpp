@@ -1975,6 +1975,11 @@ private:
 		{
 			return processUnaryOpToAST(op, "not");
 		}
+		else if (opName == "solidity.logical_not")
+		{
+			// Logical NOT uses iszero in Yul
+			return processUnaryOpToAST(op, "iszero");
+		}
 		else if (opName == "solidity.shl")
 		{
 			return processArithmeticOpToAST(op, "shl");
