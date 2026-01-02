@@ -29,6 +29,7 @@
 #include <libsolutil/FunctionSelector.h>
 #include <libsolutil/CommonData.h>
 
+#include <algorithm>
 #include <sstream>
 #include <stack>
 #include <map>
@@ -1456,9 +1457,9 @@ private:
 				{
 					numResults = funcOp->getNumResults();
 				}
-				
-				// Construct unique function name with param count for overloaded functions
-				std::string uniqueFuncName = "fun_" + funcName + "_" + std::to_string(numParams);
+
+				// Construct unique function name with param types for overloaded functions
+				std::string uniqueFuncName = getUniqueFuncName(funcOp);
 
 				if (numResults > 0)
 				{
@@ -1595,7 +1596,7 @@ private:
 		if (auto nameAttr = funcOp->getAttrOfType<mlir::StringAttr>("sym_name"))
 			funcName = nameAttr.getValue().str();
 
-		// Get number of parameters for unique naming
+		// Get number of parameters for calldata decoding
 		int numParams = 0;
 		if (auto typeAttr = funcOp->getAttrOfType<mlir::TypeAttr>("function_type"))
 		{
@@ -1603,10 +1604,10 @@ private:
 			numParams = funcType.getInputs().size();
 		}
 
-		// External wrapper name with param count for overloaded functions
-		std::string wrapperName = "external_fun_" + funcName + "_" + std::to_string(numParams);
-		// Internal function name with param count
-		std::string internalFuncName = "fun_" + funcName + "_" + std::to_string(numParams);
+		// External wrapper name with param types for overloaded functions
+		std::string wrapperName = getUniqueFuncName(funcOp, "external_fun_");
+		// Internal function name with param types
+		std::string internalFuncName = getUniqueFuncName(funcOp);
 
 		yul::NameWithDebugDataList params; // No parameters for external wrapper
 		yul::NameWithDebugDataList returns; // No returns for external wrapper
@@ -1791,7 +1792,7 @@ private:
 		if (funcName == "receive" || funcName == "fallback" || funcName == "_")
 			return std::nullopt;
 
-		// Get number of parameters first for unique naming of overloaded functions
+		// Get number of parameters for processing
 		int numParams = 0;
 		if (funcOp->getNumRegions() > 0 && !funcOp->getRegion(0).empty())
 		{
@@ -1799,8 +1800,8 @@ private:
 			numParams = entryBlock.getNumArguments();
 		}
 
-		// Prefix function name with parameter count to avoid conflicts for overloaded functions
-		std::string safeFuncName = "fun_" + funcName + "_" + std::to_string(numParams);
+		// Prefix function name with parameter types to avoid conflicts for overloaded functions
+		std::string safeFuncName = getUniqueFuncName(funcOp);
 
 		// Set current function context for scoping
 		m_currentFunction = safeFuncName;
@@ -3454,10 +3455,10 @@ private:
 		if (auto nameAttr = op->getAttrOfType<mlir::StringAttr>("callee"))
 			funcName = nameAttr.getValue().str();
 
-		// Prefix function name with param count unless it's a builtin (for overloaded functions)
+		// Prefix function name with param types unless it's a builtin (for overloaded functions)
 		if (!isYulBuiltin(funcName))
-			funcName = "fun_" + funcName + "_" + std::to_string(op->getNumOperands());
-		
+			funcName = getUniqueFuncNameForCall(op, funcName);
+
 		std::vector<yul::Expression> args;
 		for (unsigned i = 0; i < op->getNumOperands(); ++i)
 		{
@@ -3551,17 +3552,50 @@ private:
 				return "uint256"; // Fallback
 		}
 		
-		// Check for string representation in type name (fallback for custom types)
-		std::string typeStr = type.getDialect().getNamespace().str() + ".";
-		
 		// Extract type name from MLIR representation
 		std::string fullTypeStr;
 		{
 			llvm::raw_string_ostream stream(fullTypeStr);
 			type.print(stream);
 		}
-		
+
+		// Handle array types first - they contain nested types like !solidity.array<!solidity.bytes<1>, -1>
+		if (fullTypeStr.find("array") != std::string::npos)
+		{
+			// Check if it's a dynamic array (bytes type represented as array of bytes1)
+			if (fullTypeStr.find("bytes<1>") != std::string::npos &&
+			    (fullTypeStr.find("-1") != std::string::npos || fullTypeStr.find(", -1>") != std::string::npos))
+			{
+				return "bytes"; // Dynamic bytes = array of bytes1
+			}
+			// Check for dynamic array of other types
+			if (fullTypeStr.find("-1") != std::string::npos)
+			{
+				// Try to extract element type
+				if (fullTypeStr.find("uint") != std::string::npos)
+					return "uint256_arr";
+				else if (fullTypeStr.find("int") != std::string::npos)
+					return "int256_arr";
+				else if (fullTypeStr.find("address") != std::string::npos)
+					return "address_arr";
+				else if (fullTypeStr.find("bool") != std::string::npos)
+					return "bool_arr";
+				return "array"; // Generic dynamic array
+			}
+			else
+			{
+				return "fixedarray"; // Fixed-size array
+			}
+		}
+
+		// Handle dynbytes type (dynamic bytes in our dialect)
+		if (fullTypeStr.find("dynbytes") != std::string::npos)
+		{
+			return "bytes";
+		}
+
 		// Try to extract Solidity type from MLIR representation
+		// Check for uint first (before int, since "uint" contains "int")
 		if (fullTypeStr.find("uint") != std::string::npos)
 		{
 			// Extract width from !solidity.uint<256> format
@@ -3570,11 +3604,14 @@ private:
 			if (start != std::string::npos && end != std::string::npos && end > start)
 			{
 				std::string widthStr = fullTypeStr.substr(start + 1, end - start - 1);
-				return "uint" + widthStr;
+				// Validate that widthStr is numeric
+				bool isNumeric = !widthStr.empty() && std::all_of(widthStr.begin(), widthStr.end(), ::isdigit);
+				if (isNumeric)
+					return "uint" + widthStr;
 			}
 			return "uint256"; // Default uint
 		}
-		else if (fullTypeStr.find("int") != std::string::npos)
+		else if (fullTypeStr.find("int") != std::string::npos && fullTypeStr.find("uint") == std::string::npos)
 		{
 			// Extract width from !solidity.int<256> format
 			size_t start = fullTypeStr.find("<");
@@ -3582,7 +3619,10 @@ private:
 			if (start != std::string::npos && end != std::string::npos && end > start)
 			{
 				std::string widthStr = fullTypeStr.substr(start + 1, end - start - 1);
-				return "int" + widthStr;
+				// Validate that widthStr is numeric
+				bool isNumeric = !widthStr.empty() && std::all_of(widthStr.begin(), widthStr.end(), ::isdigit);
+				if (isNumeric)
+					return "int" + widthStr;
 			}
 			return "int256"; // Default int
 		}
@@ -3607,7 +3647,10 @@ private:
 				if (start != std::string::npos && end != std::string::npos && end > start)
 				{
 					std::string sizeStr = fullTypeStr.substr(start + 1, end - start - 1);
-					return "bytes" + sizeStr;
+					// Validate that sizeStr is numeric
+					bool isNumeric = !sizeStr.empty() && std::all_of(sizeStr.begin(), sizeStr.end(), ::isdigit);
+					if (isNumeric)
+						return "bytes" + sizeStr;
 				}
 				return "bytes32"; // Default fixed bytes
 			}
@@ -3616,11 +3659,74 @@ private:
 		{
 			return "string";
 		}
-		
-		// Default fallback - assume uint256 for unknown types
-		return "uint256";
+
+		// Default fallback - return a sanitized version of the type
+		// This ensures we always return a valid Yul identifier
+		return "unknowntype";
 	}
-	
+
+	// Generate a unique function name based on function name and parameter types
+	// This is necessary for function overloading where multiple functions have the same
+	// name but different parameter types (e.g., foo(int256) vs foo(uint256))
+	std::string getUniqueFuncName(mlir::Operation* funcOp, const std::string& prefix = "fun_")
+	{
+		std::string funcName = "unknown";
+		if (auto nameAttr = funcOp->getAttrOfType<mlir::StringAttr>("sym_name"))
+			funcName = nameAttr.getValue().str();
+
+		// Build type signature suffix from parameter types
+		std::string typeSuffix;
+		if (auto typeAttr = funcOp->getAttrOfType<mlir::TypeAttr>("function_type"))
+		{
+			auto funcType = typeAttr.getValue().cast<mlir::FunctionType>();
+			auto inputTypes = funcType.getInputs();
+
+			for (size_t i = 0; i < inputTypes.size(); ++i)
+			{
+				if (i > 0) typeSuffix += "_";
+				typeSuffix += extractSolidityTypeString(inputTypes[i]);
+			}
+		}
+		else if (funcOp->getNumRegions() > 0 && !funcOp->getRegion(0).empty())
+		{
+			// Fallback: extract types from block arguments
+			auto& entryBlock = funcOp->getRegion(0).front();
+			int numParams = entryBlock.getNumArguments();
+
+			for (int i = 0; i < numParams; ++i)
+			{
+				if (i > 0) typeSuffix += "_";
+				auto argType = entryBlock.getArgument(i).getType();
+				typeSuffix += extractSolidityTypeString(argType);
+			}
+		}
+
+		// If no parameters, just use "0" for consistency
+		if (typeSuffix.empty())
+			typeSuffix = "0";
+
+		return prefix + funcName + "_" + typeSuffix;
+	}
+
+	// Generate unique function name for call operations based on operand types
+	std::string getUniqueFuncNameForCall(mlir::Operation* callOp, const std::string& funcName)
+	{
+		std::string typeSuffix;
+
+		for (unsigned i = 0; i < callOp->getNumOperands(); ++i)
+		{
+			if (i > 0) typeSuffix += "_";
+			auto operandType = callOp->getOperand(i).getType();
+			typeSuffix += extractSolidityTypeString(operandType);
+		}
+
+		// If no parameters, just use "0" for consistency
+		if (typeSuffix.empty())
+			typeSuffix = "0";
+
+		return "fun_" + funcName + "_" + typeSuffix;
+	}
+
 	bool isYulBuiltin(const std::string& name)
 	{
 		// Common Yul builtins - expand this list as needed
