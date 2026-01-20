@@ -769,7 +769,79 @@ public:
 		}
 		else if (auto* memberAccess = dynamic_cast<MemberAccess const*>(&_expr))
 		{
-			// Handle member access (e.g., array.length, struct.field)
+			// Handle member access (e.g., array.length, struct.field, msg.sender)
+			std::string memberName = memberAccess->memberName();
+			auto baseType = memberAccess->expression().annotation().type;
+
+			// Handle msg.sender, msg.value, etc. (MagicType members)
+			if (auto* magicType = dynamic_cast<MagicType const*>(baseType))
+			{
+				if (magicType->kind() == MagicType::Kind::Message)
+				{
+					if (memberName == "sender")
+					{
+						mlir::OperationState senderState(loc, "solidity.msg_sender");
+						senderState.addTypes(mlir::solidity::AddressType::get(m_context.get()));
+						return m_builder->create(senderState)->getResult(0);
+					}
+					else if (memberName == "value")
+					{
+						mlir::OperationState valueState(loc, "solidity.msg_value");
+						valueState.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
+						return m_builder->create(valueState)->getResult(0);
+					}
+					else if (memberName == "data")
+					{
+						mlir::OperationState dataState(loc, "solidity.msg_data");
+						dataState.addTypes(mlir::solidity::ArrayType::get(
+							mlir::solidity::UIntType::get(m_context.get(), 8), -1));
+						return m_builder->create(dataState)->getResult(0);
+					}
+					else if (memberName == "sig")
+					{
+						mlir::OperationState sigState(loc, "solidity.msg_sig");
+						sigState.addTypes(mlir::solidity::BytesType::get(m_context.get(), 4));
+						return m_builder->create(sigState)->getResult(0);
+					}
+				}
+				else if (magicType->kind() == MagicType::Kind::Block)
+				{
+					if (memberName == "timestamp")
+					{
+						mlir::OperationState timestampState(loc, "solidity.block_timestamp");
+						timestampState.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
+						return m_builder->create(timestampState)->getResult(0);
+					}
+					else if (memberName == "number")
+					{
+						mlir::OperationState numberState(loc, "solidity.block_number");
+						numberState.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
+						return m_builder->create(numberState)->getResult(0);
+					}
+					else if (memberName == "chainid")
+					{
+						mlir::OperationState chainidState(loc, "solidity.block_chainid");
+						chainidState.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
+						return m_builder->create(chainidState)->getResult(0);
+					}
+				}
+				else if (magicType->kind() == MagicType::Kind::Transaction)
+				{
+					if (memberName == "origin")
+					{
+						mlir::OperationState originState(loc, "solidity.tx_origin");
+						originState.addTypes(mlir::solidity::AddressType::get(m_context.get()));
+						return m_builder->create(originState)->getResult(0);
+					}
+					else if (memberName == "gasprice")
+					{
+						mlir::OperationState gaspriceState(loc, "solidity.tx_gasprice");
+						gaspriceState.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
+						return m_builder->create(gaspriceState)->getResult(0);
+					}
+				}
+			}
+
 			auto base = generateSolidityExpression(memberAccess->expression());
 			if (!base)
 			{
@@ -781,9 +853,7 @@ public:
 				constState.addTypes(type);
 				return m_builder->create(constState)->getResult(0);
 			}
-			std::string memberName = memberAccess->memberName();
-			auto baseType = memberAccess->expression().annotation().type;
-			
+
 			// Handle array.length
 			if (auto* arrayType = dynamic_cast<ArrayType const*>(baseType))
 			{
@@ -947,6 +1017,66 @@ public:
 					convertState.addOperands(argValue);
 					convertState.addTypes(targetType);
 					return m_builder->create(convertState)->getResult(0);
+				}
+			}
+
+			// Handle regular function calls (internal functions, etc.)
+			if (funcCall->annotation().kind.set() && *funcCall->annotation().kind == FunctionCallKind::FunctionCall)
+			{
+				std::string funcName;
+
+				// Get function name from identifier
+				if (auto* ident = dynamic_cast<Identifier const*>(&funcCall->expression()))
+				{
+					funcName = ident->name();
+
+					// Skip if already handled (require/assert/revert)
+					if (funcName == "require" || funcName == "assert" || funcName == "revert")
+					{
+						// Already handled above, return dummy for expression value
+						auto dummyType = translateSolidityType(*_expr.annotation().type);
+						mlir::OperationState constState(loc, "solidity.constant");
+						constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
+						constState.addTypes(dummyType);
+						return m_builder->create(constState)->getResult(0);
+					}
+				}
+				// Handle member function calls (e.g., library.func() or obj.method())
+				else if (auto* memberAccess = dynamic_cast<MemberAccess const*>(&funcCall->expression()))
+				{
+					funcName = memberAccess->memberName();
+				}
+
+				if (!funcName.empty())
+				{
+					// Generate arguments
+					std::vector<mlir::Value> args;
+					for (auto const& arg : funcCall->arguments())
+					{
+						auto argValue = generateSolidityExpression(*arg);
+						if (argValue)
+							args.push_back(argValue);
+					}
+
+					// Create function call operation
+					mlir::OperationState callState(loc, "solidity.function_call");
+					callState.addAttribute("callee", m_builder->getStringAttr(funcName));
+					callState.addOperands(args);
+
+					// Add result type if the function has a return value
+					if (!dynamic_cast<TupleType const*>(_expr.annotation().type) ||
+					    !dynamic_cast<TupleType const*>(_expr.annotation().type)->components().empty())
+					{
+						auto resultType = translateSolidityType(*_expr.annotation().type);
+						callState.addTypes(resultType);
+						return m_builder->create(callState)->getResult(0);
+					}
+					else
+					{
+						// Void function
+						m_builder->create(callState);
+						return nullptr;
+					}
 				}
 			}
 		}
@@ -1638,6 +1768,38 @@ public:
 			}
 			m_builder->create(revertState);
 			return nullptr; // Revert is a terminator
+		}
+		else if (auto* emitStmt = dynamic_cast<EmitStatement const*>(&_stmt))
+		{
+			// Handle emit statement
+			auto const& eventCall = emitStmt->eventCall();
+			std::string eventName;
+
+			// Get event name from function call expression
+			if (auto* ident = dynamic_cast<Identifier const*>(&eventCall.expression()))
+			{
+				eventName = ident->name();
+			}
+			else if (auto* memberAccess = dynamic_cast<MemberAccess const*>(&eventCall.expression()))
+			{
+				eventName = memberAccess->memberName();
+			}
+
+			// Generate arguments for the event
+			std::vector<mlir::Value> args;
+			for (auto const& arg : eventCall.arguments())
+			{
+				auto argValue = generateSolidityExpression(*arg);
+				if (argValue)
+					args.push_back(argValue);
+			}
+
+			// Create emit operation
+			mlir::OperationState emitState(loc, "solidity.emit");
+			emitState.addAttribute("event", m_builder->getStringAttr(eventName));
+			emitState.addOperands(args);
+			m_builder->create(emitState);
+			return nullptr;
 		}
 		else if (auto* exprStmt = dynamic_cast<ExpressionStatement const*>(&_stmt))
 		{

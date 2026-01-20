@@ -176,7 +176,11 @@ int64_t ArrayType::getSize() const {
 
 SolidityDialect::SolidityDialect(mlir::MLIRContext *context)
     : mlir::Dialect(getDialectNamespace(), context, mlir::TypeID::get<SolidityDialect>()) {
-	
+
+	// Allow unknown operations - we generate many operations dynamically
+	// that are lowered directly to Yul without needing TableGen registration.
+	allowUnknownOperations(true);
+
 	// Register Solidity types
 	addTypes<
 		UIntType,

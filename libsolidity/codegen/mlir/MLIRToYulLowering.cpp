@@ -2090,6 +2090,10 @@ private:
 		{
 			return processAssertOpToAST(op);
 		}
+		else if (opName == "solidity.emit")
+		{
+			return processEmitOpToAST(op);
+		}
 		else if (opName == "solidity.load_state")
 		{
 			return processLoadStateOpToAST(op);
@@ -2291,13 +2295,175 @@ private:
 				};
 			}
 		}
+		else if (opName == "solidity.msg_sender")
+		{
+			auto debugData = langutil::DebugData::create();
+			if (op->getNumResults() > 0)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("caller")},
+						{}
+					})
+				};
+			}
+		}
+		else if (opName == "solidity.msg_value")
+		{
+			auto debugData = langutil::DebugData::create();
+			if (op->getNumResults() > 0)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("callvalue")},
+						{}
+					})
+				};
+			}
+		}
+		else if (opName == "solidity.msg_data")
+		{
+			auto debugData = langutil::DebugData::create();
+			if (op->getNumResults() > 0)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				// calldataload returns the calldata starting at offset 0
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("calldataload")},
+						{yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))}}
+					})
+				};
+			}
+		}
+		else if (opName == "solidity.msg_sig")
+		{
+			auto debugData = langutil::DebugData::create();
+			if (op->getNumResults() > 0)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				// Function selector is the first 4 bytes of calldata
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("shr")},
+						{
+							yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(224))},
+							yul::FunctionCall{
+								debugData,
+								yul::Identifier{debugData, yul::YulName("calldataload")},
+								{yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))}}
+							}
+						}
+					})
+				};
+			}
+		}
+		else if (opName == "solidity.block_timestamp")
+		{
+			auto debugData = langutil::DebugData::create();
+			if (op->getNumResults() > 0)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("timestamp")},
+						{}
+					})
+				};
+			}
+		}
+		else if (opName == "solidity.block_number")
+		{
+			auto debugData = langutil::DebugData::create();
+			if (op->getNumResults() > 0)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("number")},
+						{}
+					})
+				};
+			}
+		}
+		else if (opName == "solidity.block_chainid")
+		{
+			auto debugData = langutil::DebugData::create();
+			if (op->getNumResults() > 0)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("chainid")},
+						{}
+					})
+				};
+			}
+		}
+		else if (opName == "solidity.tx_origin")
+		{
+			auto debugData = langutil::DebugData::create();
+			if (op->getNumResults() > 0)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("origin")},
+						{}
+					})
+				};
+			}
+		}
+		else if (opName == "solidity.tx_gasprice")
+		{
+			auto debugData = langutil::DebugData::create();
+			if (op->getNumResults() > 0)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("gasprice")},
+						{}
+					})
+				};
+			}
+		}
 		else if (opName == "scf.condition" || opName == "scf.yield")
 		{
 			// These are control flow terminators that don't map to Yul statements
 			// They're handled by their parent operations (scf.while)
 			return std::nullopt;
 		}
-		
+
 		return std::nullopt;
 	}
 	
@@ -3218,7 +3384,7 @@ private:
 		if (op->getNumOperands() > 0)
 		{
 			std::string condition = getVariableName(op->getOperand(0));
-			
+
 			std::vector<yul::Statement> bodyStatements;
 			bodyStatements.push_back(yul::ExpressionStatement{
 				debugData,
@@ -3228,7 +3394,7 @@ private:
 					{}
 				}
 			});
-			
+
 			yul::If ifStatement{debugData};
 			ifStatement.condition = std::make_unique<yul::Expression>(yul::FunctionCall{
 				debugData,
@@ -3236,12 +3402,59 @@ private:
 				{yul::Identifier{debugData, yul::YulName(condition)}}
 			});
 			ifStatement.body = yul::Block{debugData, std::move(bodyStatements)};
-			
+
 			return ifStatement;
 		}
 		return std::nullopt;
 	}
-	
+
+	std::optional<yul::Statement> processEmitOpToAST(mlir::Operation* op)
+	{
+		auto debugData = langutil::DebugData::create();
+
+		// Get event name from attribute
+		std::string eventName = "UnknownEvent";
+		if (auto eventAttr = op->getAttrOfType<mlir::StringAttr>("event"))
+			eventName = eventAttr.getValue().str();
+
+		// Calculate event signature hash (keccak256 of event name and param types)
+		// For now, use a simplified topic0 based on event name
+		// Full implementation would compute keccak256(eventName(paramTypes))
+		util::h256 topic0 = util::keccak256(eventName + "(uint256)");
+
+		// Collect argument variable names
+		std::vector<yul::Expression> args;
+
+		// First argument: memory offset for event data (use 0 for simplicity)
+		args.push_back(yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))});
+
+		// Second argument: data size
+		args.push_back(yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0x40))});
+
+		// Third argument: topic0 (event signature hash)
+		args.push_back(yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(topic0))});
+
+		// Add indexed arguments as additional topics (up to 3 more topics)
+		for (unsigned i = 0; i < op->getNumOperands() && i < 3; ++i)
+		{
+			std::string argName = getVariableName(op->getOperand(i));
+			args.push_back(yul::Identifier{debugData, yul::YulName(argName)});
+		}
+
+		// Determine which log function to use based on number of topics
+		size_t numTopics = 1 + std::min(static_cast<unsigned>(op->getNumOperands()), 3u);
+		std::string logFunc = "log" + std::to_string(numTopics);
+
+		return yul::ExpressionStatement{
+			debugData,
+			yul::FunctionCall{
+				debugData,
+				yul::Identifier{debugData, yul::YulName(logFunc)},
+				std::move(args)
+			}
+		};
+	}
+
 	std::optional<yul::Statement> processLoadStateOpToAST(mlir::Operation* op)
 	{
 		auto debugData = langutil::DebugData::create();
