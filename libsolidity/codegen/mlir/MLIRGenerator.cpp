@@ -1040,11 +1040,278 @@ public:
 						constState.addTypes(dummyType);
 						return m_builder->create(constState)->getResult(0);
 					}
+
+					// Handle built-in functions with proper MLIR operations
+
+					// addmod(a, b, n) - modular addition
+					if (funcName == "addmod" && funcCall->arguments().size() == 3)
+					{
+						auto a = generateSolidityExpression(*funcCall->arguments()[0]);
+						auto b = generateSolidityExpression(*funcCall->arguments()[1]);
+						auto n = generateSolidityExpression(*funcCall->arguments()[2]);
+						auto resultType = translateSolidityType(*_expr.annotation().type);
+
+						mlir::OperationState addmodState(loc, "solidity.addmod");
+						addmodState.addOperands({a, b, n});
+						addmodState.addTypes(resultType);
+						return m_builder->create(addmodState)->getResult(0);
+					}
+
+					// mulmod(a, b, n) - modular multiplication
+					if (funcName == "mulmod" && funcCall->arguments().size() == 3)
+					{
+						auto a = generateSolidityExpression(*funcCall->arguments()[0]);
+						auto b = generateSolidityExpression(*funcCall->arguments()[1]);
+						auto n = generateSolidityExpression(*funcCall->arguments()[2]);
+						auto resultType = translateSolidityType(*_expr.annotation().type);
+
+						mlir::OperationState mulmodState(loc, "solidity.mulmod");
+						mulmodState.addOperands({a, b, n});
+						mulmodState.addTypes(resultType);
+						return m_builder->create(mulmodState)->getResult(0);
+					}
+
+					// gasleft() - get remaining gas
+					if (funcName == "gasleft" && funcCall->arguments().empty())
+					{
+						mlir::OperationState gasleftState(loc, "solidity.gasleft");
+						gasleftState.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
+						return m_builder->create(gasleftState)->getResult(0);
+					}
+
+					// blockhash(blockNumber) - get block hash
+					if (funcName == "blockhash" && funcCall->arguments().size() == 1)
+					{
+						auto blockNumber = generateSolidityExpression(*funcCall->arguments()[0]);
+
+						mlir::OperationState blockhashState(loc, "solidity.blockhash");
+						blockhashState.addOperands(blockNumber);
+						blockhashState.addTypes(mlir::solidity::BytesType::get(m_context.get(), 32));
+						return m_builder->create(blockhashState)->getResult(0);
+					}
+
+					// keccak256(data) - hash function
+					if (funcName == "keccak256" && funcCall->arguments().size() == 1)
+					{
+						auto data = generateSolidityExpression(*funcCall->arguments()[0]);
+
+						mlir::OperationState keccakState(loc, "solidity.keccak256");
+						keccakState.addOperands(data);
+						keccakState.addTypes(mlir::solidity::BytesType::get(m_context.get(), 32));
+						return m_builder->create(keccakState)->getResult(0);
+					}
+
+					// sha256(data) - hash function
+					if (funcName == "sha256" && funcCall->arguments().size() == 1)
+					{
+						auto data = generateSolidityExpression(*funcCall->arguments()[0]);
+
+						mlir::OperationState sha256State(loc, "solidity.sha256");
+						sha256State.addOperands(data);
+						sha256State.addTypes(mlir::solidity::BytesType::get(m_context.get(), 32));
+						return m_builder->create(sha256State)->getResult(0);
+					}
+
+					// ripemd160(data) - hash function
+					if (funcName == "ripemd160" && funcCall->arguments().size() == 1)
+					{
+						auto data = generateSolidityExpression(*funcCall->arguments()[0]);
+
+						mlir::OperationState ripemdState(loc, "solidity.ripemd160");
+						ripemdState.addOperands(data);
+						// ripemd160 returns bytes20, but padded to 32 bytes in EVM
+						ripemdState.addTypes(mlir::solidity::BytesType::get(m_context.get(), 20));
+						return m_builder->create(ripemdState)->getResult(0);
+					}
+
+					// ecrecover(hash, v, r, s) - signature recovery
+					if (funcName == "ecrecover" && funcCall->arguments().size() == 4)
+					{
+						auto hash = generateSolidityExpression(*funcCall->arguments()[0]);
+						auto v = generateSolidityExpression(*funcCall->arguments()[1]);
+						auto r = generateSolidityExpression(*funcCall->arguments()[2]);
+						auto s = generateSolidityExpression(*funcCall->arguments()[3]);
+
+						mlir::OperationState ecrecoverState(loc, "solidity.ecrecover");
+						ecrecoverState.addOperands({hash, v, r, s});
+						ecrecoverState.addTypes(mlir::solidity::AddressType::get(m_context.get()));
+						return m_builder->create(ecrecoverState)->getResult(0);
+					}
+
+					// selfdestruct(recipient) - destroy contract
+					if (funcName == "selfdestruct" && funcCall->arguments().size() == 1)
+					{
+						auto recipient = generateSolidityExpression(*funcCall->arguments()[0]);
+
+						mlir::OperationState selfdestructState(loc, "solidity.selfdestruct");
+						selfdestructState.addOperands(recipient);
+						m_builder->create(selfdestructState);
+
+						// selfdestruct doesn't return a value, return a dummy for expression context
+						auto dummyType = translateSolidityType(*_expr.annotation().type);
+						mlir::OperationState constState(loc, "solidity.constant");
+						constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
+						constState.addTypes(dummyType);
+						return m_builder->create(constState)->getResult(0);
+					}
+
+					// type(X) - handled separately as member access (type(uint256).max etc.)
+					if (funcName == "type")
+					{
+						// The actual value is extracted from member access (type(X).max, type(X).min)
+						// Just return a dummy here - real handling is in member access below
+						auto dummyType = translateSolidityType(*_expr.annotation().type);
+						mlir::OperationState constState(loc, "solidity.constant");
+						constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
+						constState.addTypes(dummyType);
+						return m_builder->create(constState)->getResult(0);
+					}
 				}
 				// Handle member function calls (e.g., library.func() or obj.method())
 				else if (auto* memberAccess = dynamic_cast<MemberAccess const*>(&funcCall->expression()))
 				{
+					// Check for abi.encode, abi.encodePacked, abi.decode, type().max, etc.
+					// These need special handling and cannot be generated as function calls
+					if (auto* baseIdent = dynamic_cast<Identifier const*>(&memberAccess->expression()))
+					{
+						std::string baseName = baseIdent->name();
+						if (baseName == "abi")
+						{
+							// abi.encode, abi.encodePacked, abi.encodeWithSelector, abi.decode, etc.
+							// Skip to dummy value - these require special memory handling
+							auto dummyType = translateSolidityType(*_expr.annotation().type);
+							mlir::OperationState constState(loc, "solidity.constant");
+							constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
+							constState.addTypes(dummyType);
+							return m_builder->create(constState)->getResult(0);
+						}
+					}
+					// Check for type(X).max, type(X).min
+					else if (auto* funcCallExpr = dynamic_cast<FunctionCall const*>(&memberAccess->expression()))
+					{
+						if (auto* typeIdent = dynamic_cast<Identifier const*>(&funcCallExpr->expression()))
+						{
+							if (typeIdent->name() == "type")
+							{
+								// Extract the type argument from type(X)
+								std::string memberName = memberAccess->memberName();
+								auto resultType = translateSolidityType(*_expr.annotation().type);
+
+								// Get the type being queried from the type() call
+								if (!funcCallExpr->arguments().empty())
+								{
+									auto const* typeArg = funcCallExpr->arguments()[0].get();
+									if (auto* typeArgIdent = dynamic_cast<ElementaryTypeNameExpression const*>(typeArg))
+									{
+										auto const& typeName = typeArgIdent->type();
+
+										if (memberName == "max")
+										{
+											// Generate max value constant
+											mlir::OperationState constState(loc, "solidity.constant");
+
+											if (auto* intType = dynamic_cast<IntegerType const*>(&typeName))
+											{
+												if (intType->isSigned())
+												{
+													// type(intN).max = 2^(N-1) - 1
+													// For int256: 2^255 - 1
+													unsigned bits = intType->numBits();
+													u256 maxVal = (u256(1) << (bits - 1)) - 1;
+													constState.addAttribute("value", m_builder->getIntegerAttr(
+														mlir::IntegerType::get(m_context.get(), 256, mlir::IntegerType::Unsigned),
+														llvm::APInt(256, maxVal.str(), 10)));
+												}
+												else
+												{
+													// type(uintN).max = 2^N - 1
+													// For uint256: 2^256 - 1 = 0xffffffff...
+													unsigned bits = intType->numBits();
+													u256 maxVal = (u256(1) << bits) - 1;
+													constState.addAttribute("value", m_builder->getIntegerAttr(
+														mlir::IntegerType::get(m_context.get(), 256, mlir::IntegerType::Unsigned),
+														llvm::APInt(256, maxVal.str(), 10)));
+												}
+											}
+											else
+											{
+												// Default fallback
+												constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
+											}
+
+											constState.addTypes(resultType);
+											return m_builder->create(constState)->getResult(0);
+										}
+										else if (memberName == "min")
+										{
+											// Generate min value constant
+											mlir::OperationState constState(loc, "solidity.constant");
+
+											if (auto* intType = dynamic_cast<IntegerType const*>(&typeName))
+											{
+												if (intType->isSigned())
+												{
+													// type(intN).min = -2^(N-1)
+													// For int256: -2^255
+													// We need to represent this as a two's complement value
+													unsigned bits = intType->numBits();
+													// -2^(N-1) in two's complement is the value with only the sign bit set
+													u256 minVal = u256(1) << (bits - 1);  // This is 2^(N-1), treated as signed it's the min
+													constState.addAttribute("value", m_builder->getIntegerAttr(
+														mlir::IntegerType::get(m_context.get(), 256, mlir::IntegerType::Unsigned),
+														llvm::APInt(256, minVal.str(), 10)));
+												}
+												else
+												{
+													// type(uintN).min = 0
+													constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
+												}
+											}
+											else
+											{
+												// Default fallback
+												constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
+											}
+
+											constState.addTypes(resultType);
+											return m_builder->create(constState)->getResult(0);
+										}
+									}
+								}
+
+								// Fallback for other type() members
+								auto dummyType = translateSolidityType(*_expr.annotation().type);
+								mlir::OperationState constState(loc, "solidity.constant");
+								constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
+								constState.addTypes(dummyType);
+								return m_builder->create(constState)->getResult(0);
+							}
+						}
+					}
+
 					funcName = memberAccess->memberName();
+
+					// Check for address member functions (transfer, send, call, delegatecall, staticcall)
+					// These are built-in functions on address types that need special Yul handling
+					if (funcName == "transfer" || funcName == "send" || funcName == "call" ||
+					    funcName == "delegatecall" || funcName == "staticcall")
+					{
+						// Skip to dummy value - these require special external call handling
+						auto dummyType = translateSolidityType(*_expr.annotation().type);
+						mlir::OperationState constState(loc, "solidity.constant");
+						constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
+						constState.addTypes(dummyType);
+						return m_builder->create(constState)->getResult(0);
+					}
+
+					// For all other member access function calls (external contract/interface calls),
+					// skip to dummy value as these are external calls that need special handling
+					// Examples: receiver.onERC721Received(...), token.transfer(...), etc.
+					auto dummyType = translateSolidityType(*_expr.annotation().type);
+					mlir::OperationState constState(loc, "solidity.constant");
+					constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
+					constState.addTypes(dummyType);
+					return m_builder->create(constState)->getResult(0);
 				}
 
 				if (!funcName.empty())

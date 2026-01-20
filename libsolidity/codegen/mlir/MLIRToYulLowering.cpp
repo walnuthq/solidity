@@ -2463,6 +2463,382 @@ private:
 			// They're handled by their parent operations (scf.while)
 			return std::nullopt;
 		}
+		// Built-in function lowering
+		else if (opName == "solidity.addmod")
+		{
+			// addmod(a, b, n) - direct Yul opcode
+			auto debugData = getDebugData(op);
+			if (op->getNumResults() > 0 && op->getNumOperands() >= 3)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				std::string a = getVariableName(op->getOperand(0));
+				std::string b = getVariableName(op->getOperand(1));
+				std::string n = getVariableName(op->getOperand(2));
+
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("addmod")},
+						{
+							yul::Identifier{debugData, yul::YulName(a)},
+							yul::Identifier{debugData, yul::YulName(b)},
+							yul::Identifier{debugData, yul::YulName(n)}
+						}
+					})
+				};
+			}
+		}
+		else if (opName == "solidity.mulmod")
+		{
+			// mulmod(a, b, n) - direct Yul opcode
+			auto debugData = getDebugData(op);
+			if (op->getNumResults() > 0 && op->getNumOperands() >= 3)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				std::string a = getVariableName(op->getOperand(0));
+				std::string b = getVariableName(op->getOperand(1));
+				std::string n = getVariableName(op->getOperand(2));
+
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("mulmod")},
+						{
+							yul::Identifier{debugData, yul::YulName(a)},
+							yul::Identifier{debugData, yul::YulName(b)},
+							yul::Identifier{debugData, yul::YulName(n)}
+						}
+					})
+				};
+			}
+		}
+		else if (opName == "solidity.gasleft")
+		{
+			// gasleft() -> gas() in Yul
+			auto debugData = getDebugData(op);
+			if (op->getNumResults() > 0)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("gas")},
+						{}
+					})
+				};
+			}
+		}
+		else if (opName == "solidity.blockhash")
+		{
+			// blockhash(blockNumber) - direct Yul opcode
+			auto debugData = getDebugData(op);
+			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				std::string blockNum = getVariableName(op->getOperand(0));
+
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("blockhash")},
+						{yul::Identifier{debugData, yul::YulName(blockNum)}}
+					})
+				};
+			}
+		}
+		else if (opName == "solidity.keccak256")
+		{
+			// keccak256(data) - needs memory handling
+			// For a single value input, we store it to memory and hash
+			auto debugData = getDebugData(op);
+			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				std::string data = getVariableName(op->getOperand(0));
+
+				// Generate: let ptr := mload(64)
+				//           mstore(ptr, data)
+				//           let result := keccak256(ptr, 32)
+				// For simplicity, we use scratch space at 0x00
+				std::vector<yul::Statement> statements;
+
+				// mstore(0, data)
+				statements.push_back(yul::ExpressionStatement{
+					debugData,
+					yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("mstore")},
+						{
+							yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))},
+							yul::Identifier{debugData, yul::YulName(data)}
+						}
+					}
+				});
+
+				// let result := keccak256(0, 32)
+				statements.push_back(yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("keccak256")},
+						{
+							yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))},
+							yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(32))}
+						}
+					})
+				});
+
+				return yul::Block{debugData, std::move(statements)};
+			}
+		}
+		else if (opName == "solidity.sha256")
+		{
+			// sha256 uses precompile at address 0x02
+			auto debugData = getDebugData(op);
+			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				std::string data = getVariableName(op->getOperand(0));
+
+				std::vector<yul::Statement> statements;
+
+				// mstore(0, data)
+				statements.push_back(yul::ExpressionStatement{
+					debugData,
+					yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("mstore")},
+						{
+							yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))},
+							yul::Identifier{debugData, yul::YulName(data)}
+						}
+					}
+				});
+
+				// staticcall(gas(), 2, 0, 32, 0, 32)
+				statements.push_back(yul::ExpressionStatement{
+					debugData,
+					yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("pop")},
+						{yul::FunctionCall{
+							debugData,
+							yul::Identifier{debugData, yul::YulName("staticcall")},
+							{
+								yul::FunctionCall{debugData, yul::Identifier{debugData, yul::YulName("gas")}, {}},
+								yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(2))},
+								yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))},
+								yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(32))},
+								yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))},
+								yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(32))}
+							}
+						}}
+					}
+				});
+
+				// let result := mload(0)
+				statements.push_back(yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("mload")},
+						{yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))}}
+					})
+				});
+
+				return yul::Block{debugData, std::move(statements)};
+			}
+		}
+		else if (opName == "solidity.ripemd160")
+		{
+			// ripemd160 uses precompile at address 0x03
+			auto debugData = getDebugData(op);
+			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				std::string data = getVariableName(op->getOperand(0));
+
+				std::vector<yul::Statement> statements;
+
+				// mstore(0, data)
+				statements.push_back(yul::ExpressionStatement{
+					debugData,
+					yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("mstore")},
+						{
+							yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))},
+							yul::Identifier{debugData, yul::YulName(data)}
+						}
+					}
+				});
+
+				// staticcall(gas(), 3, 0, 32, 0, 32)
+				statements.push_back(yul::ExpressionStatement{
+					debugData,
+					yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("pop")},
+						{yul::FunctionCall{
+							debugData,
+							yul::Identifier{debugData, yul::YulName("staticcall")},
+							{
+								yul::FunctionCall{debugData, yul::Identifier{debugData, yul::YulName("gas")}, {}},
+								yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(3))},
+								yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))},
+								yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(32))},
+								yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))},
+								yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(32))}
+							}
+						}}
+					}
+				});
+
+				// let result := mload(0) - ripemd160 returns right-aligned in 32 bytes
+				statements.push_back(yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("mload")},
+						{yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))}}
+					})
+				});
+
+				return yul::Block{debugData, std::move(statements)};
+			}
+		}
+		else if (opName == "solidity.ecrecover")
+		{
+			// ecrecover uses precompile at address 0x01
+			// Input: hash (32 bytes), v (32 bytes), r (32 bytes), s (32 bytes) = 128 bytes
+			// Output: address (32 bytes, right-aligned)
+			auto debugData = getDebugData(op);
+			if (op->getNumResults() > 0 && op->getNumOperands() >= 4)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				std::string hash = getVariableName(op->getOperand(0));
+				std::string v = getVariableName(op->getOperand(1));
+				std::string r = getVariableName(op->getOperand(2));
+				std::string s = getVariableName(op->getOperand(3));
+
+				std::vector<yul::Statement> statements;
+
+				// mstore(0, hash)
+				statements.push_back(yul::ExpressionStatement{
+					debugData,
+					yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("mstore")},
+						{
+							yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))},
+							yul::Identifier{debugData, yul::YulName(hash)}
+						}
+					}
+				});
+
+				// mstore(32, v)
+				statements.push_back(yul::ExpressionStatement{
+					debugData,
+					yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("mstore")},
+						{
+							yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(32))},
+							yul::Identifier{debugData, yul::YulName(v)}
+						}
+					}
+				});
+
+				// mstore(64, r)
+				statements.push_back(yul::ExpressionStatement{
+					debugData,
+					yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("mstore")},
+						{
+							yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(64))},
+							yul::Identifier{debugData, yul::YulName(r)}
+						}
+					}
+				});
+
+				// mstore(96, s)
+				statements.push_back(yul::ExpressionStatement{
+					debugData,
+					yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("mstore")},
+						{
+							yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(96))},
+							yul::Identifier{debugData, yul::YulName(s)}
+						}
+					}
+				});
+
+				// pop(staticcall(gas(), 1, 0, 128, 0, 32))
+				statements.push_back(yul::ExpressionStatement{
+					debugData,
+					yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("pop")},
+						{yul::FunctionCall{
+							debugData,
+							yul::Identifier{debugData, yul::YulName("staticcall")},
+							{
+								yul::FunctionCall{debugData, yul::Identifier{debugData, yul::YulName("gas")}, {}},
+								yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(1))},
+								yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))},
+								yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(128))},
+								yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))},
+								yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(32))}
+							}
+						}}
+					}
+				});
+
+				// let result := mload(0)
+				statements.push_back(yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("mload")},
+						{yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))}}
+					})
+				});
+
+				return yul::Block{debugData, std::move(statements)};
+			}
+		}
+		else if (opName == "solidity.selfdestruct")
+		{
+			// selfdestruct(recipient) - direct Yul opcode
+			auto debugData = getDebugData(op);
+			if (op->getNumOperands() >= 1)
+			{
+				std::string recipient = getVariableName(op->getOperand(0));
+
+				return yul::ExpressionStatement{
+					debugData,
+					yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("selfdestruct")},
+						{yul::Identifier{debugData, yul::YulName(recipient)}}
+					}
+				};
+			}
+		}
 
 		return std::nullopt;
 	}

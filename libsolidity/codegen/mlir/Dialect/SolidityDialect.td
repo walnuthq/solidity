@@ -541,4 +541,114 @@ def Solidity_LogicalNotOp : Solidity_Op<"logical_not", [Pure]> {
   let assemblyFormat = "$operand attr-dict `:` type($operand) `->` type($result)";
 }
 
+//===----------------------------------------------------------------------===//
+// Built-in functions
+//===----------------------------------------------------------------------===//
+
+// Modular arithmetic operations
+def Solidity_AddModOp : Solidity_Op<"addmod", [Pure]> {
+  let summary = "Modular addition without overflow";
+  let description = [{
+    Computes (a + b) % n without intermediate overflow.
+    Equivalent to the Yul addmod(a, b, n) opcode.
+  }];
+  let arguments = (ins Solidity_AnyType:$a, Solidity_AnyType:$b, Solidity_AnyType:$n);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "$a `,` $b `,` $n attr-dict `:` type($a) `,` type($b) `,` type($n) `->` type($result)";
+}
+
+def Solidity_MulModOp : Solidity_Op<"mulmod", [Pure]> {
+  let summary = "Modular multiplication without overflow";
+  let description = [{
+    Computes (a * b) % n without intermediate overflow.
+    Equivalent to the Yul mulmod(a, b, n) opcode.
+  }];
+  let arguments = (ins Solidity_AnyType:$a, Solidity_AnyType:$b, Solidity_AnyType:$n);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "$a `,` $b `,` $n attr-dict `:` type($a) `,` type($b) `,` type($n) `->` type($result)";
+}
+
+// Block/Transaction functions
+def Solidity_GasLeftOp : Solidity_Op<"gasleft", [Pure]> {
+  let summary = "Get remaining gas";
+  let description = [{
+    Returns the amount of gas remaining in the current execution context.
+    Equivalent to the Yul gas() opcode.
+  }];
+  let results = (outs Solidity_UIntType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Solidity_BlockhashOp : Solidity_Op<"blockhash", [Pure]> {
+  let summary = "Get block hash";
+  let description = [{
+    Returns the hash of the given block number. Only works for the 256 most recent blocks.
+    Equivalent to the Yul blockhash(blockNumber) opcode.
+  }];
+  let arguments = (ins Solidity_AnyType:$blockNumber);
+  let results = (outs Solidity_BytesType:$result);
+  let assemblyFormat = "$blockNumber attr-dict `:` type($blockNumber) `->` type($result)";
+}
+
+// Hash functions
+def Solidity_Keccak256Op : Solidity_Op<"keccak256", [Pure]> {
+  let summary = "Compute keccak256 hash";
+  let description = [{
+    Computes the Keccak-256 hash of the input data.
+    For bytes in memory, this involves storing data and calling keccak256(offset, length).
+  }];
+  let arguments = (ins Solidity_AnyType:$data);
+  let results = (outs Solidity_BytesType:$result);
+  let assemblyFormat = "$data attr-dict `:` type($data) `->` type($result)";
+}
+
+def Solidity_Sha256Op : Solidity_Op<"sha256", [Pure]> {
+  let summary = "Compute SHA-256 hash";
+  let description = [{
+    Computes the SHA-256 hash of the input data using the precompile at address 0x02.
+  }];
+  let arguments = (ins Solidity_AnyType:$data);
+  let results = (outs Solidity_BytesType:$result);
+  let assemblyFormat = "$data attr-dict `:` type($data) `->` type($result)";
+}
+
+def Solidity_Ripemd160Op : Solidity_Op<"ripemd160", [Pure]> {
+  let summary = "Compute RIPEMD-160 hash";
+  let description = [{
+    Computes the RIPEMD-160 hash of the input data using the precompile at address 0x03.
+  }];
+  let arguments = (ins Solidity_AnyType:$data);
+  let results = (outs Solidity_BytesType:$result);
+  let assemblyFormat = "$data attr-dict `:` type($data) `->` type($result)";
+}
+
+// Cryptographic recovery
+def Solidity_EcrecoverOp : Solidity_Op<"ecrecover", [Pure]> {
+  let summary = "Recover address from signature";
+  let description = [{
+    Recovers the address associated with the public key from an elliptic curve signature.
+    Uses the precompile at address 0x01.
+    Arguments: hash (bytes32), v (uint8), r (bytes32), s (bytes32)
+  }];
+  let arguments = (ins
+    Solidity_AnyType:$hash,
+    Solidity_AnyType:$v,
+    Solidity_AnyType:$r,
+    Solidity_AnyType:$s
+  );
+  let results = (outs Solidity_AddressType:$result);
+  let assemblyFormat = "$hash `,` $v `,` $r `,` $s attr-dict `:` type($hash) `,` type($v) `,` type($r) `,` type($s) `->` type($result)";
+}
+
+// Self-destruct (deprecated but needed for compatibility)
+def Solidity_SelfdestructOp : Solidity_Op<"selfdestruct"> {
+  let summary = "Destroy contract and send balance";
+  let description = [{
+    Terminates the contract and sends its remaining balance to the specified address.
+    Note: This opcode is deprecated since EIP-6049 but still needed for compatibility.
+  }];
+  let arguments = (ins Solidity_AddressType:$recipient);
+  let assemblyFormat = "$recipient attr-dict `:` type($recipient)";
+}
+
 #endif // SOLIDITY_DIALECT
