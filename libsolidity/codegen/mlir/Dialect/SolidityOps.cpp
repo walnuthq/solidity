@@ -42,6 +42,18 @@ namespace solidity {
 // Custom builders and verifiers for operations
 //===----------------------------------------------------------------------===//
 
+// Custom builder for FunctionOp - needed for MLIRGenerator
+void FunctionOp::build(mlir::OpBuilder &builder, mlir::OperationState &state,
+                       llvm::StringRef name, mlir::FunctionType type,
+                       llvm::StringRef visibility, llvm::StringRef stateMutability) {
+	state.addAttribute(mlir::SymbolTable::getSymbolAttrName(), builder.getStringAttr(name));
+	state.addAttribute("function_type", mlir::TypeAttr::get(type));
+	state.addAttribute("visibility", builder.getStringAttr(visibility));
+	state.addAttribute("stateMutability", builder.getStringAttr(stateMutability));
+	// Create an empty body region
+	state.addRegion();
+}
+
 // Custom builder for ConstantOp - needed for MLIRGenerator
 void ConstantOp::build(mlir::OpBuilder &builder, mlir::OperationState &state,
                        mlir::Attribute value, mlir::Type type) {

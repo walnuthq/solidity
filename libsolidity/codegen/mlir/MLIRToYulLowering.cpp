@@ -592,7 +592,7 @@ private:
 							// Try to find any string attribute that might be the name
 							for (auto& attr : innerOp.getAttrs())
 							{
-								if (auto strAttr = attr.getValue().dyn_cast<mlir::StringAttr>())
+								if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(attr.getValue()))
 								{
 									std::string attrName = attr.getName().getValue().str();
 									// Skip visibility and other known non-name attributes
@@ -1450,7 +1450,7 @@ private:
 				int numResults = 0;
 				if (auto typeAttr = funcOp->getAttrOfType<mlir::TypeAttr>("function_type"))
 				{
-					auto funcType = typeAttr.getValue().cast<mlir::FunctionType>();
+					auto funcType = mlir::cast<mlir::FunctionType>(typeAttr.getValue());
 					numResults = funcType.getResults().size();
 				}
 				else
@@ -1600,7 +1600,7 @@ private:
 		int numParams = 0;
 		if (auto typeAttr = funcOp->getAttrOfType<mlir::TypeAttr>("function_type"))
 		{
-			auto funcType = typeAttr.getValue().cast<mlir::FunctionType>();
+			auto funcType = mlir::cast<mlir::FunctionType>(typeAttr.getValue());
 			numParams = funcType.getInputs().size();
 		}
 
@@ -1694,7 +1694,7 @@ private:
 		int numResults = 0;
 		if (auto typeAttr = funcOp->getAttrOfType<mlir::TypeAttr>("function_type"))
 		{
-			auto funcType = typeAttr.getValue().cast<mlir::FunctionType>();
+			auto funcType = mlir::cast<mlir::FunctionType>(typeAttr.getValue());
 			numResults = funcType.getResults().size();
 		}
 		
@@ -1837,7 +1837,7 @@ private:
 		// Try to get return types from function_type attribute
 		if (auto typeAttr = funcOp->getAttrOfType<mlir::TypeAttr>("function_type"))
 		{
-			auto funcType = typeAttr.getValue().cast<mlir::FunctionType>();
+			auto funcType = mlir::cast<mlir::FunctionType>(typeAttr.getValue());
 			numResults = funcType.getResults().size();
 		}
 		else
@@ -2731,9 +2731,13 @@ private:
 		// Post block will be set later with the collected post statements
 		
 		// Build the condition expression from the before region
-		// For now, use a simplified approach
+		// We need to:
+		// 1. Process all intermediate operations (like mul, add) that compute values used in the condition
+		// 2. These operations become statements at the start of the loop body (evaluated each iteration)
+		// 3. Build the condition expression from the comparison operation
 		std::unique_ptr<yul::Expression> conditionExpr;
-		
+		std::vector<yul::Statement> conditionStatements; // Statements to prepend to loop body
+
 		if (op->getNumRegions() > 0 && !op->getRegion(0).empty())
 		{
 			// Map block arguments to loop variables
@@ -2742,11 +2746,33 @@ private:
 				for (unsigned i = 0; i < block.getNumArguments(); ++i)
 				{
 					void* key = block.getArgument(i).getAsOpaquePointer();
-					m_valueNames[key] = yul::YulName(loopVarName);
+					if (i < loopVarNames.size())
+						m_valueNames[key] = yul::YulName(loopVarNames[i]);
+					else
+						m_valueNames[key] = yul::YulName(loopVarName);
 				}
-				
-				// Look for the condition operation
-				// First process all operations to build up the condition
+
+				// First pass: process all operations except terminators to generate statements
+				// This ensures intermediate computations like (i * i) are properly defined
+				for (auto& innerOp : block)
+				{
+					llvm::StringRef opName = innerOp.getName().getStringRef();
+
+					// Skip control flow operations - they don't produce statements
+					if (opName == "scf.condition" || opName == "solidity.to_i1")
+						continue;
+
+					// Skip the comparison itself - we'll build it inline in the condition
+					if (opName == "solidity.cmp")
+						continue;
+
+					// Process all other operations as statements
+					auto stmt = processOperationToStatement(&innerOp);
+					if (stmt)
+						conditionStatements.push_back(std::move(*stmt));
+				}
+
+				// Second pass: look for the condition operation and build the expression
 				std::string conditionVarName;
 				for (auto& innerOp : block)
 				{
@@ -2759,7 +2785,7 @@ private:
 							void* resultKey = innerOp.getResult(0).getAsOpaquePointer();
 							std::string resultName = "cmp_" + std::to_string(m_varCounter++);
 							m_valueNames[resultKey] = yul::YulName(resultName);
-							
+
 							// Get comparison type from the predicate attribute
 							std::string cmpType = "lt"; // default
 							// The predicate is stored as the third attribute in the operation
@@ -2778,13 +2804,13 @@ private:
 									{
 										if (attr.getName().getValue() == "predicate")
 										{
-											if (auto strAttr = attr.getValue().dyn_cast<mlir::StringAttr>())
+											if (auto strAttr = mlir::dyn_cast<mlir::StringAttr>(attr.getValue()))
 												cmpType = strAttr.getValue().str();
 										}
 									}
 								}
 							}
-							
+
 							// Map comparison types to Yul operations
 							// Note: Yul doesn't have le/ge directly, need to use combinations
 							std::string yulOp = "lt";
@@ -2812,11 +2838,12 @@ private:
 								yulOp = "lt";
 								needNot = true;
 							}
-							
-							// Get operand names
+
+							// Get operand names - now these should be properly defined
+							// from the first pass processing
 							std::string lhs = getVariableName(innerOp.getOperand(0));
 							std::string rhs = getVariableName(innerOp.getOperand(1));
-							
+
 							// Build the condition expression
 							if (needNot) {
 								// Wrap in iszero for negation
@@ -2880,8 +2907,45 @@ private:
 			}
 		}
 		
-		// Set the loop condition
-		if (conditionExpr)
+		// Process the after region (loop body)
+		std::vector<yul::Statement> bodyStatements;
+		std::vector<yul::Statement> postStatements;  // Track post-increment statements
+
+		// If we have condition statements (intermediate computations for the condition),
+		// we need to use the pattern:
+		//   for { } 1 { post } { condition_stmts; if iszero(cond) { break } body_stmts }
+		// This ensures the condition computations are evaluated each iteration.
+		bool hasConditionStatements = !conditionStatements.empty();
+
+		if (hasConditionStatements && conditionExpr)
+		{
+			// Set condition to always true - we'll break manually
+			forLoop.condition = std::make_unique<yul::Expression>(
+				yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(1))}
+			);
+
+			// Prepend condition computation statements to body
+			for (auto& stmt : conditionStatements)
+				bodyStatements.push_back(std::move(stmt));
+
+			// Add "if iszero(condition) { break }" to exit the loop
+			yul::If breakIfStmt{debugData};
+			breakIfStmt.condition = std::make_unique<yul::Expression>(
+				yul::FunctionCall{
+					debugData,
+					yul::Identifier{debugData, yul::YulName("iszero")},
+					{std::move(*conditionExpr)}
+				}
+			);
+			std::vector<yul::Statement> breakBody;
+			breakBody.push_back(yul::Break{debugData});
+			breakIfStmt.body = yul::Block{debugData, std::move(breakBody)};
+			bodyStatements.push_back(std::move(breakIfStmt));
+
+			// Clear conditionExpr since we've used it
+			conditionExpr = nullptr;
+		}
+		else if (conditionExpr)
 		{
 			forLoop.condition = std::move(conditionExpr);
 		}
@@ -2892,10 +2956,6 @@ private:
 				yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(1))}
 			);
 		}
-		
-		// Process the after region (loop body)
-		std::vector<yul::Statement> bodyStatements;
-		std::vector<yul::Statement> postStatements;  // Track post-increment statements
 		
 		if (op->getNumRegions() > 1 && !op->getRegion(1).empty())
 		{
@@ -3505,7 +3565,7 @@ private:
 		// Extract parameter types from MLIR function_type attribute
 		if (auto typeAttr = funcOp->getAttrOfType<mlir::TypeAttr>("function_type"))
 		{
-			auto funcType = typeAttr.getValue().cast<mlir::FunctionType>();
+			auto funcType = mlir::cast<mlir::FunctionType>(typeAttr.getValue());
 			auto inputTypes = funcType.getInputs();
 			
 			for (size_t i = 0; i < inputTypes.size(); ++i)
@@ -3536,7 +3596,7 @@ private:
 	std::string extractSolidityTypeString(mlir::Type type)
 	{
 		// Try to extract from MLIR Solidity dialect types
-		if (auto intType = type.dyn_cast<mlir::IntegerType>())
+		if (auto intType = mlir::dyn_cast<mlir::IntegerType>(type))
 		{
 			// For integer types, determine if signed/unsigned and bit width
 			unsigned width = intType.getWidth();
@@ -3678,7 +3738,7 @@ private:
 		std::string typeSuffix;
 		if (auto typeAttr = funcOp->getAttrOfType<mlir::TypeAttr>("function_type"))
 		{
-			auto funcType = typeAttr.getValue().cast<mlir::FunctionType>();
+			auto funcType = mlir::cast<mlir::FunctionType>(typeAttr.getValue());
 			auto inputTypes = funcType.getInputs();
 
 			for (size_t i = 0; i < inputTypes.size(); ++i)
