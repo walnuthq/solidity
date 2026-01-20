@@ -26,6 +26,7 @@
 #include <sstream>
 #include <stack>
 #include <map>
+#include <set>
 
 #ifdef SOLIDITY_HAS_MLIR
 // Disable warnings for LLVM/MLIR headers
@@ -155,18 +156,45 @@ public:
 		// Set insertion point to contract body
 		m_builder->setInsertionPointToEnd(&contractOp->getRegion(0).emplaceBlock());
 		
-		// Generate state variables
-		for (auto const& var : _contract.stateVariables())
+		// Generate state variables from all base contracts (in reverse order: base to derived)
+		for (auto it = _contract.annotation().linearizedBaseContracts.rbegin();
+		     it != _contract.annotation().linearizedBaseContracts.rend(); ++it)
 		{
-			generateStateVariable(*var);
-		}
-		
-		// Generate functions using Solidity dialect
-		for (auto const& func : _contract.definedFunctions())
-		{
-			if (!func->isConstructor())
+			ContractDefinition const* baseContract = *it;
+			for (auto const& var : baseContract->stateVariables())
 			{
-				generateSolidityFunction(*func);
+				generateStateVariable(*var);
+			}
+		}
+
+		// Generate functions from all base contracts (in reverse order: base to derived)
+		// Track generated functions by signature to avoid duplicates from overrides
+		std::set<std::string> generatedFunctions;
+		for (auto it = _contract.annotation().linearizedBaseContracts.rbegin();
+		     it != _contract.annotation().linearizedBaseContracts.rend(); ++it)
+		{
+			ContractDefinition const* baseContract = *it;
+			for (auto const& func : baseContract->definedFunctions())
+			{
+				if (!func->isConstructor())
+				{
+					// Create a signature to track what we've generated
+					std::string signature = func->name() + "(";
+					for (size_t i = 0; i < func->parameters().size(); ++i)
+					{
+						if (i > 0) signature += ",";
+						signature += func->parameters()[i]->type()->toString();
+					}
+					signature += ")";
+
+					// Only generate if we haven't seen this signature yet
+					// (derived contract functions take precedence)
+					if (generatedFunctions.find(signature) == generatedFunctions.end())
+					{
+						generatedFunctions.insert(signature);
+						generateSolidityFunction(*func);
+					}
+				}
 			}
 		}
 		
