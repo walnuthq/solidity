@@ -10,10 +10,12 @@
 #pragma GCC diagnostic pop
 #endif
 
-namespace mlir {
+namespace mlir
+{
 class Pass;
 
-namespace solidity {
+namespace solidity
+{
 
 std::unique_ptr<mlir::Pass> createAccessControlAnalysisPass();
 

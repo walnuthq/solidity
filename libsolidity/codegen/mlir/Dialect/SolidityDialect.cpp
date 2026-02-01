@@ -41,71 +41,74 @@ using namespace mlir::solidity;
 // Type Storage Definitions
 //===----------------------------------------------------------------------===//
 
-namespace mlir {
-namespace solidity {
-namespace detail {
+namespace mlir
+{
+namespace solidity
+{
+namespace detail
+{
 
-struct UIntTypeStorage : public mlir::TypeStorage {
-	UIntTypeStorage(unsigned bitwidth) : bitwidth(bitwidth) {}
-	
+struct UIntTypeStorage: public mlir::TypeStorage
+{
+	UIntTypeStorage(unsigned bitwidth): bitwidth(bitwidth) {}
+
 	using KeyTy = unsigned;
-	
-	bool operator==(const KeyTy &key) const { return key == bitwidth; }
-	
-	static UIntTypeStorage *construct(mlir::TypeStorageAllocator &allocator,
-	                                   const KeyTy &key) {
+
+	bool operator==(const KeyTy& key) const { return key == bitwidth; }
+
+	static UIntTypeStorage* construct(mlir::TypeStorageAllocator& allocator, const KeyTy& key)
+	{
 		return new (allocator.allocate<UIntTypeStorage>()) UIntTypeStorage(key);
 	}
-	
+
 	unsigned bitwidth;
 };
 
-struct IntTypeStorage : public mlir::TypeStorage {
-	IntTypeStorage(unsigned bitwidth) : bitwidth(bitwidth) {}
-	
+struct IntTypeStorage: public mlir::TypeStorage
+{
+	IntTypeStorage(unsigned bitwidth): bitwidth(bitwidth) {}
+
 	using KeyTy = unsigned;
-	
-	bool operator==(const KeyTy &key) const { return key == bitwidth; }
-	
-	static IntTypeStorage *construct(mlir::TypeStorageAllocator &allocator,
-	                                  const KeyTy &key) {
+
+	bool operator==(const KeyTy& key) const { return key == bitwidth; }
+
+	static IntTypeStorage* construct(mlir::TypeStorageAllocator& allocator, const KeyTy& key)
+	{
 		return new (allocator.allocate<IntTypeStorage>()) IntTypeStorage(key);
 	}
-	
+
 	unsigned bitwidth;
 };
 
-struct BytesTypeStorage : public mlir::TypeStorage {
-	BytesTypeStorage(unsigned size) : size(size) {}
-	
+struct BytesTypeStorage: public mlir::TypeStorage
+{
+	BytesTypeStorage(unsigned size): size(size) {}
+
 	using KeyTy = unsigned;
-	
-	bool operator==(const KeyTy &key) const { return key == size; }
-	
-	static BytesTypeStorage *construct(mlir::TypeStorageAllocator &allocator,
-	                                    const KeyTy &key) {
+
+	bool operator==(const KeyTy& key) const { return key == size; }
+
+	static BytesTypeStorage* construct(mlir::TypeStorageAllocator& allocator, const KeyTy& key)
+	{
 		return new (allocator.allocate<BytesTypeStorage>()) BytesTypeStorage(key);
 	}
-	
+
 	unsigned size;
 };
 
-struct ArrayTypeStorage : public mlir::TypeStorage {
-	ArrayTypeStorage(mlir::Type elementType, int64_t size)
-	    : elementType(elementType), size(size) {}
-	
+struct ArrayTypeStorage: public mlir::TypeStorage
+{
+	ArrayTypeStorage(mlir::Type elementType, int64_t size): elementType(elementType), size(size) {}
+
 	using KeyTy = std::pair<mlir::Type, int64_t>;
-	
-	bool operator==(const KeyTy &key) const {
-		return key.first == elementType && key.second == size;
+
+	bool operator==(const KeyTy& key) const { return key.first == elementType && key.second == size; }
+
+	static ArrayTypeStorage* construct(mlir::TypeStorageAllocator& allocator, const KeyTy& key)
+	{
+		return new (allocator.allocate<ArrayTypeStorage>()) ArrayTypeStorage(key.first, key.second);
 	}
-	
-	static ArrayTypeStorage *construct(mlir::TypeStorageAllocator &allocator,
-	                                    const KeyTy &key) {
-		return new (allocator.allocate<ArrayTypeStorage>())
-		    ArrayTypeStorage(key.first, key.second);
-	}
-	
+
 	mlir::Type elementType;
 	int64_t size;
 };
@@ -118,227 +121,193 @@ struct ArrayTypeStorage : public mlir::TypeStorage {
 // Type Definitions
 //===----------------------------------------------------------------------===//
 
-UIntType UIntType::get(mlir::MLIRContext *context, unsigned bitwidth) {
-	return Base::get(context, bitwidth);
-}
+UIntType UIntType::get(mlir::MLIRContext* context, unsigned bitwidth) { return Base::get(context, bitwidth); }
 
-unsigned UIntType::getBitWidth() const {
-	return getImpl()->bitwidth;
-}
+unsigned UIntType::getBitWidth() const { return getImpl()->bitwidth; }
 
-IntType IntType::get(mlir::MLIRContext *context, unsigned bitwidth) {
-	return Base::get(context, bitwidth);
-}
+IntType IntType::get(mlir::MLIRContext* context, unsigned bitwidth) { return Base::get(context, bitwidth); }
 
-unsigned IntType::getBitWidth() const {
-	return getImpl()->bitwidth;
-}
+unsigned IntType::getBitWidth() const { return getImpl()->bitwidth; }
 
-AddressType AddressType::get(mlir::MLIRContext *context) {
-	return Base::get(context);
-}
+AddressType AddressType::get(mlir::MLIRContext* context) { return Base::get(context); }
 
-BoolType BoolType::get(mlir::MLIRContext *context) {
-	return Base::get(context);
-}
+BoolType BoolType::get(mlir::MLIRContext* context) { return Base::get(context); }
 
-BytesType BytesType::get(mlir::MLIRContext *context, unsigned size) {
-	return Base::get(context, size);
-}
+BytesType BytesType::get(mlir::MLIRContext* context, unsigned size) { return Base::get(context, size); }
 
-unsigned BytesType::getSize() const {
-	return getImpl()->size;
-}
+unsigned BytesType::getSize() const { return getImpl()->size; }
 
-DynamicBytesType DynamicBytesType::get(mlir::MLIRContext *context) {
-	return Base::get(context);
-}
+DynamicBytesType DynamicBytesType::get(mlir::MLIRContext* context) { return Base::get(context); }
 
-StringType StringType::get(mlir::MLIRContext *context) {
-	return Base::get(context);
-}
+StringType StringType::get(mlir::MLIRContext* context) { return Base::get(context); }
 
-ArrayType ArrayType::get(mlir::Type elementType, int64_t size) {
+ArrayType ArrayType::get(mlir::Type elementType, int64_t size)
+{
 	return Base::get(elementType.getContext(), elementType, size);
 }
 
-mlir::Type ArrayType::getElementType() const {
-	return getImpl()->elementType;
-}
+mlir::Type ArrayType::getElementType() const { return getImpl()->elementType; }
 
-int64_t ArrayType::getSize() const {
-	return getImpl()->size;
-}
+int64_t ArrayType::getSize() const { return getImpl()->size; }
 
 //===----------------------------------------------------------------------===//
 // Dialect Definition
 //===----------------------------------------------------------------------===//
 
-SolidityDialect::SolidityDialect(mlir::MLIRContext *context)
-    : mlir::Dialect(getDialectNamespace(), context, mlir::TypeID::get<SolidityDialect>()) {
-
+SolidityDialect::SolidityDialect(mlir::MLIRContext* context)
+	: mlir::Dialect(getDialectNamespace(), context, mlir::TypeID::get<SolidityDialect>())
+{
 	// Allow unknown operations - we generate many operations dynamically
 	// that are lowered directly to Yul without needing TableGen registration.
 	allowUnknownOperations(true);
 
 	// Register Solidity types
-	addTypes<
-		UIntType,
-		IntType,
-		AddressType,
-		BoolType,
-		BytesType,
-		DynamicBytesType,
-		StringType,
-		ArrayType
-	>();
-	
+	addTypes<UIntType, IntType, AddressType, BoolType, BytesType, DynamicBytesType, StringType, ArrayType>();
+
 	// Register operations generated from TableGen
 	addOperations<
 #define GET_OP_LIST
 #include "SolidityOps.cpp.inc"
-	>();
+		>();
 }
 
 /// Parse a type registered to this dialect.
-mlir::Type SolidityDialect::parseType(mlir::DialectAsmParser &parser) const {
+mlir::Type SolidityDialect::parseType(mlir::DialectAsmParser& parser) const
+{
 	llvm::StringRef keyword;
 	if (parser.parseKeyword(&keyword))
 		return Type();
-	
+
 	// Parse uint<N>
-	if (keyword == "uint") {
+	if (keyword == "uint")
+	{
 		if (parser.parseLess())
 			return Type();
-		
+
 		unsigned bitwidth;
 		if (parser.parseInteger(bitwidth))
 			return Type();
-		
+
 		if (parser.parseGreater())
 			return Type();
-		
+
 		return UIntType::get(getContext(), bitwidth);
 	}
-	
+
 	// Parse int<N>
-	if (keyword == "int") {
+	if (keyword == "int")
+	{
 		if (parser.parseLess())
 			return Type();
-		
+
 		unsigned bitwidth;
 		if (parser.parseInteger(bitwidth))
 			return Type();
-		
+
 		if (parser.parseGreater())
 			return Type();
-		
+
 		return IntType::get(getContext(), bitwidth);
 	}
-	
+
 	// Parse address
-	if (keyword == "address") {
+	if (keyword == "address")
+	{
 		return AddressType::get(getContext());
 	}
-	
+
 	// Parse bool
-	if (keyword == "bool") {
+	if (keyword == "bool")
+	{
 		return BoolType::get(getContext());
 	}
-	
+
 	// Parse bytes<N>
-	if (keyword == "bytes") {
+	if (keyword == "bytes")
+	{
 		// Check if it's fixed-size bytes
-		if (!parser.parseLess()) {
+		if (!parser.parseLess())
+		{
 			unsigned size;
 			if (parser.parseInteger(size))
 				return Type();
-			
+
 			if (parser.parseGreater())
 				return Type();
-			
+
 			return BytesType::get(getContext(), size);
-		} else {
+		}
+		else
+		{
 			// Dynamic bytes
 			return DynamicBytesType::get(getContext());
 		}
 	}
-	
+
 	// Parse string
-	if (keyword == "string") {
+	if (keyword == "string")
+	{
 		return StringType::get(getContext());
 	}
-	
+
 	// Parse array<ElementType, Size>
-	if (keyword == "array") {
+	if (keyword == "array")
+	{
 		if (parser.parseLess())
 			return Type();
-		
+
 		mlir::Type elementType;
 		if (parser.parseType(elementType))
 			return Type();
-		
+
 		if (parser.parseComma())
 			return Type();
-		
+
 		int64_t size;
 		if (parser.parseInteger(size))
 			return Type();
-		
+
 		if (parser.parseGreater())
 			return Type();
-		
+
 		return ArrayType::get(elementType, size);
 	}
-	
+
 	parser.emitError(parser.getNameLoc(), "unknown Solidity type: ") << keyword;
 	return Type();
 }
 
 /// Print a type registered to this dialect.
-void SolidityDialect::printType(mlir::Type type, mlir::DialectAsmPrinter &os) const {
+void SolidityDialect::printType(mlir::Type type, mlir::DialectAsmPrinter& os) const
+{
 	llvm::TypeSwitch<mlir::Type>(type)
-	    .Case<UIntType>([&](UIntType t) {
-		    os << "uint<" << t.getBitWidth() << ">";
-	    })
-	    .Case<IntType>([&](IntType t) {
-		    os << "int<" << t.getBitWidth() << ">";
-	    })
-	    .Case<AddressType>([&](AddressType) {
-		    os << "address";
-	    })
-	    .Case<BoolType>([&](BoolType) {
-		    os << "bool";
-	    })
-	    .Case<BytesType>([&](BytesType t) {
-		    os << "bytes<" << t.getSize() << ">";
-	    })
-	    .Case<DynamicBytesType>([&](DynamicBytesType) {
-		    os << "bytes";
-	    })
-	    .Case<StringType>([&](StringType) {
-		    os << "string";
-	    })
-	    .Case<ArrayType>([&](ArrayType t) {
-		    os << "array<";
-		    os.printType(t.getElementType());
-		    os << ", " << t.getSize() << ">";
-	    })
-	    .Default([&](Type) {
-		    llvm::errs() << "unknown type\n";
-	    });
+		.Case<UIntType>([&](UIntType t) { os << "uint<" << t.getBitWidth() << ">"; })
+		.Case<IntType>([&](IntType t) { os << "int<" << t.getBitWidth() << ">"; })
+		.Case<AddressType>([&](AddressType) { os << "address"; })
+		.Case<BoolType>([&](BoolType) { os << "bool"; })
+		.Case<BytesType>([&](BytesType t) { os << "bytes<" << t.getSize() << ">"; })
+		.Case<DynamicBytesType>([&](DynamicBytesType) { os << "bytes"; })
+		.Case<StringType>([&](StringType) { os << "string"; })
+		.Case<ArrayType>(
+			[&](ArrayType t)
+			{
+				os << "array<";
+				os.printType(t.getElementType());
+				os << ", " << t.getSize() << ">";
+			})
+		.Default([&](Type) { llvm::errs() << "unknown type\n"; });
 }
 
 /// Parse an attribute registered to this dialect.
-mlir::Attribute SolidityDialect::parseAttribute(mlir::DialectAsmParser &parser,
-                                                 mlir::Type type) const {
+mlir::Attribute SolidityDialect::parseAttribute(mlir::DialectAsmParser& parser, mlir::Type type) const
+{
 	// For now, we don't have custom attributes
 	return Attribute();
 }
 
 /// Print an attribute registered to this dialect.
-void SolidityDialect::printAttribute(mlir::Attribute attr,
-                                      mlir::DialectAsmPrinter &os) const {
+void SolidityDialect::printAttribute(mlir::Attribute attr, mlir::DialectAsmPrinter& os) const
+{
 	// For now, we don't have custom attributes
 }
 
@@ -346,7 +315,7 @@ void SolidityDialect::printAttribute(mlir::Attribute attr,
 // Operation Definitions
 //===----------------------------------------------------------------------===//
 
-// Include the auto-generated operation definitions  
+// Include the auto-generated operation definitions
 // TODO: Enable once TableGen is working
 // #define GET_OP_CLASSES
 // #include "SolidityOps.cpp.inc"

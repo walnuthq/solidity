@@ -35,8 +35,10 @@
 #include "SolidityDialect.h"
 
 // Forward declare the dialect namespace
-namespace mlir {
-namespace solidity {
+namespace mlir
+{
+namespace solidity
+{
 } // namespace solidity
 } // namespace mlir
 
