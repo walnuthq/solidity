@@ -1939,22 +1939,101 @@ private:
 		}
 		else if (opName == "solidity.array_push")
 		{
-			// Array push is a storage operation
-			// This is a simplified implementation
+			// Dynamic array push: read length, compute element slot, store value, increment length
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumOperands() >= 2)
 			{
-				std::string arrayVar = getVariableName(op->getOperand(0));
 				std::string valueVar = getVariableName(op->getOperand(1));
-				// For now, this is a no-op in the simplified implementation
-				// In a full implementation, this would manage dynamic array storage
-				return yul::ExpressionStatement{
-					debugData,
-					yul::FunctionCall{
+
+				// Look up storage slot from varName attribute
+				uint32_t slot = 0;
+				if (auto nameAttr = op->getAttrOfType<mlir::StringAttr>("varName"))
+				{
+					auto it = m_stateVariableSlots.find(nameAttr.getValue().str());
+					if (it != m_stateVariableSlots.end())
+						slot = it->second;
+				}
+
+				std::string lenVar = "v" + std::to_string(m_functionVarCounter++);
+				std::string baseVar = "v" + std::to_string(m_functionVarCounter++);
+				std::string elemSlotVar = "v" + std::to_string(m_functionVarCounter++);
+				std::string newLenVar = "v" + std::to_string(m_functionVarCounter++);
+
+				std::vector<yul::Statement> statements;
+
+				// let arr_len := sload(slot)
+				statements.push_back(
+					yul::VariableDeclaration{
 						debugData,
-						yul::Identifier{debugData, yul::YulName("sstore")},
-						{yul::Identifier{debugData, yul::YulName(arrayVar)},
-						 yul::Identifier{debugData, yul::YulName(valueVar)}}}};
+						{{debugData, yul::YulName(lenVar)}},
+						std::make_unique<yul::Expression>(yul::FunctionCall{
+							debugData,
+							yul::Identifier{debugData, yul::YulName("sload")},
+							{yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(slot))}}})});
+
+				// Compute base data slot: mstore(0, slot); let arr_base := keccak256(0, 32)
+				statements.push_back(
+					yul::ExpressionStatement{
+						debugData,
+						yul::FunctionCall{
+							debugData,
+							yul::Identifier{debugData, yul::YulName("mstore")},
+							{yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))},
+							 yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(slot))}}}});
+
+				statements.push_back(
+					yul::VariableDeclaration{
+						debugData,
+						{{debugData, yul::YulName(baseVar)}},
+						std::make_unique<yul::Expression>(yul::FunctionCall{
+							debugData,
+							yul::Identifier{debugData, yul::YulName("keccak256")},
+							{yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))},
+							 yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(32))}}})});
+
+				// let arr_elem_slot := add(arr_base, arr_len)
+				statements.push_back(
+					yul::VariableDeclaration{
+						debugData,
+						{{debugData, yul::YulName(elemSlotVar)}},
+						std::make_unique<yul::Expression>(yul::FunctionCall{
+							debugData,
+							yul::Identifier{debugData, yul::YulName("add")},
+							{yul::Identifier{debugData, yul::YulName(baseVar)},
+							 yul::Identifier{debugData, yul::YulName(lenVar)}}})});
+
+				// sstore(arr_elem_slot, value)
+				statements.push_back(
+					yul::ExpressionStatement{
+						debugData,
+						yul::FunctionCall{
+							debugData,
+							yul::Identifier{debugData, yul::YulName("sstore")},
+							{yul::Identifier{debugData, yul::YulName(elemSlotVar)},
+							 yul::Identifier{debugData, yul::YulName(valueVar)}}}});
+
+				// let arr_new_len := add(arr_len, 1)
+				statements.push_back(
+					yul::VariableDeclaration{
+						debugData,
+						{{debugData, yul::YulName(newLenVar)}},
+						std::make_unique<yul::Expression>(yul::FunctionCall{
+							debugData,
+							yul::Identifier{debugData, yul::YulName("add")},
+							{yul::Identifier{debugData, yul::YulName(lenVar)},
+							 yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(1))}}})});
+
+				// sstore(slot, arr_new_len)
+				statements.push_back(
+					yul::ExpressionStatement{
+						debugData,
+						yul::FunctionCall{
+							debugData,
+							yul::Identifier{debugData, yul::YulName("sstore")},
+							{yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(slot))},
+							 yul::Identifier{debugData, yul::YulName(newLenVar)}}}});
+
+				return yul::Block{debugData, std::move(statements)};
 			}
 		}
 		else if (opName == "solidity.array_length")
@@ -4070,11 +4149,19 @@ private:
 	std::optional<yul::Statement> processMappingAccessOpToAST(mlir::Operation* op)
 	{
 		auto debugData = langutil::DebugData::create();
-		if (op->getNumResults() > 0 && op->getNumOperands() >= 2)
+		if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
 		{
 			std::string resultVar = getOrCreateVariableName(op->getResult(0));
-			std::string mapping = getVariableName(op->getOperand(0));
-			std::string key = getVariableName(op->getOperand(1));
+			std::string key = getVariableName(op->getOperand(0));
+
+			// Look up storage slot from varName attribute
+			uint32_t slot = 0;
+			if (auto nameAttr = op->getAttrOfType<mlir::StringAttr>("varName"))
+			{
+				auto it = m_stateVariableSlots.find(nameAttr.getValue().str());
+				if (it != m_stateVariableSlots.end())
+					slot = it->second;
+			}
 
 			// Calculate mapping storage slot using keccak256(key . mapping_slot)
 			std::vector<yul::Statement> statements;
@@ -4097,7 +4184,7 @@ private:
 						debugData,
 						yul::Identifier{debugData, yul::YulName("mstore")},
 						{yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(32))},
-						 yul::Identifier{debugData, yul::YulName(mapping)}}}});
+						 yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(slot))}}}});
 
 			// resultVar := sload(keccak256(0, 64))
 			statements.push_back(
@@ -4122,11 +4209,19 @@ private:
 	std::optional<yul::Statement> processMappingStoreOpToAST(mlir::Operation* op)
 	{
 		auto debugData = langutil::DebugData::create();
-		if (op->getNumOperands() >= 3)
+		if (op->getNumOperands() >= 2)
 		{
-			std::string mapping = getVariableName(op->getOperand(0));
-			std::string key = getVariableName(op->getOperand(1));
-			std::string value = getVariableName(op->getOperand(2));
+			std::string key = getVariableName(op->getOperand(0));
+			std::string value = getVariableName(op->getOperand(1));
+
+			// Look up storage slot from varName attribute
+			uint32_t slot = 0;
+			if (auto nameAttr = op->getAttrOfType<mlir::StringAttr>("varName"))
+			{
+				auto it = m_stateVariableSlots.find(nameAttr.getValue().str());
+				if (it != m_stateVariableSlots.end())
+					slot = it->second;
+			}
 
 			std::vector<yul::Statement> statements;
 
@@ -4148,7 +4243,7 @@ private:
 						debugData,
 						yul::Identifier{debugData, yul::YulName("mstore")},
 						{yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(32))},
-						 yul::Identifier{debugData, yul::YulName(mapping)}}}});
+						 yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(slot))}}}});
 
 			// sstore(keccak256(0, 64), value)
 			statements.push_back(

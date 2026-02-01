@@ -616,6 +616,29 @@ public:
 						}
 					}
 				}
+				else if (auto* indexAccess = dynamic_cast<IndexAccess const*>(&assignment->leftHandSide()))
+				{
+					// Handle compound assignment to mapping elements: m[k] += v
+					if (auto* mappingType
+						= dynamic_cast<MappingType const*>(indexAccess->baseExpression().annotation().type))
+					{
+						auto key = generateSolidityExpression(*indexAccess->indexExpression());
+						auto valueType = translateSolidityType(*mappingType->valueType());
+
+						// Get the state variable name for the mapping
+						std::string varName;
+						if (auto* baseIdent = dynamic_cast<Identifier const*>(&indexAccess->baseExpression()))
+							if (auto* varDecl = dynamic_cast<VariableDeclaration const*>(
+									baseIdent->annotation().referencedDeclaration))
+								varName = varDecl->name();
+
+						mlir::OperationState accessState(loc, "solidity.mapping_access");
+						accessState.addAttribute("varName", m_builder->getStringAttr(varName));
+						accessState.addOperands({key});
+						accessState.addTypes(valueType);
+						currentValue = m_builder->create(accessState)->getResult(0);
+					}
+				}
 
 				// Get the right-hand side value
 				auto rightValue = generateSolidityExpression(assignment->rightHandSide());
@@ -679,6 +702,26 @@ public:
 					{
 						m_valueMap[varDecl->id()] = value;
 					}
+				}
+			}
+			else if (auto* indexAccess = dynamic_cast<IndexAccess const*>(&assignment->leftHandSide()))
+			{
+				// Handle store to mapping elements: m[k] = v or m[k] += v
+				if (dynamic_cast<MappingType const*>(indexAccess->baseExpression().annotation().type))
+				{
+					auto key = generateSolidityExpression(*indexAccess->indexExpression());
+
+					// Get the state variable name for the mapping
+					std::string varName;
+					if (auto* baseIdent = dynamic_cast<Identifier const*>(&indexAccess->baseExpression()))
+						if (auto* varDecl
+							= dynamic_cast<VariableDeclaration const*>(baseIdent->annotation().referencedDeclaration))
+							varName = varDecl->name();
+
+					mlir::OperationState storeOp(loc, "solidity.mapping_store");
+					storeOp.addAttribute("varName", m_builder->getStringAttr(varName));
+					storeOp.addOperands({key, value});
+					m_builder->create(storeOp);
 				}
 			}
 
@@ -954,6 +997,13 @@ public:
 					{
 						auto value = generateSolidityExpression(*funcCall->arguments()[0]);
 						mlir::OperationState pushState(loc, "solidity.array_push");
+
+						// Get the state variable name for the array
+						if (auto* baseIdent = dynamic_cast<Identifier const*>(&memberAccess->expression()))
+							if (auto* varDecl = dynamic_cast<VariableDeclaration const*>(
+									baseIdent->annotation().referencedDeclaration))
+								pushState.addAttribute("varName", m_builder->getStringAttr(varDecl->name()));
+
 						pushState.addOperands({base, value});
 						m_builder->create(pushState);
 						return base;
