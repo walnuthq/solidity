@@ -1,6 +1,15 @@
 # MLIR Test Suite Configuration
 
 if(SOLIDITY_HAS_MLIR)
+    # Import LLVM lit/testing CMake functions
+    include(AddLLVM)
+
+    # Find lit executable for running tests
+    find_program(LLVM_EXTERNAL_LIT NAMES lit llvm-lit
+        HINTS ${LLVM_TOOLS_BINARY_DIR}
+        DOC "Path to lit test runner"
+    )
+
     # Configure lit site configuration
     configure_lit_site_cfg(
         ${CMAKE_CURRENT_SOURCE_DIR}/lit.site.cfg.py.in
@@ -13,9 +22,8 @@ if(SOLIDITY_HAS_MLIR)
     add_lit_testsuite(check-solidity-mlir
         "Running Solidity MLIR tests"
         ${CMAKE_CURRENT_BINARY_DIR}
-        DEPENDS 
+        DEPENDS
             solc
-            FileCheck
             SolidityDialect
     )
 
@@ -29,4 +37,3 @@ if(SOLIDITY_HAS_MLIR)
         configure_file(${test_file} ${CMAKE_CURRENT_BINARY_DIR} COPYONLY)
     endforeach()
 endif()
-EOF < /dev/null
