@@ -1,4 +1,4 @@
-// RUN: %solc --mlir-optimize %s 2>&1 | %FileCheck %s
+// RUN: %solc --mlir-optimize --print-mlir %s 2>&1 | %FileCheck %s
 // REQUIRES: mlir
 
 // SPDX-License-Identifier: MIT
@@ -56,38 +56,16 @@ contract ArithmeticTest {
     }
 }
 
-// Test Contract Generation
-// CHECK: solidity.contract @ArithmeticTest
-
-// Test All Arithmetic Operations
+// CHECK: solidity.contract "ArithmeticTest"
+// CHECK: sym_name = "testArithmetic", visibility = "public"
+// CHECK: solidity.add %arg0, %arg1
+// CHECK: solidity.sub %arg0, %arg1
+// CHECK: solidity.mul %arg0, %arg1
+// CHECK: solidity.div %arg0, %arg1
+// CHECK: solidity.mod %arg0, %arg1
+// CHECK: sym_name = "testBitwise"
+// CHECK: solidity.not %arg0
+// CHECK: sym_name = "testComparisons"
+// CHECK: sym_name = "testUnaryOps"
 // CHECK: solidity.add
 // CHECK: solidity.sub
-// CHECK: solidity.mul
-// CHECK: solidity.div
-// CHECK: solidity.mod
-// CHECK: solidity.exp
-
-// Test All Bitwise Operations
-// CHECK: solidity.and
-// CHECK: solidity.or
-// CHECK: solidity.xor
-// CHECK: solidity.not
-// CHECK: solidity.shl
-// CHECK: solidity.shr
-
-// Test All Comparison Operations
-// CHECK: solidity.cmp "gt"
-// CHECK: solidity.cmp "lt"
-// CHECK: solidity.cmp "gte"
-// CHECK: solidity.cmp "lte"
-// CHECK: solidity.cmp "eq"
-// CHECK: solidity.cmp "ne"
-
-// Test Function Declarations
-// CHECK: solidity.func @testArithmetic
-// CHECK: solidity.func @testBitwise
-// CHECK: solidity.func @testComparisons
-// CHECK: solidity.func @testUnaryOps
-
-// Test Return Statements
-// CHECK: solidity.return

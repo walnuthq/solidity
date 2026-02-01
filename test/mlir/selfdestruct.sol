@@ -1,4 +1,4 @@
-// RUN: %solc --mlir-optimize %s 2>&1 | %FileCheck %s
+// RUN: %solc --mlir-optimize --print-mlir %s 2>&1 | %FileCheck %s
 // REQUIRES: mlir
 
 // SPDX-License-Identifier: MIT
@@ -19,11 +19,8 @@ contract TestSelfdestruct {
     }
 }
 
-// Test Contract Generation
 // CHECK: solidity.contract "TestSelfdestruct"
-
-// Test Selfdestruct Operation
-// CHECK: solidity.selfdestruct %{{.*}} : !solidity.address
-
-// Test Function Declaration
+// CHECK: solidity.state_var "owner" : !solidity.address
 // CHECK: sym_name = "destroy"
+// CHECK: solidity.load_state "owner"
+// CHECK: solidity.selfdestruct

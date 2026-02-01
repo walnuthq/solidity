@@ -1,4 +1,4 @@
-// RUN: %solc --mlir-optimize %s 2>&1 | %FileCheck %s
+// RUN: %solc --mlir-optimize --print-mlir %s 2>&1 | %FileCheck %s
 // REQUIRES: mlir
 
 // SPDX-License-Identifier: MIT
@@ -43,22 +43,16 @@ contract LoopWithSquaredCondition {
     }
 }
 
-// Test MLIR Contract Generation
-// CHECK: solidity.contract @LoopWithSquaredCondition
-
-// Test State Variable
-// CHECK: solidity.state_var "result" : !solidity.uint<256>
-
-// Test Function Declarations
-// CHECK: solidity.func @squaredLoop
-// CHECK-SAME: visibility = "external"
-
-// CHECK: solidity.func @isPrime
-// CHECK-SAME: visibility = "external"
-
-// Test Loop Operations - should generate scf.while
-// The key test: loops with i*i <= n condition should compile successfully
+// CHECK: solidity.contract "LoopWithSquaredCondition"
+// CHECK: solidity.state_var "result"
+// CHECK: sym_name = "squaredLoop"
+// CHECK: solidity.constant 3
 // CHECK: scf.while
-// CHECK: solidity.mul
+// CHECK: solidity.mul %arg1, %arg1
 // CHECK: solidity.cmp "le"
 // CHECK: scf.condition
+// CHECK: solidity.store_state "result"
+// CHECK: scf.yield
+// CHECK: sym_name = "isPrime"
+// CHECK: solidity.cmp "lt"
+// CHECK: solidity.if

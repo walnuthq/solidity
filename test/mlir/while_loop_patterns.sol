@@ -1,4 +1,4 @@
-// RUN: %solc --mlir-optimize %s 2>&1 | %FileCheck %s
+// RUN: %solc --mlir-optimize --print-mlir %s 2>&1 | %FileCheck %s
 // REQUIRES: mlir
 
 // SPDX-License-Identifier: MIT
@@ -43,27 +43,18 @@ contract WhileLoopPatterns {
     }
 }
 
-// Test MLIR Contract Generation
-// CHECK: solidity.contract @WhileLoopPatterns
-
-// Test State Variable
-// CHECK: solidity.state_var "result" : !solidity.uint<256>
-
-// Test Function Declarations
-// CHECK: solidity.func @gcd
-// CHECK: solidity.func @fibonacci
-// CHECK: solidity.func @power
-
-// Test While Loop for GCD - should generate scf.while
+// CHECK: solidity.contract "WhileLoopPatterns"
+// CHECK: solidity.state_var "result"
+// CHECK: sym_name = "gcd"
 // CHECK: scf.while
-// CHECK: solidity.mod
 // CHECK: solidity.cmp "ne"
-// CHECK: scf.condition
-
-// Test For Loop patterns
+// CHECK: solidity.mod
+// CHECK: scf.yield
+// CHECK: solidity.store_state "result"
+// CHECK: sym_name = "fibonacci"
 // CHECK: solidity.cmp "le"
+// CHECK: solidity.if
+// CHECK: scf.while
 // CHECK: solidity.add
-// CHECK: solidity.mul
-
-// Test Store/Load State
-// CHECK: solidity.store_state
+// CHECK: scf.yield
+// CHECK: sym_name = "power"

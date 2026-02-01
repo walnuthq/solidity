@@ -282,6 +282,21 @@ private:
 		return langutil::DebugData::create();
 	}
 
+	/// Helper to add a statement to a vector, unwrapping yul::Block into flat statements.
+	/// This avoids creating nested { } scopes that hide variable declarations from the parent scope.
+	void addStatementFlattened(std::vector<yul::Statement>& target, yul::Statement stmt)
+	{
+		if (auto* blockStmt = std::get_if<yul::Block>(&stmt))
+		{
+			for (auto& s: blockStmt->statements)
+				target.push_back(std::move(s));
+		}
+		else
+		{
+			target.push_back(std::move(stmt));
+		}
+	}
+
 	std::unique_ptr<mlir::ModuleOp> parseMLIR(std::string const& _mlirText)
 	{
 		// Parse the MLIR module from string
@@ -1683,18 +1698,7 @@ private:
 				{
 					auto stmt = processOperationToStatement(&op);
 					if (stmt)
-					{
-						// If the statement is a Block, unwrap it and add its statements
-						if (auto* blockStmt = std::get_if<yul::Block>(&*stmt))
-						{
-							for (auto& s: blockStmt->statements)
-								bodyStatements.push_back(std::move(s));
-						}
-						else
-						{
-							bodyStatements.push_back(std::move(*stmt));
-						}
-					}
+						addStatementFlattened(bodyStatements, std::move(*stmt));
 				}
 			}
 		}
@@ -3166,7 +3170,7 @@ private:
 					{
 						auto stmt = processOperationToStatement(&innerOp);
 						if (stmt)
-							thenStatements.push_back(std::move(*stmt));
+							addStatementFlattened(thenStatements, std::move(*stmt));
 					}
 				}
 			}
@@ -3199,7 +3203,7 @@ private:
 				{
 					auto stmt = processOperationToStatement(&innerOp);
 					if (stmt)
-						initStatements.push_back(std::move(*stmt));
+						addStatementFlattened(initStatements, std::move(*stmt));
 				}
 			}
 		}
@@ -3213,7 +3217,7 @@ private:
 				{
 					auto stmt = processOperationToStatement(&innerOp);
 					if (stmt)
-						bodyStatements.push_back(std::move(*stmt));
+						addStatementFlattened(bodyStatements, std::move(*stmt));
 				}
 			}
 		}
@@ -3227,7 +3231,7 @@ private:
 				{
 					auto stmt = processOperationToStatement(&innerOp);
 					if (stmt)
-						postStatements.push_back(std::move(*stmt));
+						addStatementFlattened(postStatements, std::move(*stmt));
 				}
 			}
 		}
@@ -3266,7 +3270,7 @@ private:
 				{
 					auto stmt = processOperationToStatement(&innerOp);
 					if (stmt)
-						bodyStatements.push_back(std::move(*stmt));
+						addStatementFlattened(bodyStatements, std::move(*stmt));
 				}
 			}
 		}
@@ -3307,7 +3311,7 @@ private:
 				{
 					auto stmt = processOperationToStatement(&innerOp);
 					if (stmt)
-						bodyStatements.push_back(std::move(*stmt));
+						addStatementFlattened(bodyStatements, std::move(*stmt));
 				}
 			}
 		}
@@ -3461,7 +3465,7 @@ private:
 					// Process all other operations as statements
 					auto stmt = processOperationToStatement(&innerOp);
 					if (stmt)
-						conditionStatements.push_back(std::move(*stmt));
+						addStatementFlattened(conditionStatements, std::move(*stmt));
 				}
 
 				// Second pass: look for the condition operation and build the expression
@@ -3793,7 +3797,7 @@ private:
 						auto stmt = processOperationToStatement(&innerOp);
 						if (stmt)
 						{
-							bodyStatements.push_back(std::move(*stmt));
+							addStatementFlattened(bodyStatements, std::move(*stmt));
 
 							// If this operation produces a value that will be yielded as a loop-carried value,
 							// we need to assign it to the corresponding loop variable

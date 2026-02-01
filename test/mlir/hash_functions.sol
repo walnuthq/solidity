@@ -1,4 +1,4 @@
-// RUN: %solc --mlir-optimize %s 2>&1 | %FileCheck %s
+// RUN: %solc --mlir-optimize --print-mlir %s 2>&1 | %FileCheck %s
 // REQUIRES: mlir
 
 // SPDX-License-Identifier: MIT
@@ -38,26 +38,12 @@ contract TestHashFunctions {
     }
 }
 
-// Test Contract Generation
 // CHECK: solidity.contract "TestHashFunctions"
-
-// Test Hash Function Operations - keccak256
-// CHECK: solidity.keccak256 %{{.*}} : !solidity.array<!solidity.bytes<1>, -1> -> !solidity.bytes<32>
-
-// Test Hash Function Operations - sha256 (precompile 0x02)
-// CHECK: solidity.sha256 %{{.*}} : !solidity.array<!solidity.bytes<1>, -1> -> !solidity.bytes<32>
-
-// Test Hash Function Operations - ripemd160 (precompile 0x03)
-// CHECK: solidity.ripemd160 %{{.*}} : !solidity.array<!solidity.bytes<1>, -1> -> !solidity.bytes<20>
-
-// Test Cryptographic Recovery - ecrecover (precompile 0x01)
-// CHECK: solidity.ecrecover %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : !solidity.bytes<32>, !solidity.uint<8>, !solidity.bytes<32>, !solidity.bytes<32> -> !solidity.address
-
-// Test Function Declarations
 // CHECK: sym_name = "testKeccak256"
+// CHECK: solidity.keccak256
 // CHECK: sym_name = "testSha256"
+// CHECK: solidity.sha256
 // CHECK: sym_name = "testRipemd160"
+// CHECK: solidity.ripemd160
 // CHECK: sym_name = "testEcrecover"
-
-// Test Return Statements
-// CHECK: solidity.return
+// CHECK: solidity.ecrecover

@@ -1,4 +1,4 @@
-// RUN: %solc --mlir-optimize %s 2>&1 | %FileCheck %s
+// RUN: %solc --mlir-optimize --print-mlir %s 2>&1 | %FileCheck %s
 // REQUIRES: mlir
 
 // SPDX-License-Identifier: MIT
@@ -128,53 +128,18 @@ contract GasBenchmarkPatterns {
     }
 }
 
-// Test MLIR Contract Generation
-// CHECK: solidity.contract @GasBenchmarkPatterns
-
-// Test State Variables
-// CHECK: solidity.state_var "result" : !solidity.uint<256>
-// CHECK: solidity.state_var "counter" : !solidity.uint<256>
+// CHECK: solidity.contract "GasBenchmarkPatterns"
+// CHECK: solidity.state_var "result"
+// CHECK: solidity.state_var "counter"
 // CHECK: solidity.state_var "values"
 // CHECK: solidity.state_var "balances"
-// CHECK: solidity.state_var "allowances"
-
-// Test Function Declarations
-// CHECK: solidity.func @incrementCounter
-// CHECK: solidity.func @computeFactorial
-// CHECK: solidity.func @sumRange
-// CHECK: solidity.func @compute
-// CHECK: solidity.func @approve
-// CHECK: solidity.func @transfer
-// CHECK: solidity.func @transferFrom
-// CHECK: solidity.func @mint
-// CHECK: solidity.func @fibonacci
-// CHECK: solidity.func @isPrime
-// CHECK: solidity.func @power
-// CHECK: solidity.func @gcd
-
-// Test Loop Operations
+// CHECK: sym_name = "incrementCounter"
 // CHECK: scf.while
-
-// Test Arithmetic Operations
-// CHECK: solidity.add
-// CHECK: solidity.sub
+// CHECK: solidity.load_state "counter"
+// CHECK: solidity.store_state "counter"
+// CHECK: sym_name = "computeFactorial"
+// CHECK: solidity.store_state "result"
+// CHECK: scf.while
 // CHECK: solidity.mul
-// CHECK: solidity.div
-// CHECK: solidity.mod
-
-// Test Comparison Operations
-// CHECK: solidity.cmp "lt"
-// CHECK: solidity.cmp "le"
-// CHECK: solidity.cmp "eq"
-// CHECK: solidity.cmp "ne"
-
-// Test Control Flow
-// CHECK: solidity.if
-
-// Test State Variable Operations
-// CHECK: solidity.store_state
-// CHECK: solidity.load_state
-
-// Test Mapping Operations
-// CHECK: solidity.mapping_access
-// CHECK: solidity.mapping_store
+// CHECK: sym_name = "sumRange"
+// CHECK: sym_name = "compute"

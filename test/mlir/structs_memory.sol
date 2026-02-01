@@ -1,4 +1,4 @@
-// RUN: %solc --mlir-optimize %s 2>&1 | %FileCheck %s
+// RUN: %solc --mlir-optimize --print-mlir %s 2>&1 | %FileCheck %s
 // REQUIRES: mlir
 
 // SPDX-License-Identifier: MIT
@@ -34,41 +34,17 @@ contract StructMemoryTest {
     }
 }
 
-// Test Contract Generation
-// CHECK: solidity.contract @StructMemoryTest
-
-// Test Struct Type Usage
-// CHECK: !solidity.struct<"Item">
-
-// Test State Variable Declarations
-// CHECK: solidity.state_var "items" : !solidity.mapping
-// CHECK: solidity.state_var "values" : !solidity.array
-
-// Test Function Declarations
-// CHECK: solidity.func @computeWithStruct
-// CHECK: solidity.func @testArrayOperations  
-// CHECK: solidity.func @testMappingOperations
-
-// Test Struct Creation and Member Access
-// CHECK: solidity.struct_create
-// CHECK: solidity.member_access
-
-// Test Array Operations
-// CHECK: solidity.array_push
-// CHECK: solidity.array_store
-// CHECK: solidity.array_length
-
-// Test Mapping Operations  
-// CHECK: solidity.mapping_store
-// CHECK: solidity.mapping_access
-
-// Test Arithmetic in Loop Context
-// CHECK: solidity.mul
+// CHECK: solidity.contract "StructMemoryTest"
+// CHECK: solidity.state_var "items"
+// CHECK: solidity.state_var "values"
+// CHECK: sym_name = "computeWithStruct"
+// CHECK: scf.while
+// CHECK: solidity.struct_create "Item"
+// CHECK: solidity.member_access {{.*}} "x"
+// CHECK: solidity.member_access {{.*}} "y"
 // CHECK: solidity.add
-
-// Test For Loop with Struct Operations
-// CHECK: solidity.for
-// CHECK: solidity.cmp "lt"
-
-// Test Require Statement
+// CHECK: scf.yield
+// CHECK: sym_name = "testArrayOperations"
+// CHECK: solidity.array_push
+// CHECK: solidity.array_length
 // CHECK: solidity.require

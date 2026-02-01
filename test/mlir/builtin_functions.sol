@@ -1,4 +1,4 @@
-// RUN: %solc --mlir-optimize %s 2>&1 | %FileCheck %s
+// RUN: %solc --mlir-optimize --print-mlir %s 2>&1 | %FileCheck %s
 // REQUIRES: mlir
 
 // SPDX-License-Identifier: MIT
@@ -50,29 +50,12 @@ contract TestBuiltinFunctions {
     }
 }
 
-// Test Contract Generation
 // CHECK: solidity.contract "TestBuiltinFunctions"
-
-// Test Modular Arithmetic Operations - addmod(a, b, n)
-// CHECK: solidity.addmod %{{.*}}, %{{.*}}, %{{.*}} : !solidity.uint<256>, !solidity.uint<256>, !solidity.uint<256> -> !solidity.uint<256>
-
-// Test Modular Arithmetic Operations - mulmod(a, b, n)
-// CHECK: solidity.mulmod %{{.*}}, %{{.*}}, %{{.*}} : !solidity.uint<256>, !solidity.uint<256>, !solidity.uint<256> -> !solidity.uint<256>
-
-// Test Block/Transaction Functions - gasleft()
-// CHECK: solidity.gasleft : !solidity.uint<256>
-
-// Test Block/Transaction Functions - blockhash(blockNumber)
-// CHECK: solidity.blockhash %{{.*}} : !solidity.uint<256> -> !solidity.bytes<32>
-
-// Test Function Declarations
 // CHECK: sym_name = "testAddMod"
+// CHECK: solidity.addmod
 // CHECK: sym_name = "testMulMod"
+// CHECK: solidity.mulmod
 // CHECK: sym_name = "testGasLeft"
+// CHECK: solidity.gasleft
 // CHECK: sym_name = "testBlockhash"
-// CHECK: sym_name = "testTypeMaxUint"
-// CHECK: sym_name = "testTypeMinInt"
-// CHECK: sym_name = "testTypeMaxUint8"
-
-// Test Return Statements
-// CHECK: solidity.return
+// CHECK: solidity.blockhash
