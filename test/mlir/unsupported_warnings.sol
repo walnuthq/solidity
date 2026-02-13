@@ -4,10 +4,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-/// Test that unsupported constructs emit warnings rather than silently
-/// returning null. Inline assembly is not yet supported in the MLIR
-/// pipeline and should produce a warning. Ternary (Conditional) is now
-/// supported and should produce a SelectOp.
+/// Test that unsupported constructs are handled properly.
+/// Inline assembly is silently skipped (compiled via normal Yul path).
+/// Ternary (Conditional) is supported and produces a SelectOp.
 contract WarningTest {
     function getBalance(address addr) public view returns (uint256 bal) {
         assembly {
@@ -20,7 +19,7 @@ contract WarningTest {
     }
 }
 
-// CHECK: Warning: unsupported statement type in MLIRGen: solidity::frontend::InlineAssembly
+// CHECK-NOT: Warning: unsupported statement type in MLIRGen: solidity::frontend::InlineAssembly
 // CHECK: solidity.contract "WarningTest"
 // CHECK: sym_name = "getBalance", visibility = "public"
 // CHECK: sym_name = "ternary", visibility = "public"

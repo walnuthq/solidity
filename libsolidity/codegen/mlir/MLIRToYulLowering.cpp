@@ -1808,6 +1808,14 @@ private:
 			// Logical NOT uses iszero in Yul
 			return processUnaryOpToAST(op, "iszero");
 		}
+		else if (mlir::isa<mlir::solidity::LogicalAndOp>(op))
+		{
+			return processArithmeticOpToAST(op, "and");
+		}
+		else if (mlir::isa<mlir::solidity::LogicalOrOp>(op))
+		{
+			return processArithmeticOpToAST(op, "or");
+		}
 		else if (mlir::isa<mlir::solidity::ShlOp>(op))
 		{
 			return processArithmeticOpToAST(op, "shl");

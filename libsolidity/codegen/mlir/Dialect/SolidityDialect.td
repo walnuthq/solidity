@@ -541,6 +541,20 @@ def Solidity_LogicalNotOp : Solidity_Op<"logical_not", [Pure]> {
   let assemblyFormat = "$operand attr-dict `:` type($operand) `->` type($result)";
 }
 
+def Solidity_LogicalAndOp : Solidity_Op<"logical_and", [Pure, Commutative]> {
+  let summary = "Logical AND operation";
+  let arguments = (ins Solidity_BoolType:$lhs, Solidity_BoolType:$rhs);
+  let results = (outs Solidity_BoolType:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
+def Solidity_LogicalOrOp : Solidity_Op<"logical_or", [Pure, Commutative]> {
+  let summary = "Logical OR operation";
+  let arguments = (ins Solidity_BoolType:$lhs, Solidity_BoolType:$rhs);
+  let results = (outs Solidity_BoolType:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
 //===----------------------------------------------------------------------===//
 // Built-in functions
 //===----------------------------------------------------------------------===//
