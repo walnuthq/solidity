@@ -839,6 +839,21 @@ def Solidity_FunctionCallOp : Solidity_Op<"function_call"> {
 // Event emission operation
 //===----------------------------------------------------------------------===//
 
+def Solidity_SelectOp : Solidity_Op<"select", [Pure]> {
+  let summary = "Conditional select (ternary operator)";
+  let description = [{
+    Selects between two values based on a boolean condition.
+    Corresponds to Solidity's ternary operator: condition ? trueVal : falseVal
+  }];
+  let arguments = (ins
+    Solidity_BoolType:$condition,
+    Solidity_AnyType:$trueValue,
+    Solidity_AnyType:$falseValue
+  );
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "$condition `,` $trueValue `,` $falseValue attr-dict `:` type($condition) `,` type($trueValue) `,` type($falseValue) `->` type($result)";
+}
+
 def Solidity_EmitOp : Solidity_Op<"emit"> {
   let summary = "Emit an event";
   let description = [{

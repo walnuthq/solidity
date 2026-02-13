@@ -480,6 +480,34 @@ public:
 					return zeroValue;
 				}
 			}
+			else if (auto* enumValue = dynamic_cast<EnumValue const*>(ident->annotation().referencedDeclaration))
+			{
+				// Enum values are integer constants - find the index in the parent enum
+				auto type = translateSolidityType(*_expr.annotation().type);
+				int64_t val = 0;
+				if (auto* enumDef = dynamic_cast<EnumDefinition const*>(enumValue->scope()))
+				{
+					auto const& members = enumDef->members();
+					for (size_t i = 0; i < members.size(); ++i)
+					{
+						if (members[i].get() == enumValue)
+						{
+							val = static_cast<int64_t>(i);
+							break;
+						}
+					}
+				}
+				return m_builder->create<mlir::solidity::ConstantOp>(
+					loc, m_builder->getIntegerAttr(m_builder->getI64Type(), val), type);
+			}
+			else
+			{
+				// Function references, contract references, etc.
+				// These typically appear as callees in FunctionCall and are handled there
+				auto type = translateSolidityType(*_expr.annotation().type);
+				return m_builder->create<mlir::solidity::ConstantOp>(
+					loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), type);
+			}
 		}
 		else if (auto* binOp = dynamic_cast<BinaryOperation const*>(&_expr))
 		{
@@ -1278,11 +1306,13 @@ public:
 					}
 
 					// For all other member access function calls (external contract/interface calls),
-					// skip to dummy value as these are external calls that need special handling
+					// return dummy value as these require ABI encoding + CALL opcode handling
 					// Examples: receiver.onERC721Received(...), token.transfer(...), etc.
-					auto dummyType = translateSolidityType(*_expr.annotation().type);
-					return m_builder->create<mlir::solidity::ConstantOp>(
-						loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
+					{
+						auto dummyType = translateSolidityType(*_expr.annotation().type);
+						return m_builder->create<mlir::solidity::ConstantOp>(
+							loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
+					}
 				}
 
 				if (!funcName.empty())
@@ -1314,6 +1344,43 @@ public:
 					}
 				}
 			}
+		}
+		else if (auto* indexAccess = dynamic_cast<IndexAccess const*>(&_expr))
+		{
+			if (auto* mappingType = dynamic_cast<MappingType const*>(
+					indexAccess->baseExpression().annotation().type))
+			{
+				auto key = generateSolidityExpression(*indexAccess->indexExpression());
+				auto valueType = translateSolidityType(*mappingType->valueType());
+
+				std::string varName;
+				if (auto* baseIdent = dynamic_cast<Identifier const*>(&indexAccess->baseExpression()))
+				{
+					if (auto* varDecl = dynamic_cast<VariableDeclaration const*>(
+							baseIdent->annotation().referencedDeclaration))
+						varName = varDecl->name();
+				}
+				else if (dynamic_cast<IndexAccess const*>(&indexAccess->baseExpression()))
+				{
+					// Nested mapping: e.g., allowance[from][spender]
+					// The inner access is handled recursively by the baseExpression type
+					// being a MappingType whose valueType is also a MappingType
+				}
+
+				return m_builder->create<mlir::solidity::MappingAccessOp>(
+					loc, valueType, m_builder->getStringAttr(varName), key);
+			}
+			// Array indexing not yet supported — fall through to warning
+		}
+		else if (auto* conditional = dynamic_cast<Conditional const*>(&_expr))
+		{
+			auto condition = generateSolidityExpression(conditional->condition());
+			auto trueVal = generateSolidityExpression(conditional->trueExpression());
+			auto falseVal = generateSolidityExpression(conditional->falseExpression());
+			auto resultType = translateSolidityType(*_expr.annotation().type);
+
+			return m_builder->create<mlir::solidity::SelectOp>(
+				loc, resultType, condition, trueVal, falseVal);
 		}
 
 		// Unhandled expression type - emit warning and return dummy value

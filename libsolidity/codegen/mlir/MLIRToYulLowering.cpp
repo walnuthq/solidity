@@ -1927,6 +1927,10 @@ private:
 		{
 			return processFunctionCallOpToAST(op);
 		}
+		else if (mlir::isa<mlir::solidity::SelectOp>(op))
+		{
+			return processSelectOpToAST(op);
+		}
 		else if (mlir::isa<mlir::solidity::StructCreateOp>(op))
 		{
 			// For now, structs are flattened to tuples in memory
@@ -4279,6 +4283,75 @@ private:
 							 {yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))},
 							  yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(64))}}},
 						 yul::Identifier{debugData, yul::YulName(value)}}}});
+
+			return yul::Block{debugData, std::move(statements)};
+		}
+		return std::nullopt;
+	}
+
+	std::optional<yul::Statement> processSelectOpToAST(mlir::Operation* op)
+	{
+		// Lower SelectOp (ternary) to:
+		//   let result := 0
+		//   switch condition
+		//   case 0 { result := falseVal }
+		//   default { result := trueVal }
+		auto debugData = langutil::DebugData::create();
+		if (op->getNumResults() > 0 && op->getNumOperands() >= 3)
+		{
+			std::string resultVar = getOrCreateVariableName(op->getResult(0));
+			std::string condition = getVariableName(op->getOperand(0));
+			std::string trueVal = getVariableName(op->getOperand(1));
+			std::string falseVal = getVariableName(op->getOperand(2));
+
+			std::vector<yul::Statement> statements;
+
+			// let result := 0
+			statements.push_back(
+				yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(
+						yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))})});
+
+			// switch condition
+			// case 0 { result := falseVal }
+			// default { result := trueVal }
+			std::vector<yul::Case> cases;
+
+			// case 0 { result := falseVal }
+			yul::Block falseBlock{debugData, {}};
+			falseBlock.statements.push_back(
+				yul::Assignment{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(
+						yul::Identifier{debugData, yul::YulName(falseVal)})});
+			cases.push_back(yul::Case{
+				debugData,
+				std::make_unique<yul::Literal>(
+					yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))}),
+				std::move(falseBlock)});
+
+			// default { result := trueVal }
+			yul::Block trueBlock{debugData, {}};
+			trueBlock.statements.push_back(
+				yul::Assignment{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(
+						yul::Identifier{debugData, yul::YulName(trueVal)})});
+			cases.push_back(yul::Case{
+				debugData,
+				nullptr, // default case
+				std::move(trueBlock)});
+
+			statements.push_back(
+				yul::Switch{
+					debugData,
+					std::make_unique<yul::Expression>(
+						yul::Identifier{debugData, yul::YulName(condition)}),
+					std::move(cases)});
 
 			return yul::Block{debugData, std::move(statements)};
 		}

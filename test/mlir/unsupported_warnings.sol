@@ -5,8 +5,9 @@
 pragma solidity ^0.8.0;
 
 /// Test that unsupported constructs emit warnings rather than silently
-/// returning null. Inline assembly and ternary (Conditional) expressions
-/// are not yet supported in the MLIR pipeline and should produce warnings.
+/// returning null. Inline assembly is not yet supported in the MLIR
+/// pipeline and should produce a warning. Ternary (Conditional) is now
+/// supported and should produce a SelectOp.
 contract WarningTest {
     function getBalance(address addr) public view returns (uint256 bal) {
         assembly {
@@ -20,7 +21,7 @@ contract WarningTest {
 }
 
 // CHECK: Warning: unsupported statement type in MLIRGen: solidity::frontend::InlineAssembly
-// CHECK: Warning: unsupported expression type in MLIRGen: solidity::frontend::Conditional
 // CHECK: solidity.contract "WarningTest"
 // CHECK: sym_name = "getBalance", visibility = "public"
 // CHECK: sym_name = "ternary", visibility = "public"
+// CHECK: solidity.select
