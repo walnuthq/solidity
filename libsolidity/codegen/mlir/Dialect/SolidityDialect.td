@@ -850,7 +850,6 @@ def Solidity_EmitOp : Solidity_Op<"emit"> {
     OptionalAttr<ArrayAttr>:$indexed,
     Variadic<Solidity_AnyType>:$args
   );
-  let assemblyFormat = "$event `(` $args `)` attr-dict `:` type($args)";
 }
 
 #endif // SOLIDITY_DIALECT

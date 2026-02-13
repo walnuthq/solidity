@@ -42,16 +42,16 @@ contract TestEventSignatures {
 // CHECK: solidity.contract "TestEventSignatures"
 
 // Test Transfer event - two indexed, one non-indexed
-// CHECK: solidity.emit "Transfer"(%{{.*}}, %{{.*}}, %{{.*}}) {eventSignature = "Transfer(address,address,uint256)", indexed = [true, true, false]} : !solidity.address, !solidity.address, !solidity.uint<256>
+// CHECK: "solidity.emit"(%{{.*}}, %{{.*}}, %{{.*}}) <{event = "Transfer", eventSignature = "Transfer(address,address,uint256)", indexed = [true, true, false]}> : (!solidity.address, !solidity.address, !solidity.uint<256>) -> ()
 
 // Test Deposit event - one indexed, one non-indexed
-// CHECK: solidity.emit "Deposit"(%{{.*}}, %{{.*}}) {eventSignature = "Deposit(address,uint256)", indexed = [true, false]} : !solidity.address, !solidity.uint<256>
+// CHECK: "solidity.emit"(%{{.*}}, %{{.*}}) <{event = "Deposit", eventSignature = "Deposit(address,uint256)", indexed = [true, false]}> : (!solidity.address, !solidity.uint<256>) -> ()
 
 // Test AllIndexed event - all params indexed
-// CHECK: solidity.emit "AllIndexed"(%{{.*}}, %{{.*}}, %{{.*}}) {eventSignature = "AllIndexed(address,uint256,bool)", indexed = [true, true, true]} : !solidity.address, !solidity.uint<256>, !solidity.bool
+// CHECK: "solidity.emit"(%{{.*}}, %{{.*}}, %{{.*}}) <{event = "AllIndexed", eventSignature = "AllIndexed(address,uint256,bool)", indexed = [true, true, true]}> : (!solidity.address, !solidity.uint<256>, !solidity.bool) -> ()
 
 // Test NoIndexed event - no params indexed
-// CHECK: solidity.emit "NoIndexed"(%{{.*}}, %{{.*}}, %{{.*}}) {eventSignature = "NoIndexed(address,address,uint256)", indexed = [false, false, false]} : !solidity.address, !solidity.address, !solidity.uint<256>
+// CHECK: "solidity.emit"(%{{.*}}, %{{.*}}, %{{.*}}) <{event = "NoIndexed", eventSignature = "NoIndexed(address,address,uint256)", indexed = [false, false, false]}> : (!solidity.address, !solidity.address, !solidity.uint<256>) -> ()
 
 // Test Return Statements
 // CHECK: solidity.return
