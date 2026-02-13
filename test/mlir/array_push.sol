@@ -27,8 +27,8 @@ contract TestArrayPush {
 // Test load_state for array
 // CHECK: solidity.load_state "values" : !solidity.array<!solidity.uint<256>, -1>
 
-// Test array_push with varName attribute
-// CHECK: solidity.array_push %{{.*}}, %{{.*}} {varName = "values"} : !solidity.array<!solidity.uint<256>, -1>, !solidity.uint<256>
+// Test array_push
+// CHECK: solidity.array_push %{{.*}}, %{{.*}} : !solidity.array<!solidity.uint<256>, -1>, !solidity.uint<256>
 
 // Test Function Declarations
 // CHECK: sym_name = "pushValue"

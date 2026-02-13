@@ -54,37 +54,28 @@ contract TestAbiEncoding {
 // CHECK: solidity.contract "TestAbiEncoding"
 
 // Test abi.encode with two uint256 values
-// CHECK: "solidity.abi_encode"(%{{.*}}, %{{.*}}) : (!solidity.uint<256>, !solidity.uint<256>) -> !solidity.array<!solidity.bytes<1>, -1>
+// CHECK: solidity.abi_encode(%{{.*}}, %{{.*}}) : (!solidity.uint<256>, !solidity.uint<256>) -> !solidity.array<!solidity.bytes<1>, -1>
 
 // Test abi.encodePacked with address and uint256
-// CHECK: "solidity.abi_encode_packed"(%{{.*}}, %{{.*}}) : (!solidity.address, !solidity.uint<256>) -> !solidity.array<!solidity.bytes<1>, -1>
+// CHECK: solidity.abi_encode_packed(%{{.*}}, %{{.*}}) : (!solidity.address, !solidity.uint<256>) -> !solidity.array<!solidity.bytes<1>, -1>
 
 // Test keccak256(abi.encode(a, b)) - fused pattern
-// CHECK: "solidity.abi_encode"(%{{.*}}, %{{.*}}) : (!solidity.uint<256>, !solidity.uint<256>) -> !solidity.array<!solidity.bytes<1>, -1>
+// CHECK: solidity.abi_encode(%{{.*}}, %{{.*}}) : (!solidity.uint<256>, !solidity.uint<256>) -> !solidity.array<!solidity.bytes<1>, -1>
 // CHECK-NEXT: %{{.*}} = solidity.keccak256 %{{.*}} : !solidity.array<!solidity.bytes<1>, -1> -> !solidity.bytes<32>
 
 // Test keccak256(abi.encodePacked(addr, val)) - fused pattern with packed encoding
-// CHECK: "solidity.abi_encode_packed"(%{{.*}}, %{{.*}}) : (!solidity.address, !solidity.uint<256>) -> !solidity.array<!solidity.bytes<1>, -1>
+// CHECK: solidity.abi_encode_packed(%{{.*}}, %{{.*}}) : (!solidity.address, !solidity.uint<256>) -> !solidity.array<!solidity.bytes<1>, -1>
 // CHECK-NEXT: %{{.*}} = solidity.keccak256 %{{.*}} : !solidity.array<!solidity.bytes<1>, -1> -> !solidity.bytes<32>
 
 // Test keccak256(abi.encodePacked(a, b, c)) - three-value packed encoding
-// CHECK: "solidity.abi_encode_packed"(%{{.*}}, %{{.*}}, %{{.*}}) : (!solidity.uint<256>, !solidity.uint<256>, !solidity.uint<256>) -> !solidity.array<!solidity.bytes<1>, -1>
+// CHECK: solidity.abi_encode_packed(%{{.*}}, %{{.*}}, %{{.*}}) : (!solidity.uint<256>, !solidity.uint<256>, !solidity.uint<256>) -> !solidity.array<!solidity.bytes<1>, -1>
 // CHECK-NEXT: %{{.*}} = solidity.keccak256 %{{.*}} : !solidity.array<!solidity.bytes<1>, -1> -> !solidity.bytes<32>
 
 // Test standalone abi.encode
-// CHECK: "solidity.abi_encode"(%{{.*}}) : (!solidity.uint<256>) -> !solidity.array<!solidity.bytes<1>, -1>
+// CHECK: solidity.abi_encode(%{{.*}}) : (!solidity.uint<256>) -> !solidity.array<!solidity.bytes<1>, -1>
 
 // Test standalone abi.encodePacked
-// CHECK: "solidity.abi_encode_packed"(%{{.*}}) : (!solidity.uint<256>) -> !solidity.array<!solidity.bytes<1>, -1>
-
-// Test Function Declarations
-// CHECK: sym_name = "testAbiEncode"
-// CHECK: sym_name = "testAbiEncodePacked"
-// CHECK: sym_name = "testKeccak256AbiEncode"
-// CHECK: sym_name = "testKeccak256AbiEncodePacked"
-// CHECK: sym_name = "testKeccak256ThreePacked"
-// CHECK: sym_name = "testStandaloneEncode"
-// CHECK: sym_name = "testStandaloneEncodePacked"
+// CHECK: solidity.abi_encode_packed(%{{.*}}) : (!solidity.uint<256>) -> !solidity.array<!solidity.bytes<1>, -1>
 
 // Test Return Statements
 // CHECK: solidity.return

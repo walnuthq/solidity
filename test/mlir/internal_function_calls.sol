@@ -18,6 +18,5 @@ contract InternalCallTest {
 // CHECK: solidity.add
 // CHECK: solidity.return
 // CHECK: sym_name = "double"
-// CHECK: "solidity.function_call"
-// CHECK-SAME: callee = "add"
+// CHECK: solidity.function_call "add"
 // CHECK: solidity.return

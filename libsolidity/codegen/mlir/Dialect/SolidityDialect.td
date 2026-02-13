@@ -127,9 +127,9 @@ def Solidity_ContractOp : Solidity_Op<"contract", [
     Represents a Solidity contract with its state variables and functions.
   }];
   
-  let arguments = (ins StrAttr:$name);
+  let arguments = (ins StrAttr:$name, OptionalAttr<I64Attr>:$id);
   let regions = (region SizedRegion<1>:$body);
-  
+
   let assemblyFormat = "$name $body attr-dict";
 }
 
@@ -649,6 +649,208 @@ def Solidity_SelfdestructOp : Solidity_Op<"selfdestruct"> {
   }];
   let arguments = (ins Solidity_AddressType:$recipient);
   let assemblyFormat = "$recipient attr-dict `:` type($recipient)";
+}
+
+//===----------------------------------------------------------------------===//
+// Mapping operations
+//===----------------------------------------------------------------------===//
+
+def Solidity_MappingAccessOp : Solidity_Op<"mapping_access", [Pure]> {
+  let summary = "Access mapping element";
+  let description = [{
+    Accesses a mapping element by key. Returns the value stored at the key.
+  }];
+  let arguments = (ins StrAttr:$varName, Solidity_AnyType:$key);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "$varName `[` $key `]` attr-dict `:` type($key) `->` type($result)";
+}
+
+def Solidity_MappingStoreOp : Solidity_Op<"mapping_store"> {
+  let summary = "Store to mapping element";
+  let description = [{
+    Stores a value to a mapping element at the given key.
+  }];
+  let arguments = (ins StrAttr:$varName, Solidity_AnyType:$key, Solidity_AnyType:$value);
+  let assemblyFormat = "$varName `[` $key `]` `,` $value attr-dict `:` type($key) `,` type($value)";
+}
+
+//===----------------------------------------------------------------------===//
+// Message context operations
+//===----------------------------------------------------------------------===//
+
+def Solidity_MsgSenderOp : Solidity_Op<"msg_sender", [Pure]> {
+  let summary = "Get message sender address";
+  let description = [{
+    Returns the address of the message sender (msg.sender).
+  }];
+  let results = (outs Solidity_AddressType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Solidity_MsgValueOp : Solidity_Op<"msg_value", [Pure]> {
+  let summary = "Get message value in wei";
+  let description = [{
+    Returns the amount of wei sent with the message (msg.value).
+  }];
+  let results = (outs Solidity_UIntType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Solidity_MsgDataOp : Solidity_Op<"msg_data", [Pure]> {
+  let summary = "Get complete calldata";
+  let description = [{
+    Returns the complete calldata (msg.data).
+  }];
+  let results = (outs Solidity_ArrayType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Solidity_MsgSigOp : Solidity_Op<"msg_sig", [Pure]> {
+  let summary = "Get function selector from calldata";
+  let description = [{
+    Returns the first four bytes of the calldata (msg.sig).
+  }];
+  let results = (outs Solidity_BytesType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+//===----------------------------------------------------------------------===//
+// Block context operations
+//===----------------------------------------------------------------------===//
+
+def Solidity_BlockTimestampOp : Solidity_Op<"block_timestamp", [Pure]> {
+  let summary = "Get current block timestamp";
+  let description = [{
+    Returns the current block's timestamp (block.timestamp).
+  }];
+  let results = (outs Solidity_UIntType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Solidity_BlockNumberOp : Solidity_Op<"block_number", [Pure]> {
+  let summary = "Get current block number";
+  let description = [{
+    Returns the current block number (block.number).
+  }];
+  let results = (outs Solidity_UIntType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Solidity_BlockChainIdOp : Solidity_Op<"block_chainid", [Pure]> {
+  let summary = "Get current chain ID";
+  let description = [{
+    Returns the current chain ID (block.chainid).
+  }];
+  let results = (outs Solidity_UIntType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+//===----------------------------------------------------------------------===//
+// Transaction context operations
+//===----------------------------------------------------------------------===//
+
+def Solidity_TxOriginOp : Solidity_Op<"tx_origin", [Pure]> {
+  let summary = "Get transaction origin address";
+  let description = [{
+    Returns the origin address of the transaction (tx.origin).
+  }];
+  let results = (outs Solidity_AddressType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Solidity_TxGasPriceOp : Solidity_Op<"tx_gasprice", [Pure]> {
+  let summary = "Get transaction gas price";
+  let description = [{
+    Returns the gas price of the transaction (tx.gasprice).
+  }];
+  let results = (outs Solidity_UIntType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+//===----------------------------------------------------------------------===//
+// ABI encoding/decoding operations
+//===----------------------------------------------------------------------===//
+
+def Solidity_AbiEncodeOp : Solidity_Op<"abi_encode", [Pure]> {
+  let summary = "ABI encode arguments";
+  let description = [{
+    ABI-encodes the given arguments. Equivalent to abi.encode(...).
+  }];
+  let arguments = (ins Variadic<Solidity_AnyType>:$args);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "`(` $args `)` attr-dict `:` functional-type($args, $result)";
+}
+
+def Solidity_AbiEncodePackedOp : Solidity_Op<"abi_encode_packed", [Pure]> {
+  let summary = "ABI encode packed arguments";
+  let description = [{
+    ABI-encodes the given arguments with tight packing. Equivalent to abi.encodePacked(...).
+  }];
+  let arguments = (ins Variadic<Solidity_AnyType>:$args);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "`(` $args `)` attr-dict `:` functional-type($args, $result)";
+}
+
+def Solidity_AbiEncodeWithSelectorOp : Solidity_Op<"abi_encode_with_selector", [Pure]> {
+  let summary = "ABI encode with selector";
+  let description = [{
+    ABI-encodes the given arguments with a function selector. Equivalent to abi.encodeWithSelector(...).
+  }];
+  let arguments = (ins Variadic<Solidity_AnyType>:$args);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "`(` $args `)` attr-dict `:` functional-type($args, $result)";
+}
+
+def Solidity_AbiEncodeWithSignatureOp : Solidity_Op<"abi_encode_with_signature", [Pure]> {
+  let summary = "ABI encode with signature";
+  let description = [{
+    ABI-encodes the given arguments with a function signature string. Equivalent to abi.encodeWithSignature(...).
+  }];
+  let arguments = (ins Variadic<Solidity_AnyType>:$args);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "`(` $args `)` attr-dict `:` functional-type($args, $result)";
+}
+
+def Solidity_AbiDecodeOp : Solidity_Op<"abi_decode", [Pure]> {
+  let summary = "ABI decode data";
+  let description = [{
+    ABI-decodes the given data. Equivalent to abi.decode(...).
+  }];
+  let arguments = (ins Variadic<Solidity_AnyType>:$args);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "`(` $args `)` attr-dict `:` functional-type($args, $result)";
+}
+
+//===----------------------------------------------------------------------===//
+// Function call operation
+//===----------------------------------------------------------------------===//
+
+def Solidity_FunctionCallOp : Solidity_Op<"function_call"> {
+  let summary = "Call a Solidity function";
+  let description = [{
+    Calls a Solidity function by name with the given arguments.
+  }];
+  let arguments = (ins StrAttr:$callee, Variadic<Solidity_AnyType>:$args);
+  let results = (outs Variadic<Solidity_AnyType>:$results);
+  let assemblyFormat = "$callee `(` $args `)` attr-dict `:` functional-type($args, $results)";
+}
+
+//===----------------------------------------------------------------------===//
+// Event emission operation
+//===----------------------------------------------------------------------===//
+
+def Solidity_EmitOp : Solidity_Op<"emit"> {
+  let summary = "Emit an event";
+  let description = [{
+    Emits a Solidity event with the given arguments.
+  }];
+  let arguments = (ins
+    StrAttr:$event,
+    OptionalAttr<StrAttr>:$eventSignature,
+    OptionalAttr<ArrayAttr>:$indexed,
+    Variadic<Solidity_AnyType>:$args
+  );
+  let assemblyFormat = "$event `(` $args `)` attr-dict `:` type($args)";
 }
 
 #endif // SOLIDITY_DIALECT

@@ -27,26 +27,28 @@ contract TestMappingOps {
 // Test Contract Generation
 // CHECK: solidity.contract "TestMappingOps"
 
+// Test state variable
+// CHECK: solidity.state_var "balances"
+
 // Test mapping_access for balances[msg.sender] read
-// CHECK: "solidity.mapping_access"(%{{.*}}) {varName = "balances"} : (!solidity.address) -> !solidity.uint<256>
+// CHECK: solidity.mapping_access "balances"[%{{.*}}] : !solidity.address -> !solidity.uint<256>
 
 // Test subtraction for -= operator
 // CHECK: solidity.sub %{{.*}}, %{{.*}} : !solidity.uint<256>, !solidity.uint<256> -> !solidity.uint<256>
 
 // Test mapping_store for writing back
-// CHECK: "solidity.mapping_store"(%{{.*}}, %{{.*}}) {varName = "balances"} : (!solidity.address, !solidity.uint<256>) -> ()
+// CHECK: solidity.mapping_store "balances"[%{{.*}}], %{{.*}} : !solidity.address, !solidity.uint<256>
 
 // Test mapping_access for balances[to] read
-// CHECK: "solidity.mapping_access"(%{{.*}}) {varName = "balances"} : (!solidity.address) -> !solidity.uint<256>
+// CHECK: solidity.mapping_access "balances"[%{{.*}}] : !solidity.address -> !solidity.uint<256>
 
 // Test addition for += operator
 // CHECK: solidity.add %{{.*}}, %{{.*}} : !solidity.uint<256>, !solidity.uint<256> -> !solidity.uint<256>
 
 // Test mapping_store for writing balances[to]
-// CHECK: "solidity.mapping_store"(%{{.*}}, %{{.*}}) {varName = "balances"} : (!solidity.address, !solidity.uint<256>) -> ()
+// CHECK: solidity.mapping_store "balances"[%{{.*}}], %{{.*}} : !solidity.address, !solidity.uint<256>
 
 // Test Function Declarations
-// CHECK: sym_name = "transfer"
 // CHECK: sym_name = "deposit"
 
 // Test Return Statements

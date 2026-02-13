@@ -23,7 +23,7 @@ contract ErrorTest {
 // CHECK: sym_name = "testRequire"
 // CHECK: solidity.cmp "gt"
 // CHECK: solidity.require
-// CHECK-SAME: msg = "Must be positive"
+// CHECK-SAME: "Must be positive"
 // CHECK: sym_name = "testRevert"
 // CHECK: solidity.cmp "eq"
 // CHECK: solidity.if

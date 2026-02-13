@@ -18,14 +18,12 @@ contract PayableTest {
 // CHECK: solidity.contract "PayableTest"
 // CHECK: solidity.state_var "deposits"
 // CHECK: stateMutability = "payable", sym_name = "deposit"
-// CHECK: "solidity.msg_value"
+// CHECK: solidity.msg_value : !solidity.uint<256>
 // CHECK: solidity.cmp "gt"
 // CHECK: solidity.require
-// CHECK-SAME: msg = "No ether sent"
-// CHECK: "solidity.msg_sender"
-// CHECK: "solidity.mapping_access"
-// CHECK-SAME: varName = "deposits"
-// CHECK: "solidity.msg_value"
+// CHECK-SAME: "No ether sent"
+// CHECK: solidity.msg_sender : !solidity.address
+// CHECK: solidity.mapping_access "deposits"
+// CHECK: solidity.msg_value : !solidity.uint<256>
 // CHECK: solidity.add
-// CHECK: "solidity.mapping_store"
-// CHECK-SAME: varName = "deposits"
+// CHECK: solidity.mapping_store "deposits"

@@ -59,6 +59,7 @@
 #pragma GCC diagnostic pop
 
 #include <libsolidity/codegen/mlir/Dialect/SolidityDialect.h>
+#include <libsolidity/codegen/mlir/Dialect/SolidityOps.h>
 #include <libsolidity/codegen/mlir/Passes/AccessControlAnalysisPass.h>
 #include <libsolidity/codegen/mlir/Passes/StorageCachingPass.h>
 
@@ -326,7 +327,7 @@ private:
 		module->walk(
 			[&](mlir::Operation* op)
 			{
-				if (op->getName().getStringRef() == "solidity.contract")
+				if (mlir::isa<mlir::solidity::ContractOp>(op))
 				{
 					std::string contractName = "Contract";
 					if (auto nameAttr = op->getAttrOfType<mlir::StringAttr>("name"))
@@ -568,7 +569,7 @@ private:
 			{
 				for (auto& innerOp: block)
 				{
-					if (innerOp.getName().getStringRef() == "solidity.state_var")
+					if (mlir::isa<mlir::solidity::StateVarOp>(innerOp))
 					{
 						// Extract state variable name and check if it's a constant
 						std::string varName = "unknown";
@@ -629,7 +630,7 @@ private:
 							m_stateVariableSlots[varName] = stateVarSlot++;
 						}
 					}
-					else if (innerOp.getName().getStringRef() == "solidity.func")
+					else if (mlir::isa<mlir::solidity::FunctionOp>(innerOp))
 					{
 						functions.push_back(&innerOp);
 					}
@@ -1733,7 +1734,7 @@ private:
 
 		auto opName = op->getName().getStringRef();
 
-		if (opName == "solidity.constant")
+		if (mlir::isa<mlir::solidity::ConstantOp>(op))
 		{
 			if (op->getNumResults() > 0)
 			{
@@ -1749,7 +1750,7 @@ private:
 						yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(value)})};
 			}
 		}
-		else if (opName == "solidity.return")
+		else if (mlir::isa<mlir::solidity::ReturnOp>(op))
 		{
 			if (op->getNumOperands() > 0)
 			{
@@ -1760,68 +1761,68 @@ private:
 					std::make_unique<yul::Expression>(yul::Identifier{debugData, yul::YulName(value)})};
 			}
 		}
-		else if (opName == "solidity.add")
+		else if (mlir::isa<mlir::solidity::AddOp>(op))
 		{
 			return processArithmeticOpToAST(op, "add");
 		}
-		else if (opName == "solidity.sub")
+		else if (mlir::isa<mlir::solidity::SubOp>(op))
 		{
 			return processArithmeticOpToAST(op, "sub");
 		}
-		else if (opName == "solidity.mul")
+		else if (mlir::isa<mlir::solidity::MulOp>(op))
 		{
 			return processArithmeticOpToAST(op, "mul");
 		}
-		else if (opName == "solidity.div")
+		else if (mlir::isa<mlir::solidity::DivOp>(op))
 		{
 			return processArithmeticOpToAST(op, "div");
 		}
-		else if (opName == "solidity.mod")
+		else if (mlir::isa<mlir::solidity::ModOp>(op))
 		{
 			return processArithmeticOpToAST(op, "mod");
 		}
-		else if (opName == "solidity.exp")
+		else if (mlir::isa<mlir::solidity::ExpOp>(op))
 		{
 			return processArithmeticOpToAST(op, "exp");
 		}
-		else if (opName == "solidity.and")
+		else if (mlir::isa<mlir::solidity::AndOp>(op))
 		{
 			return processArithmeticOpToAST(op, "and");
 		}
-		else if (opName == "solidity.or")
+		else if (mlir::isa<mlir::solidity::OrOp>(op))
 		{
 			return processArithmeticOpToAST(op, "or");
 		}
-		else if (opName == "solidity.xor")
+		else if (mlir::isa<mlir::solidity::XorOp>(op))
 		{
 			return processArithmeticOpToAST(op, "xor");
 		}
-		else if (opName == "solidity.not")
+		else if (mlir::isa<mlir::solidity::NotOp>(op))
 		{
 			return processUnaryOpToAST(op, "not");
 		}
-		else if (opName == "solidity.logical_not")
+		else if (mlir::isa<mlir::solidity::LogicalNotOp>(op))
 		{
 			// Logical NOT uses iszero in Yul
 			return processUnaryOpToAST(op, "iszero");
 		}
-		else if (opName == "solidity.shl")
+		else if (mlir::isa<mlir::solidity::ShlOp>(op))
 		{
 			return processArithmeticOpToAST(op, "shl");
 		}
-		else if (opName == "solidity.shr")
+		else if (mlir::isa<mlir::solidity::ShrOp>(op))
 		{
 			return processArithmeticOpToAST(op, "shr");
 		}
-		else if (opName == "solidity.sar")
+		else if (mlir::isa<mlir::solidity::SarOp>(op))
 		{
 			return processArithmeticOpToAST(op, "sar");
 		}
-		else if (opName == "solidity.cmp")
+		else if (mlir::isa<mlir::solidity::CmpOp>(op))
 		{
 			return processComparisonOpToAST(op);
 		}
-		else if (opName == "solidity.if")
+		else if (mlir::isa<mlir::solidity::IfOp>(op))
 		{
 			return processIfOpToAST(op);
 		}
@@ -1864,7 +1865,7 @@ private:
 			// Comments are just placeholders, skip them
 			return std::nullopt;
 		}
-		else if (opName == "solidity.for")
+		else if (mlir::isa<mlir::solidity::ForOp>(op))
 		{
 			// Legacy support - shouldn't be reached with new code
 			return processForOpToAST(op);
@@ -1874,7 +1875,7 @@ private:
 			// Legacy support - shouldn't be reached with new code
 			return processWhileOpToAST(op);
 		}
-		else if (opName == "solidity.revert")
+		else if (mlir::isa<mlir::solidity::RevertOp>(op))
 		{
 			return yul::ExpressionStatement{
 				debugData,
@@ -1884,23 +1885,23 @@ private:
 					{yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))},
 					 yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))}}}};
 		}
-		else if (opName == "solidity.require")
+		else if (mlir::isa<mlir::solidity::RequireOp>(op))
 		{
 			return processRequireOpToAST(op);
 		}
-		else if (opName == "solidity.assert")
+		else if (mlir::isa<mlir::solidity::AssertOp>(op))
 		{
 			return processAssertOpToAST(op);
 		}
-		else if (opName == "solidity.emit")
+		else if (mlir::isa<mlir::solidity::EmitOp>(op))
 		{
 			return processEmitOpToAST(op);
 		}
-		else if (opName == "solidity.load_state")
+		else if (mlir::isa<mlir::solidity::LoadStateVarOp>(op))
 		{
 			return processLoadStateOpToAST(op);
 		}
-		else if (opName == "solidity.store_state")
+		else if (mlir::isa<mlir::solidity::StoreStateVarOp>(op))
 		{
 			return processStoreStateOpToAST(op);
 		}
@@ -1912,19 +1913,19 @@ private:
 		{
 			return processArrayStoreOpToAST(op);
 		}
-		else if (opName == "solidity.mapping_access")
+		else if (mlir::isa<mlir::solidity::MappingAccessOp>(op))
 		{
 			return processMappingAccessOpToAST(op);
 		}
-		else if (opName == "solidity.mapping_store")
+		else if (mlir::isa<mlir::solidity::MappingStoreOp>(op))
 		{
 			return processMappingStoreOpToAST(op);
 		}
-		else if (opName == "solidity.function_call")
+		else if (mlir::isa<mlir::solidity::FunctionCallOp>(op))
 		{
 			return processFunctionCallOpToAST(op);
 		}
-		else if (opName == "solidity.struct_create")
+		else if (mlir::isa<mlir::solidity::StructCreateOp>(op))
 		{
 			// For now, structs are flattened to tuples in memory
 			// This is a simplified implementation
@@ -1941,7 +1942,7 @@ private:
 						yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))})};
 			}
 		}
-		else if (opName == "solidity.array_push")
+		else if (mlir::isa<mlir::solidity::ArrayPushOp>(op))
 		{
 			// Dynamic array push: read length, compute element slot, store value, increment length
 			auto debugData = langutil::DebugData::create();
@@ -2040,7 +2041,7 @@ private:
 				return yul::Block{debugData, std::move(statements)};
 			}
 		}
-		else if (opName == "solidity.array_length")
+		else if (mlir::isa<mlir::solidity::ArrayLengthOp>(op))
 		{
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
@@ -2057,7 +2058,7 @@ private:
 						{yul::Identifier{debugData, yul::YulName(arrayVar)}}})};
 			}
 		}
-		else if (opName == "solidity.member_access")
+		else if (mlir::isa<mlir::solidity::MemberAccessOp>(op))
 		{
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
@@ -2072,7 +2073,7 @@ private:
 					std::make_unique<yul::Expression>(yul::Identifier{debugData, yul::YulName(objectVar)})};
 			}
 		}
-		else if (opName == "solidity.address_balance")
+		else if (mlir::isa<mlir::solidity::AddressBalanceOp>(op))
 		{
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
@@ -2088,7 +2089,7 @@ private:
 						{yul::Identifier{debugData, yul::YulName(addrVar)}}})};
 			}
 		}
-		else if (opName == "solidity.address_code")
+		else if (mlir::isa<mlir::solidity::AddressCodeOp>(op))
 		{
 			// address.code returns bytes memory containing the code
 			// In Yul, we need to allocate memory and use extcodecopy
@@ -2108,7 +2109,7 @@ private:
 						{yul::Identifier{debugData, yul::YulName(addrVar)}}})};
 			}
 		}
-		else if (opName == "solidity.address_codehash")
+		else if (mlir::isa<mlir::solidity::AddressCodehashOp>(op))
 		{
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
@@ -2124,7 +2125,7 @@ private:
 						{yul::Identifier{debugData, yul::YulName(addrVar)}}})};
 			}
 		}
-		else if (opName == "solidity.to_i1")
+		else if (mlir::isa<mlir::solidity::ToI1Op>(op))
 		{
 			// Convert bool to i1 - this is essentially a pass-through in Yul
 			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
@@ -2138,7 +2139,7 @@ private:
 					std::make_unique<yul::Expression>(yul::Identifier{debugData, yul::YulName(inputVar)})};
 			}
 		}
-		else if (opName == "solidity.convert")
+		else if (mlir::isa<mlir::solidity::ConvertOp>(op))
 		{
 			// Type conversion - in Yul, most conversions are just assignments
 			// The EVM automatically handles the conversion at runtime
@@ -2153,7 +2154,7 @@ private:
 					std::make_unique<yul::Expression>(yul::Identifier{debugData, yul::YulName(inputVar)})};
 			}
 		}
-		else if (opName == "solidity.msg_sender")
+		else if (mlir::isa<mlir::solidity::MsgSenderOp>(op))
 		{
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0)
@@ -2166,7 +2167,7 @@ private:
 						yul::FunctionCall{debugData, yul::Identifier{debugData, yul::YulName("caller")}, {}})};
 			}
 		}
-		else if (opName == "solidity.msg_value")
+		else if (mlir::isa<mlir::solidity::MsgValueOp>(op))
 		{
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0)
@@ -2179,7 +2180,7 @@ private:
 						yul::FunctionCall{debugData, yul::Identifier{debugData, yul::YulName("callvalue")}, {}})};
 			}
 		}
-		else if (opName == "solidity.msg_data")
+		else if (mlir::isa<mlir::solidity::MsgDataOp>(op))
 		{
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0)
@@ -2195,7 +2196,7 @@ private:
 						{yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))}}})};
 			}
 		}
-		else if (opName == "solidity.msg_sig")
+		else if (mlir::isa<mlir::solidity::MsgSigOp>(op))
 		{
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0)
@@ -2215,7 +2216,7 @@ private:
 							 {yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))}}}}})};
 			}
 		}
-		else if (opName == "solidity.block_timestamp")
+		else if (mlir::isa<mlir::solidity::BlockTimestampOp>(op))
 		{
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0)
@@ -2228,7 +2229,7 @@ private:
 						yul::FunctionCall{debugData, yul::Identifier{debugData, yul::YulName("timestamp")}, {}})};
 			}
 		}
-		else if (opName == "solidity.block_number")
+		else if (mlir::isa<mlir::solidity::BlockNumberOp>(op))
 		{
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0)
@@ -2241,7 +2242,7 @@ private:
 						yul::FunctionCall{debugData, yul::Identifier{debugData, yul::YulName("number")}, {}})};
 			}
 		}
-		else if (opName == "solidity.block_chainid")
+		else if (mlir::isa<mlir::solidity::BlockChainIdOp>(op))
 		{
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0)
@@ -2254,7 +2255,7 @@ private:
 						yul::FunctionCall{debugData, yul::Identifier{debugData, yul::YulName("chainid")}, {}})};
 			}
 		}
-		else if (opName == "solidity.tx_origin")
+		else if (mlir::isa<mlir::solidity::TxOriginOp>(op))
 		{
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0)
@@ -2267,7 +2268,7 @@ private:
 						yul::FunctionCall{debugData, yul::Identifier{debugData, yul::YulName("origin")}, {}})};
 			}
 		}
-		else if (opName == "solidity.tx_gasprice")
+		else if (mlir::isa<mlir::solidity::TxGasPriceOp>(op))
 		{
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0)
@@ -2287,7 +2288,7 @@ private:
 			return std::nullopt;
 		}
 		// Built-in function lowering
-		else if (opName == "solidity.addmod")
+		else if (mlir::isa<mlir::solidity::AddModOp>(op))
 		{
 			// addmod(a, b, n) - direct Yul opcode
 			auto debugData = getDebugData(op);
@@ -2309,7 +2310,7 @@ private:
 						 yul::Identifier{debugData, yul::YulName(n)}}})};
 			}
 		}
-		else if (opName == "solidity.mulmod")
+		else if (mlir::isa<mlir::solidity::MulModOp>(op))
 		{
 			// mulmod(a, b, n) - direct Yul opcode
 			auto debugData = getDebugData(op);
@@ -2331,7 +2332,7 @@ private:
 						 yul::Identifier{debugData, yul::YulName(n)}}})};
 			}
 		}
-		else if (opName == "solidity.gasleft")
+		else if (mlir::isa<mlir::solidity::GasLeftOp>(op))
 		{
 			// gasleft() -> gas() in Yul
 			auto debugData = getDebugData(op);
@@ -2345,7 +2346,7 @@ private:
 						yul::FunctionCall{debugData, yul::Identifier{debugData, yul::YulName("gas")}, {}})};
 			}
 		}
-		else if (opName == "solidity.blockhash")
+		else if (mlir::isa<mlir::solidity::BlockhashOp>(op))
 		{
 			// blockhash(blockNumber) - direct Yul opcode
 			auto debugData = getDebugData(op);
@@ -2363,7 +2364,7 @@ private:
 						{yul::Identifier{debugData, yul::YulName(blockNum)}}})};
 			}
 		}
-		else if (opName == "solidity.keccak256")
+		else if (mlir::isa<mlir::solidity::Keccak256Op>(op))
 		{
 			// keccak256(data) - needs memory handling
 			auto debugData = getDebugData(op);
@@ -2374,18 +2375,15 @@ private:
 				// Check if the input comes from an ABI encode operation
 				// and fuse the operations for efficiency
 				auto* defOp = op->getOperand(0).getDefiningOp();
-				std::string defOpName;
-				if (defOp)
-					defOpName = defOp->getName().getStringRef().str();
 
-				if (defOp && (defOpName == "solidity.abi_encode_packed" || defOpName == "solidity.abi_encode"))
+				if (defOp && mlir::isa<mlir::solidity::AbiEncodePackedOp, mlir::solidity::AbiEncodeOp>(defOp))
 				{
 					// Fused keccak256(abi.encode/abi.encodePacked(a, b, ...))
 					// Store all args in scratch space and hash them
 					unsigned numArgs = defOp->getNumOperands();
 					std::vector<yul::Statement> statements;
 
-					if (defOpName == "solidity.abi_encode")
+					if (mlir::isa<mlir::solidity::AbiEncodeOp>(defOp))
 					{
 						// abi.encode: each arg padded to 32 bytes
 						for (unsigned i = 0; i < numArgs; ++i)
@@ -2512,7 +2510,7 @@ private:
 				}
 			}
 		}
-		else if (opName == "solidity.sha256")
+		else if (mlir::isa<mlir::solidity::Sha256Op>(op))
 		{
 			// sha256 uses precompile at address 0x02
 			auto debugData = getDebugData(op);
@@ -2563,7 +2561,7 @@ private:
 				return yul::Block{debugData, std::move(statements)};
 			}
 		}
-		else if (opName == "solidity.ripemd160")
+		else if (mlir::isa<mlir::solidity::Ripemd160Op>(op))
 		{
 			// ripemd160 uses precompile at address 0x03
 			auto debugData = getDebugData(op);
@@ -2614,7 +2612,7 @@ private:
 				return yul::Block{debugData, std::move(statements)};
 			}
 		}
-		else if (opName == "solidity.ecrecover")
+		else if (mlir::isa<mlir::solidity::EcrecoverOp>(op))
 		{
 			// ecrecover uses precompile at address 0x01
 			// Input: hash (32 bytes), v (32 bytes), r (32 bytes), s (32 bytes) = 128 bytes
@@ -2700,7 +2698,7 @@ private:
 				return yul::Block{debugData, std::move(statements)};
 			}
 		}
-		else if (opName == "solidity.selfdestruct")
+		else if (mlir::isa<mlir::solidity::SelfdestructOp>(op))
 		{
 			// selfdestruct(recipient) - direct Yul opcode
 			auto debugData = getDebugData(op);
@@ -2716,7 +2714,7 @@ private:
 						{yul::Identifier{debugData, yul::YulName(recipient)}}}};
 			}
 		}
-		else if (opName == "solidity.abi_encode")
+		else if (mlir::isa<mlir::solidity::AbiEncodeOp>(op))
 		{
 			// abi.encode(a, b, ...) - ABI encode with 32-byte padding per arg
 			auto debugData = getDebugData(op);
@@ -2728,7 +2726,7 @@ private:
 				if (result.hasOneUse())
 				{
 					auto* user = *result.getUsers().begin();
-					if (user->getName().getStringRef() == "solidity.keccak256")
+					if (mlir::isa<mlir::solidity::Keccak256Op>(user))
 					{
 						// Skip - the fused keccak256 handler will handle this
 						std::string resultVar = getOrCreateVariableName(result);
@@ -2801,7 +2799,7 @@ private:
 				return yul::Block{debugData, std::move(statements)};
 			}
 		}
-		else if (opName == "solidity.abi_encode_packed")
+		else if (mlir::isa<mlir::solidity::AbiEncodePackedOp>(op))
 		{
 			// abi.encodePacked(a, b, ...) - tightly packed encoding
 			auto debugData = getDebugData(op);
@@ -2812,7 +2810,7 @@ private:
 				if (result.hasOneUse())
 				{
 					auto* user = *result.getUsers().begin();
-					if (user->getName().getStringRef() == "solidity.keccak256")
+					if (mlir::isa<mlir::solidity::Keccak256Op>(user))
 					{
 						// Skip - the fused keccak256 handler will handle this
 						std::string resultVar = getOrCreateVariableName(result);
@@ -2923,7 +2921,7 @@ private:
 				return yul::Block{debugData, std::move(statements)};
 			}
 		}
-		else if (opName == "solidity.abi_encode_with_selector" || opName == "solidity.abi_encode_with_signature")
+		else if (mlir::isa<mlir::solidity::AbiEncodeWithSelectorOp, mlir::solidity::AbiEncodeWithSignatureOp>(op))
 		{
 			// abi.encodeWithSelector(sel, a, b, ...) or abi.encodeWithSignature(sig, a, b, ...)
 			// First operand is the selector/signature, rest are data arguments
@@ -3004,7 +3002,7 @@ private:
 				return yul::Block{debugData, std::move(statements)};
 			}
 		}
-		else if (opName == "solidity.abi_decode")
+		else if (mlir::isa<mlir::solidity::AbiDecodeOp>(op))
 		{
 			// abi.decode(data, (types)) - for now handle as loading from memory
 			auto debugData = getDebugData(op);
@@ -3455,11 +3453,11 @@ private:
 					llvm::StringRef opName = innerOp.getName().getStringRef();
 
 					// Skip control flow operations - they don't produce statements
-					if (opName == "scf.condition" || opName == "solidity.to_i1")
+					if (opName == "scf.condition" || mlir::isa<mlir::solidity::ToI1Op>(innerOp))
 						continue;
 
 					// Skip the comparison itself - we'll build it inline in the condition
-					if (opName == "solidity.cmp")
+					if (mlir::isa<mlir::solidity::CmpOp>(innerOp))
 						continue;
 
 					// Process all other operations as statements
@@ -3472,7 +3470,7 @@ private:
 				std::string conditionVarName;
 				for (auto& innerOp: block)
 				{
-					if (innerOp.getName().getStringRef() == "solidity.cmp")
+					if (mlir::isa<mlir::solidity::CmpOp>(innerOp))
 					{
 						// Process the comparison operation
 						if (innerOp.getNumOperands() >= 2 && innerOp.getNumResults() > 0)
@@ -3570,7 +3568,7 @@ private:
 							conditionVarName = resultName;
 						}
 					}
-					else if (innerOp.getName().getStringRef() == "solidity.to_i1")
+					else if (mlir::isa<mlir::solidity::ToI1Op>(innerOp))
 					{
 						// Convert boolean to i1 - just pass through the variable name
 						if (innerOp.getNumOperands() > 0 && innerOp.getNumResults() > 0)
@@ -3672,13 +3670,13 @@ private:
 
 								// Also skip operations that feed into the yielded operation
 								// (e.g., constants used in add operations)
-								if (definingOp->getName().getStringRef() == "solidity.add")
+								if (mlir::isa<mlir::solidity::AddOp>(definingOp))
 								{
 									for (auto operand: definingOp->getOperands())
 									{
 										if (auto constOp = operand.getDefiningOp())
 										{
-											if (constOp->getName().getStringRef() == "solidity.constant")
+											if (mlir::isa<mlir::solidity::ConstantOp>(constOp))
 												yieldedOps.insert(constOp);
 										}
 									}
@@ -3711,7 +3709,7 @@ private:
 							{
 								mlir::Operation* definingOp = yieldedValue.getDefiningOp();
 
-								if (definingOp && definingOp->getName().getStringRef() == "solidity.add")
+								if (definingOp && mlir::isa<mlir::solidity::AddOp>(definingOp))
 								{
 									// Generate the add expression directly in the post block
 									std::string lhs = getVariableName(definingOp->getOperand(0));
@@ -3724,7 +3722,7 @@ private:
 									mlir::Value rhsValue = definingOp->getOperand(1);
 									mlir::Operation* rhsDefOp = rhsValue.getDefiningOp();
 
-									if (rhsDefOp && rhsDefOp->getName().getStringRef() == "solidity.constant")
+									if (rhsDefOp && mlir::isa<mlir::solidity::ConstantOp>(rhsDefOp))
 									{
 										// Get the constant value
 										if (auto intAttr = rhsDefOp->getAttrOfType<mlir::IntegerAttr>("value"))

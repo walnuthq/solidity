@@ -140,16 +140,13 @@ public:
 		auto moduleBody = m_module.getBody();
 		m_builder->setInsertionPointToEnd(moduleBody);
 
-		// Create contract operation using manual operation creation
-		auto contractType = mlir::FunctionType::get(m_context.get(), {}, {});
-		mlir::OperationState contractState(loc, "solidity.contract");
-		contractState.addAttribute("name", m_builder->getStringAttr(_contract.name()));
-		contractState.addAttribute("id", m_builder->getI64IntegerAttr(_contract.id()));
-		contractState.addRegion();
-		auto contractOp = m_builder->create(contractState);
+		// Create contract operation using typed builder
+		auto contractOp = m_builder->create<mlir::solidity::ContractOp>(
+			loc, m_builder->getStringAttr(_contract.name()),
+			m_builder->getI64IntegerAttr(_contract.id()));
 
 		// Set insertion point to contract body
-		m_builder->setInsertionPointToEnd(&contractOp->getRegion(0).emplaceBlock());
+		m_builder->setInsertionPointToEnd(&contractOp.getBody().emplaceBlock());
 
 		// Generate state variables from all base contracts (in reverse order: base to derived)
 		for (auto it = _contract.annotation().linearizedBaseContracts.rbegin();
@@ -225,14 +222,15 @@ public:
 		// Create Solidity type
 		auto solidityType = translateSolidityType(*_var.type());
 
-		// Create state variable operation manually
-		mlir::OperationState stateVarState(loc, "solidity.state_var");
-		stateVarState.addAttribute("name", m_builder->getStringAttr(_var.name()));
-		stateVarState.addAttribute("type", mlir::TypeAttr::get(solidityType));
-		stateVarState.addAttribute("visibility", m_builder->getStringAttr(visibility));
-		if (_var.isConstant())
-			stateVarState.addAttribute("isConstant", m_builder->getUnitAttr());
-		auto stateVarOp = m_builder->create(stateVarState);
+		// Create state variable operation using typed builder
+		auto stateVarOp = m_builder->create<mlir::solidity::StateVarOp>(
+			loc,
+			_var.name(),
+			solidityType,
+			m_builder->getStringAttr(visibility),
+			_var.isConstant(),
+			mlir::Attribute() /*initialValue*/
+		);
 
 		// Store reference for later use - store as Operation*
 		m_stateVarOpMap[_var.id()] = stateVarOp;
@@ -274,17 +272,12 @@ public:
 		else if (_func.stateMutability() == StateMutability::Payable)
 			mutability = "payable";
 
-		// Create Solidity function operation manually
-		mlir::OperationState funcState(loc, "solidity.func");
-		funcState.addAttribute("sym_name", m_builder->getStringAttr(_func.name()));
-		funcState.addAttribute("function_type", mlir::TypeAttr::get(funcType));
-		funcState.addAttribute("visibility", m_builder->getStringAttr(visibility));
-		funcState.addAttribute("stateMutability", m_builder->getStringAttr(mutability));
-		funcState.addRegion();
-		auto funcOp = m_builder->create(funcState);
+		// Create Solidity function operation using typed builder
+		auto funcOp = m_builder->create<mlir::solidity::FunctionOp>(
+			loc, _func.name(), funcType, visibility, mutability);
 
 		// Create entry block with arguments
-		auto& entryBlock = funcOp->getRegion(0).emplaceBlock();
+		auto& entryBlock = funcOp.getBody().emplaceBlock();
 
 		// Add block arguments for parameters
 		for (size_t i = 0; i < paramTypes.size(); ++i)
@@ -320,14 +313,13 @@ public:
 		if (!entryBlock.empty())
 		{
 			auto& lastOp = entryBlock.back();
-			if (lastOp.getName().getStringRef() == "solidity.return")
+			if (mlir::isa<mlir::solidity::ReturnOp>(lastOp))
 				hasReturn = true;
 		}
 
 		if (!hasReturn)
 		{
-			mlir::OperationState returnState(loc, "solidity.return");
-			m_builder->create(returnState);
+			m_builder->create<mlir::solidity::ReturnOp>(loc, mlir::ValueRange{});
 		}
 
 		// Restore insertion point
@@ -440,18 +432,12 @@ public:
 			else if (literal->token() == langutil::Token::TrueLiteral)
 			{
 				auto attr = m_builder->getBoolAttr(true);
-				mlir::OperationState constantState(loc, "solidity.constant");
-				constantState.addAttribute("value", attr);
-				constantState.addTypes(type);
-				return m_builder->create(constantState)->getResult(0);
+				return m_builder->create<mlir::solidity::ConstantOp>(loc, attr, type);
 			}
 			else if (literal->token() == langutil::Token::FalseLiteral)
 			{
 				auto attr = m_builder->getBoolAttr(false);
-				mlir::OperationState constantState(loc, "solidity.constant");
-				constantState.addAttribute("value", attr);
-				constantState.addTypes(type);
-				return m_builder->create(constantState)->getResult(0);
+				return m_builder->create<mlir::solidity::ConstantOp>(loc, attr, type);
 			}
 		}
 		else if (auto* ident = dynamic_cast<Identifier const*>(&_expr))
@@ -473,10 +459,7 @@ public:
 					// Create a zero value as a fallback to prevent crashes
 					auto type = translateSolidityType(*_expr.annotation().type);
 					auto zeroAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-					mlir::OperationState constState(loc, "solidity.constant");
-					constState.addAttribute("value", zeroAttr);
-					constState.addTypes(type);
-					auto zeroValue = m_builder->create(constState)->getResult(0);
+					auto zeroValue = m_builder->create<mlir::solidity::ConstantOp>(loc, zeroAttr, type);
 					// Store it for future reference
 					m_valueMap[varDecl->id()] = zeroValue;
 					return zeroValue;
@@ -494,10 +477,7 @@ public:
 				// Return a zero constant as fallback
 				auto type = translateSolidityType(*_expr.annotation().type);
 				auto zeroAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-				mlir::OperationState constState(loc, "solidity.constant");
-				constState.addAttribute("value", zeroAttr);
-				constState.addTypes(type);
-				return m_builder->create(constState)->getResult(0);
+				return m_builder->create<mlir::solidity::ConstantOp>(loc, zeroAttr, type);
 			}
 
 			auto resultType = lhs.getType();
@@ -510,79 +490,55 @@ public:
 			}
 			case langutil::Token::Sub:
 			{
-				mlir::OperationState subState(loc, "solidity.sub");
-				subState.addOperands({lhs, rhs});
-				subState.addTypes(resultType);
-				return m_builder->create(subState)->getResult(0);
+				return m_builder->create<mlir::solidity::SubOp>(loc, resultType, lhs, rhs);
 			}
 			case langutil::Token::Mul:
 			{
-				mlir::OperationState mulState(loc, "solidity.mul");
-				mulState.addOperands({lhs, rhs});
-				mulState.addTypes(resultType);
-				return m_builder->create(mulState)->getResult(0);
+				return m_builder->create<mlir::solidity::MulOp>(loc, resultType, lhs, rhs);
 			}
 			case langutil::Token::Div:
 			{
-				mlir::OperationState divState(loc, "solidity.div");
-				divState.addOperands({lhs, rhs});
-				divState.addTypes(resultType);
-				return m_builder->create(divState)->getResult(0);
+				return m_builder->create<mlir::solidity::DivOp>(loc, resultType, lhs, rhs);
 			}
 			case langutil::Token::Mod:
 			{
-				mlir::OperationState modState(loc, "solidity.mod");
-				modState.addOperands({lhs, rhs});
-				modState.addTypes(resultType);
-				return m_builder->create(modState)->getResult(0);
+				return m_builder->create<mlir::solidity::ModOp>(loc, resultType, lhs, rhs);
 			}
 			case langutil::Token::LessThan:
 			{
-				mlir::OperationState cmpState(loc, "solidity.cmp");
-				cmpState.addAttribute("predicate", m_builder->getStringAttr("lt"));
-				cmpState.addOperands({lhs, rhs});
-				cmpState.addTypes(mlir::solidity::BoolType::get(m_context.get()));
-				return m_builder->create(cmpState)->getResult(0);
+				return m_builder->create<mlir::solidity::CmpOp>(
+					loc, mlir::solidity::BoolType::get(m_context.get()),
+					lhs, rhs, m_builder->getStringAttr("lt"));
 			}
 			case langutil::Token::GreaterThan:
 			{
-				mlir::OperationState cmpState(loc, "solidity.cmp");
-				cmpState.addAttribute("predicate", m_builder->getStringAttr("gt"));
-				cmpState.addOperands({lhs, rhs});
-				cmpState.addTypes(mlir::solidity::BoolType::get(m_context.get()));
-				return m_builder->create(cmpState)->getResult(0);
+				return m_builder->create<mlir::solidity::CmpOp>(
+					loc, mlir::solidity::BoolType::get(m_context.get()),
+					lhs, rhs, m_builder->getStringAttr("gt"));
 			}
 			case langutil::Token::Equal:
 			{
-				mlir::OperationState cmpState(loc, "solidity.cmp");
-				cmpState.addAttribute("predicate", m_builder->getStringAttr("eq"));
-				cmpState.addOperands({lhs, rhs});
-				cmpState.addTypes(mlir::solidity::BoolType::get(m_context.get()));
-				return m_builder->create(cmpState)->getResult(0);
+				return m_builder->create<mlir::solidity::CmpOp>(
+					loc, mlir::solidity::BoolType::get(m_context.get()),
+					lhs, rhs, m_builder->getStringAttr("eq"));
 			}
 			case langutil::Token::LessThanOrEqual:
 			{
-				mlir::OperationState cmpState(loc, "solidity.cmp");
-				cmpState.addAttribute("predicate", m_builder->getStringAttr("le"));
-				cmpState.addOperands({lhs, rhs});
-				cmpState.addTypes(mlir::solidity::BoolType::get(m_context.get()));
-				return m_builder->create(cmpState)->getResult(0);
+				return m_builder->create<mlir::solidity::CmpOp>(
+					loc, mlir::solidity::BoolType::get(m_context.get()),
+					lhs, rhs, m_builder->getStringAttr("le"));
 			}
 			case langutil::Token::GreaterThanOrEqual:
 			{
-				mlir::OperationState cmpState(loc, "solidity.cmp");
-				cmpState.addAttribute("predicate", m_builder->getStringAttr("ge"));
-				cmpState.addOperands({lhs, rhs});
-				cmpState.addTypes(mlir::solidity::BoolType::get(m_context.get()));
-				return m_builder->create(cmpState)->getResult(0);
+				return m_builder->create<mlir::solidity::CmpOp>(
+					loc, mlir::solidity::BoolType::get(m_context.get()),
+					lhs, rhs, m_builder->getStringAttr("ge"));
 			}
 			case langutil::Token::NotEqual:
 			{
-				mlir::OperationState cmpState(loc, "solidity.cmp");
-				cmpState.addAttribute("predicate", m_builder->getStringAttr("ne"));
-				cmpState.addOperands({lhs, rhs});
-				cmpState.addTypes(mlir::solidity::BoolType::get(m_context.get()));
-				return m_builder->create(cmpState)->getResult(0);
+				return m_builder->create<mlir::solidity::CmpOp>(
+					loc, mlir::solidity::BoolType::get(m_context.get()),
+					lhs, rhs, m_builder->getStringAttr("ne"));
 			}
 			default:
 				break;
@@ -604,11 +560,8 @@ public:
 					{
 						if (varDecl->isStateVariable())
 						{
-							mlir::OperationState loadState(loc, "solidity.load_state");
-							loadState.addAttribute("varName", m_builder->getStringAttr(varDecl->name()));
-							loadState.addTypes(translateSolidityType(*varDecl->type()));
-							auto* loadOp = m_builder->create(loadState);
-							currentValue = loadOp->getResult(0);
+							currentValue = m_builder->create<mlir::solidity::LoadStateVarOp>(
+								loc, translateSolidityType(*varDecl->type()), varDecl->name());
 						}
 						else
 						{
@@ -632,11 +585,8 @@ public:
 									baseIdent->annotation().referencedDeclaration))
 								varName = varDecl->name();
 
-						mlir::OperationState accessState(loc, "solidity.mapping_access");
-						accessState.addAttribute("varName", m_builder->getStringAttr(varName));
-						accessState.addOperands({key});
-						accessState.addTypes(valueType);
-						currentValue = m_builder->create(accessState)->getResult(0);
+						currentValue = m_builder->create<mlir::solidity::MappingAccessOp>(
+							loc, valueType, m_builder->getStringAttr(varName), key);
 					}
 				}
 
@@ -649,10 +599,7 @@ public:
 					// Return a zero constant as fallback
 					auto type = translateSolidityType(*_expr.annotation().type);
 					auto zeroAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-					mlir::OperationState constState(loc, "solidity.constant");
-					constState.addAttribute("value", zeroAttr);
-					constState.addTypes(type);
-					return m_builder->create(constState)->getResult(0);
+					return m_builder->create<mlir::solidity::ConstantOp>(loc, zeroAttr, type);
 				}
 
 				// Apply the operation based on the compound operator
@@ -693,10 +640,7 @@ public:
 				{
 					if (varDecl->isStateVariable())
 					{
-						mlir::OperationState storeState(loc, "solidity.store_state");
-						storeState.addAttribute("varName", m_builder->getStringAttr(varDecl->name()));
-						storeState.addOperands(value);
-						m_builder->create(storeState);
+						m_builder->create<mlir::solidity::StoreStateVarOp>(loc, varDecl->name(), value);
 					}
 					else
 					{
@@ -718,10 +662,7 @@ public:
 							= dynamic_cast<VariableDeclaration const*>(baseIdent->annotation().referencedDeclaration))
 							varName = varDecl->name();
 
-					mlir::OperationState storeOp(loc, "solidity.mapping_store");
-					storeOp.addAttribute("varName", m_builder->getStringAttr(varName));
-					storeOp.addOperands({key, value});
-					m_builder->create(storeOp);
+					m_builder->create<mlir::solidity::MappingStoreOp>(loc, m_builder->getStringAttr(varName), key, value);
 				}
 			}
 
@@ -736,24 +677,15 @@ public:
 			{
 			case langutil::Token::BitNot:
 			{
-				mlir::OperationState notState(loc, "solidity.not");
-				notState.addOperands(operand);
-				notState.addTypes(resultType);
-				return m_builder->create(notState)->getResult(0);
+				return m_builder->create<mlir::solidity::NotOp>(loc, resultType, operand);
 			}
 			case langutil::Token::Inc:
 			{
 				// Pre/post increment: x++ or ++x
 				auto one = m_builder->getIntegerAttr(m_builder->getI64Type(), 1);
-				mlir::OperationState constState(loc, "solidity.constant");
-				constState.addAttribute("value", one);
-				constState.addTypes(resultType);
-				auto oneValue = m_builder->create(constState)->getResult(0);
+				auto oneValue = m_builder->create<mlir::solidity::ConstantOp>(loc, one, resultType);
 
-				mlir::OperationState addState(loc, "solidity.add");
-				addState.addOperands({operand, oneValue});
-				addState.addTypes(resultType);
-				auto result = m_builder->create(addState)->getResult(0);
+				mlir::Value result = m_builder->create<mlir::solidity::AddOp>(loc, resultType, operand, oneValue);
 
 				// Store back to variable if it's an lvalue
 				if (auto* ident = dynamic_cast<Identifier const*>(&unaryOp->subExpression()))
@@ -763,10 +695,7 @@ public:
 					{
 						if (varDecl->isStateVariable())
 						{
-							mlir::OperationState storeState(loc, "solidity.store_state");
-							storeState.addAttribute("varName", m_builder->getStringAttr(varDecl->name()));
-							storeState.addOperands(result);
-							m_builder->create(storeState);
+							m_builder->create<mlir::solidity::StoreStateVarOp>(loc, varDecl->name(), result);
 						}
 						else
 						{
@@ -782,15 +711,9 @@ public:
 			{
 				// Pre/post decrement: x-- or --x
 				auto one = m_builder->getIntegerAttr(m_builder->getI64Type(), 1);
-				mlir::OperationState constState(loc, "solidity.constant");
-				constState.addAttribute("value", one);
-				constState.addTypes(resultType);
-				auto oneValue = m_builder->create(constState)->getResult(0);
+				auto oneValue = m_builder->create<mlir::solidity::ConstantOp>(loc, one, resultType);
 
-				mlir::OperationState subState(loc, "solidity.sub");
-				subState.addOperands({operand, oneValue});
-				subState.addTypes(resultType);
-				auto result = m_builder->create(subState)->getResult(0);
+				mlir::Value result = m_builder->create<mlir::solidity::SubOp>(loc, resultType, operand, oneValue);
 
 				// Store back to variable if it's an lvalue
 				if (auto* ident = dynamic_cast<Identifier const*>(&unaryOp->subExpression()))
@@ -800,10 +723,7 @@ public:
 					{
 						if (varDecl->isStateVariable())
 						{
-							mlir::OperationState storeState(loc, "solidity.store_state");
-							storeState.addAttribute("varName", m_builder->getStringAttr(varDecl->name()));
-							storeState.addOperands(result);
-							m_builder->create(storeState);
+							m_builder->create<mlir::solidity::StoreStateVarOp>(loc, varDecl->name(), result);
 						}
 						else
 						{
@@ -819,23 +739,15 @@ public:
 			{
 				// Unary minus
 				auto zero = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-				mlir::OperationState constState(loc, "solidity.constant");
-				constState.addAttribute("value", zero);
-				constState.addTypes(resultType);
-				auto zeroValue = m_builder->create(constState)->getResult(0);
+				auto zeroValue = m_builder->create<mlir::solidity::ConstantOp>(loc, zero, resultType);
 
-				mlir::OperationState subState(loc, "solidity.sub");
-				subState.addOperands({zeroValue, operand});
-				subState.addTypes(resultType);
-				return m_builder->create(subState)->getResult(0);
+				return m_builder->create<mlir::solidity::SubOp>(loc, resultType, zeroValue, operand);
 			}
 			case langutil::Token::Not:
 			{
 				// Logical NOT
-				mlir::OperationState notState(loc, "solidity.logical_not");
-				notState.addOperands(operand);
-				notState.addTypes(mlir::solidity::BoolType::get(m_context.get()));
-				return m_builder->create(notState)->getResult(0);
+				return m_builder->create<mlir::solidity::LogicalNotOp>(
+					loc, mlir::solidity::BoolType::get(m_context.get()), operand);
 			}
 			default:
 				break;
@@ -854,64 +766,54 @@ public:
 				{
 					if (memberName == "sender")
 					{
-						mlir::OperationState senderState(loc, "solidity.msg_sender");
-						senderState.addTypes(mlir::solidity::AddressType::get(m_context.get()));
-						return m_builder->create(senderState)->getResult(0);
+						return m_builder->create<mlir::solidity::MsgSenderOp>(
+							loc, mlir::solidity::AddressType::get(m_context.get()));
 					}
 					else if (memberName == "value")
 					{
-						mlir::OperationState valueState(loc, "solidity.msg_value");
-						valueState.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
-						return m_builder->create(valueState)->getResult(0);
+						return m_builder->create<mlir::solidity::MsgValueOp>(
+							loc, mlir::solidity::UIntType::get(m_context.get(), 256));
 					}
 					else if (memberName == "data")
 					{
-						mlir::OperationState dataState(loc, "solidity.msg_data");
-						dataState.addTypes(
-							mlir::solidity::ArrayType::get(mlir::solidity::UIntType::get(m_context.get(), 8), -1));
-						return m_builder->create(dataState)->getResult(0);
+						return m_builder->create<mlir::solidity::MsgDataOp>(
+							loc, mlir::solidity::ArrayType::get(mlir::solidity::UIntType::get(m_context.get(), 8), -1));
 					}
 					else if (memberName == "sig")
 					{
-						mlir::OperationState sigState(loc, "solidity.msg_sig");
-						sigState.addTypes(mlir::solidity::BytesType::get(m_context.get(), 4));
-						return m_builder->create(sigState)->getResult(0);
+						return m_builder->create<mlir::solidity::MsgSigOp>(
+							loc, mlir::solidity::BytesType::get(m_context.get(), 4));
 					}
 				}
 				else if (magicType->kind() == MagicType::Kind::Block)
 				{
 					if (memberName == "timestamp")
 					{
-						mlir::OperationState timestampState(loc, "solidity.block_timestamp");
-						timestampState.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
-						return m_builder->create(timestampState)->getResult(0);
+						return m_builder->create<mlir::solidity::BlockTimestampOp>(
+							loc, mlir::solidity::UIntType::get(m_context.get(), 256));
 					}
 					else if (memberName == "number")
 					{
-						mlir::OperationState numberState(loc, "solidity.block_number");
-						numberState.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
-						return m_builder->create(numberState)->getResult(0);
+						return m_builder->create<mlir::solidity::BlockNumberOp>(
+							loc, mlir::solidity::UIntType::get(m_context.get(), 256));
 					}
 					else if (memberName == "chainid")
 					{
-						mlir::OperationState chainidState(loc, "solidity.block_chainid");
-						chainidState.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
-						return m_builder->create(chainidState)->getResult(0);
+						return m_builder->create<mlir::solidity::BlockChainIdOp>(
+							loc, mlir::solidity::UIntType::get(m_context.get(), 256));
 					}
 				}
 				else if (magicType->kind() == MagicType::Kind::Transaction)
 				{
 					if (memberName == "origin")
 					{
-						mlir::OperationState originState(loc, "solidity.tx_origin");
-						originState.addTypes(mlir::solidity::AddressType::get(m_context.get()));
-						return m_builder->create(originState)->getResult(0);
+						return m_builder->create<mlir::solidity::TxOriginOp>(
+							loc, mlir::solidity::AddressType::get(m_context.get()));
 					}
 					else if (memberName == "gasprice")
 					{
-						mlir::OperationState gaspriceState(loc, "solidity.tx_gasprice");
-						gaspriceState.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
-						return m_builder->create(gaspriceState)->getResult(0);
+						return m_builder->create<mlir::solidity::TxGasPriceOp>(
+							loc, mlir::solidity::UIntType::get(m_context.get(), 256));
 					}
 				}
 			}
@@ -922,10 +824,7 @@ public:
 				// Create a zero constant if base is null
 				auto type = translateSolidityType(*_expr.annotation().type);
 				auto zeroAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-				mlir::OperationState constState(loc, "solidity.constant");
-				constState.addAttribute("value", zeroAttr);
-				constState.addTypes(type);
-				return m_builder->create(constState)->getResult(0);
+				return m_builder->create<mlir::solidity::ConstantOp>(loc, zeroAttr, type);
 			}
 
 			// Handle array.length
@@ -933,48 +832,37 @@ public:
 			{
 				if (memberName == "length")
 				{
-					mlir::OperationState lengthState(loc, "solidity.array_length");
-					lengthState.addOperands(base);
-					lengthState.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
-					return m_builder->create(lengthState)->getResult(0);
+					return m_builder->create<mlir::solidity::ArrayLengthOp>(
+						loc, mlir::solidity::UIntType::get(m_context.get(), 256), base);
 				}
 			}
 			// Handle struct member access
 			else if (auto* structType = dynamic_cast<StructType const*>(baseType))
 			{
-				mlir::OperationState memberState(loc, "solidity.member_access");
-				memberState.addOperands(base);
-				memberState.addAttribute("member", m_builder->getStringAttr(memberName));
-				memberState.addTypes(translateSolidityType(*_expr.annotation().type));
-				return m_builder->create(memberState)->getResult(0);
+				return m_builder->create<mlir::solidity::MemberAccessOp>(
+					loc, translateSolidityType(*_expr.annotation().type), base, m_builder->getStringAttr(memberName));
 			}
 			// Handle address member access (balance, code, codehash)
 			else if (dynamic_cast<AddressType const*>(baseType))
 			{
 				if (memberName == "balance")
 				{
-					mlir::OperationState balanceState(loc, "solidity.address_balance");
-					balanceState.addOperands(base);
-					balanceState.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
-					return m_builder->create(balanceState)->getResult(0);
+					return m_builder->create<mlir::solidity::AddressBalanceOp>(
+						loc, mlir::solidity::UIntType::get(m_context.get(), 256), base);
 				}
 				else if (memberName == "code")
 				{
-					mlir::OperationState codeState(loc, "solidity.address_code");
-					codeState.addOperands(base);
-					// bytes is a dynamic array of uint8, size -1 indicates dynamic
-					codeState.addTypes(
-						mlir::solidity::ArrayType::
-							get(mlir::solidity::UIntType::get(m_context.get(), 8),
-								/*size=*/-1));
-					return m_builder->create(codeState)->getResult(0);
+					return m_builder->create<mlir::solidity::AddressCodeOp>(
+						loc,
+						mlir::solidity::ArrayType::get(
+							mlir::solidity::UIntType::get(m_context.get(), 8),
+							/*size=*/-1),
+						base);
 				}
 				else if (memberName == "codehash")
 				{
-					mlir::OperationState codehashState(loc, "solidity.address_codehash");
-					codehashState.addOperands(base);
-					codehashState.addTypes(mlir::solidity::BytesType::get(m_context.get(), 32));
-					return m_builder->create(codehashState)->getResult(0);
+					return m_builder->create<mlir::solidity::AddressCodehashOp>(
+						loc, mlir::solidity::BytesType::get(m_context.get(), 32), base);
 				}
 			}
 
@@ -996,16 +884,7 @@ public:
 					if (memberName == "push" && !funcCall->arguments().empty())
 					{
 						auto value = generateSolidityExpression(*funcCall->arguments()[0]);
-						mlir::OperationState pushState(loc, "solidity.array_push");
-
-						// Get the state variable name for the array
-						if (auto* baseIdent = dynamic_cast<Identifier const*>(&memberAccess->expression()))
-							if (auto* varDecl = dynamic_cast<VariableDeclaration const*>(
-									baseIdent->annotation().referencedDeclaration))
-								pushState.addAttribute("varName", m_builder->getStringAttr(varDecl->name()));
-
-						pushState.addOperands({base, value});
-						m_builder->create(pushState);
+						m_builder->create<mlir::solidity::ArrayPushOp>(loc, base, value);
 						return base;
 					}
 				}
@@ -1016,11 +895,8 @@ public:
 				if (auto* structDecl
 					= dynamic_cast<StructDefinition const*>(typeConversion->annotation().referencedDeclaration))
 				{
-					// Create struct with named arguments
-					mlir::OperationState structState(loc, "solidity.struct_create");
-					structState.addAttribute("name", m_builder->getStringAttr(structDecl->name()));
-
-					// Add field values
+					// Collect field values
+					std::vector<mlir::Value> operands;
 					for (auto const& arg: funcCall->arguments())
 					{
 						auto value = generateSolidityExpression(*arg);
@@ -1029,16 +905,14 @@ public:
 							// Create a zero constant if value is null
 							auto type = translateSolidityType(*arg->annotation().type);
 							auto zeroAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-							mlir::OperationState constState(loc, "solidity.constant");
-							constState.addAttribute("value", zeroAttr);
-							constState.addTypes(type);
-							value = m_builder->create(constState)->getResult(0);
+							value = m_builder->create<mlir::solidity::ConstantOp>(loc, zeroAttr, type);
 						}
-						structState.addOperands(value);
+						operands.push_back(value);
 					}
 
-					structState.addTypes(translateSolidityType(*_expr.annotation().type));
-					return m_builder->create(structState)->getResult(0);
+					auto resultType = translateSolidityType(*_expr.annotation().type);
+					return m_builder->create<mlir::solidity::StructCreateOp>(
+						loc, resultType, m_builder->getStringAttr(structDecl->name()), operands);
 				}
 			}
 
@@ -1050,14 +924,13 @@ public:
 					if (!funcCall->arguments().empty())
 					{
 						auto cond = generateSolidityExpression(*funcCall->arguments()[0]);
-						mlir::OperationState requireState(loc, "solidity.require");
-						requireState.addOperands(cond);
+						mlir::StringAttr msgAttr;
 						if (funcCall->arguments().size() > 1)
 						{
 							if (auto* literal = dynamic_cast<Literal const*>(funcCall->arguments()[1].get()))
-								requireState.addAttribute("msg", m_builder->getStringAttr(literal->value()));
+								msgAttr = m_builder->getStringAttr(literal->value());
 						}
-						m_builder->create(requireState);
+						m_builder->create<mlir::solidity::RequireOp>(loc, cond, msgAttr);
 					}
 				}
 				else if (ident->name() == "assert")
@@ -1065,20 +938,18 @@ public:
 					if (!funcCall->arguments().empty())
 					{
 						auto cond = generateSolidityExpression(*funcCall->arguments()[0]);
-						mlir::OperationState assertState(loc, "solidity.assert");
-						assertState.addOperands(cond);
-						m_builder->create(assertState);
+						m_builder->create<mlir::solidity::AssertOp>(loc, cond);
 					}
 				}
 				else if (ident->name() == "revert")
 				{
-					mlir::OperationState revertState(loc, "solidity.revert");
+					mlir::StringAttr reasonAttr;
 					if (!funcCall->arguments().empty())
 					{
 						if (auto* literal = dynamic_cast<Literal const*>(funcCall->arguments()[0].get()))
-							revertState.addAttribute("reason", m_builder->getStringAttr(literal->value()));
+							reasonAttr = m_builder->getStringAttr(literal->value());
 					}
-					m_builder->create(revertState);
+					m_builder->create<mlir::solidity::RevertOp>(loc, reasonAttr);
 					// Revert is a terminating operation, return nullptr to indicate no value
 					// The dummy value creation below will be skipped
 					return nullptr;
@@ -1095,10 +966,7 @@ public:
 					auto targetType = translateSolidityType(*funcCall->annotation().type);
 
 					// Create a type conversion operation
-					mlir::OperationState convertState(loc, "solidity.convert");
-					convertState.addOperands(argValue);
-					convertState.addTypes(targetType);
-					return m_builder->create(convertState)->getResult(0);
+					return m_builder->create<mlir::solidity::ConvertOp>(loc, targetType, argValue);
 				}
 			}
 
@@ -1117,10 +985,8 @@ public:
 					{
 						// Already handled above, return dummy for expression value
 						auto dummyType = translateSolidityType(*_expr.annotation().type);
-						mlir::OperationState constState(loc, "solidity.constant");
-						constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
-						constState.addTypes(dummyType);
-						return m_builder->create(constState)->getResult(0);
+						return m_builder->create<mlir::solidity::ConstantOp>(
+							loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
 					}
 
 					// Handle built-in functions with proper MLIR operations
@@ -1133,10 +999,7 @@ public:
 						auto n = generateSolidityExpression(*funcCall->arguments()[2]);
 						auto resultType = translateSolidityType(*_expr.annotation().type);
 
-						mlir::OperationState addmodState(loc, "solidity.addmod");
-						addmodState.addOperands({a, b, n});
-						addmodState.addTypes(resultType);
-						return m_builder->create(addmodState)->getResult(0);
+						return m_builder->create<mlir::solidity::AddModOp>(loc, resultType, a, b, n);
 					}
 
 					// mulmod(a, b, n) - modular multiplication
@@ -1147,18 +1010,14 @@ public:
 						auto n = generateSolidityExpression(*funcCall->arguments()[2]);
 						auto resultType = translateSolidityType(*_expr.annotation().type);
 
-						mlir::OperationState mulmodState(loc, "solidity.mulmod");
-						mulmodState.addOperands({a, b, n});
-						mulmodState.addTypes(resultType);
-						return m_builder->create(mulmodState)->getResult(0);
+						return m_builder->create<mlir::solidity::MulModOp>(loc, resultType, a, b, n);
 					}
 
 					// gasleft() - get remaining gas
 					if (funcName == "gasleft" && funcCall->arguments().empty())
 					{
-						mlir::OperationState gasleftState(loc, "solidity.gasleft");
-						gasleftState.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
-						return m_builder->create(gasleftState)->getResult(0);
+						return m_builder->create<mlir::solidity::GasLeftOp>(
+							loc, mlir::solidity::UIntType::get(m_context.get(), 256));
 					}
 
 					// blockhash(blockNumber) - get block hash
@@ -1166,10 +1025,8 @@ public:
 					{
 						auto blockNumber = generateSolidityExpression(*funcCall->arguments()[0]);
 
-						mlir::OperationState blockhashState(loc, "solidity.blockhash");
-						blockhashState.addOperands(blockNumber);
-						blockhashState.addTypes(mlir::solidity::BytesType::get(m_context.get(), 32));
-						return m_builder->create(blockhashState)->getResult(0);
+						return m_builder->create<mlir::solidity::BlockhashOp>(
+							loc, mlir::solidity::BytesType::get(m_context.get(), 32), blockNumber);
 					}
 
 					// keccak256(data) - hash function
@@ -1177,10 +1034,8 @@ public:
 					{
 						auto data = generateSolidityExpression(*funcCall->arguments()[0]);
 
-						mlir::OperationState keccakState(loc, "solidity.keccak256");
-						keccakState.addOperands(data);
-						keccakState.addTypes(mlir::solidity::BytesType::get(m_context.get(), 32));
-						return m_builder->create(keccakState)->getResult(0);
+						return m_builder->create<mlir::solidity::Keccak256Op>(
+							loc, mlir::solidity::BytesType::get(m_context.get(), 32), data);
 					}
 
 					// sha256(data) - hash function
@@ -1188,10 +1043,8 @@ public:
 					{
 						auto data = generateSolidityExpression(*funcCall->arguments()[0]);
 
-						mlir::OperationState sha256State(loc, "solidity.sha256");
-						sha256State.addOperands(data);
-						sha256State.addTypes(mlir::solidity::BytesType::get(m_context.get(), 32));
-						return m_builder->create(sha256State)->getResult(0);
+						return m_builder->create<mlir::solidity::Sha256Op>(
+							loc, mlir::solidity::BytesType::get(m_context.get(), 32), data);
 					}
 
 					// ripemd160(data) - hash function
@@ -1199,11 +1052,9 @@ public:
 					{
 						auto data = generateSolidityExpression(*funcCall->arguments()[0]);
 
-						mlir::OperationState ripemdState(loc, "solidity.ripemd160");
-						ripemdState.addOperands(data);
 						// ripemd160 returns bytes20, but padded to 32 bytes in EVM
-						ripemdState.addTypes(mlir::solidity::BytesType::get(m_context.get(), 20));
-						return m_builder->create(ripemdState)->getResult(0);
+						return m_builder->create<mlir::solidity::Ripemd160Op>(
+							loc, mlir::solidity::BytesType::get(m_context.get(), 20), data);
 					}
 
 					// ecrecover(hash, v, r, s) - signature recovery
@@ -1214,10 +1065,8 @@ public:
 						auto r = generateSolidityExpression(*funcCall->arguments()[2]);
 						auto s = generateSolidityExpression(*funcCall->arguments()[3]);
 
-						mlir::OperationState ecrecoverState(loc, "solidity.ecrecover");
-						ecrecoverState.addOperands({hash, v, r, s});
-						ecrecoverState.addTypes(mlir::solidity::AddressType::get(m_context.get()));
-						return m_builder->create(ecrecoverState)->getResult(0);
+						return m_builder->create<mlir::solidity::EcrecoverOp>(
+							loc, mlir::solidity::AddressType::get(m_context.get()), hash, v, r, s);
 					}
 
 					// selfdestruct(recipient) - destroy contract
@@ -1225,16 +1074,12 @@ public:
 					{
 						auto recipient = generateSolidityExpression(*funcCall->arguments()[0]);
 
-						mlir::OperationState selfdestructState(loc, "solidity.selfdestruct");
-						selfdestructState.addOperands(recipient);
-						m_builder->create(selfdestructState);
+						m_builder->create<mlir::solidity::SelfdestructOp>(loc, recipient);
 
 						// selfdestruct doesn't return a value, return a dummy for expression context
 						auto dummyType = translateSolidityType(*_expr.annotation().type);
-						mlir::OperationState constState(loc, "solidity.constant");
-						constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
-						constState.addTypes(dummyType);
-						return m_builder->create(constState)->getResult(0);
+						return m_builder->create<mlir::solidity::ConstantOp>(
+							loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
 					}
 
 					// type(X) - handled separately as member access (type(uint256).max etc.)
@@ -1243,10 +1088,8 @@ public:
 						// The actual value is extracted from member access (type(X).max, type(X).min)
 						// Just return a dummy here - real handling is in member access below
 						auto dummyType = translateSolidityType(*_expr.annotation().type);
-						mlir::OperationState constState(loc, "solidity.constant");
-						constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
-						constState.addTypes(dummyType);
-						return m_builder->create(constState)->getResult(0);
+						return m_builder->create<mlir::solidity::ConstantOp>(
+							loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
 					}
 				}
 				// Handle member function calls (e.g., library.func() or obj.method())
@@ -1274,46 +1117,29 @@ public:
 
 							if (abiFunc == "encode")
 							{
-								mlir::OperationState encState(loc, "solidity.abi_encode");
-								encState.addOperands(argValues);
-								encState.addTypes(resultType);
-								return m_builder->create(encState)->getResult(0);
+								return m_builder->create<mlir::solidity::AbiEncodeOp>(loc, resultType, argValues);
 							}
 							else if (abiFunc == "encodePacked")
 							{
-								mlir::OperationState encState(loc, "solidity.abi_encode_packed");
-								encState.addOperands(argValues);
-								encState.addTypes(resultType);
-								return m_builder->create(encState)->getResult(0);
+								return m_builder->create<mlir::solidity::AbiEncodePackedOp>(loc, resultType, argValues);
 							}
 							else if (abiFunc == "encodeWithSelector")
 							{
-								mlir::OperationState encState(loc, "solidity.abi_encode_with_selector");
-								encState.addOperands(argValues);
-								encState.addTypes(resultType);
-								return m_builder->create(encState)->getResult(0);
+								return m_builder->create<mlir::solidity::AbiEncodeWithSelectorOp>(loc, resultType, argValues);
 							}
 							else if (abiFunc == "encodeWithSignature")
 							{
-								mlir::OperationState encState(loc, "solidity.abi_encode_with_signature");
-								encState.addOperands(argValues);
-								encState.addTypes(resultType);
-								return m_builder->create(encState)->getResult(0);
+								return m_builder->create<mlir::solidity::AbiEncodeWithSignatureOp>(loc, resultType, argValues);
 							}
 							else if (abiFunc == "decode")
 							{
-								mlir::OperationState decState(loc, "solidity.abi_decode");
-								decState.addOperands(argValues);
-								decState.addTypes(resultType);
-								return m_builder->create(decState)->getResult(0);
+								return m_builder->create<mlir::solidity::AbiDecodeOp>(loc, resultType, argValues);
 							}
 							else
 							{
 								// Fallback for unknown abi functions
-								mlir::OperationState constState(loc, "solidity.constant");
-								constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
-								constState.addTypes(resultType);
-								return m_builder->create(constState)->getResult(0);
+								return m_builder->create<mlir::solidity::ConstantOp>(
+									loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), resultType);
 							}
 						}
 					}
@@ -1339,7 +1165,7 @@ public:
 										if (memberName == "max")
 										{
 											// Generate max value constant
-											mlir::OperationState constState(loc, "solidity.constant");
+											mlir::Attribute valueAttr;
 
 											if (auto* intType = dynamic_cast<IntegerType const*>(&typeName))
 											{
@@ -1349,12 +1175,10 @@ public:
 													// For int256: 2^255 - 1
 													unsigned bits = intType->numBits();
 													u256 maxVal = (u256(1) << (bits - 1)) - 1;
-													constState.addAttribute(
-														"value",
-														m_builder->getIntegerAttr(
-															mlir::IntegerType::
-																get(m_context.get(), 256, mlir::IntegerType::Unsigned),
-															llvm::APInt(256, maxVal.str(), 10)));
+													valueAttr = m_builder->getIntegerAttr(
+														mlir::IntegerType::
+															get(m_context.get(), 256, mlir::IntegerType::Unsigned),
+														llvm::APInt(256, maxVal.str(), 10));
 												}
 												else
 												{
@@ -1362,28 +1186,24 @@ public:
 													// For uint256: 2^256 - 1 = 0xffffffff...
 													unsigned bits = intType->numBits();
 													u256 maxVal = (u256(1) << bits) - 1;
-													constState.addAttribute(
-														"value",
-														m_builder->getIntegerAttr(
-															mlir::IntegerType::
-																get(m_context.get(), 256, mlir::IntegerType::Unsigned),
-															llvm::APInt(256, maxVal.str(), 10)));
+													valueAttr = m_builder->getIntegerAttr(
+														mlir::IntegerType::
+															get(m_context.get(), 256, mlir::IntegerType::Unsigned),
+														llvm::APInt(256, maxVal.str(), 10));
 												}
 											}
 											else
 											{
 												// Default fallback
-												constState.addAttribute(
-													"value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
+												valueAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
 											}
 
-											constState.addTypes(resultType);
-											return m_builder->create(constState)->getResult(0);
+											return m_builder->create<mlir::solidity::ConstantOp>(loc, valueAttr, resultType);
 										}
 										else if (memberName == "min")
 										{
 											// Generate min value constant
-											mlir::OperationState constState(loc, "solidity.constant");
+											mlir::Attribute valueAttr;
 
 											if (auto* intType = dynamic_cast<IntegerType const*>(&typeName))
 											{
@@ -1399,39 +1219,32 @@ public:
 														= u256(1)
 														  << (bits
 															  - 1); // This is 2^(N-1), treated as signed it's the min
-													constState.addAttribute(
-														"value",
-														m_builder->getIntegerAttr(
-															mlir::IntegerType::
-																get(m_context.get(), 256, mlir::IntegerType::Unsigned),
-															llvm::APInt(256, minVal.str(), 10)));
+													valueAttr = m_builder->getIntegerAttr(
+														mlir::IntegerType::
+															get(m_context.get(), 256, mlir::IntegerType::Unsigned),
+														llvm::APInt(256, minVal.str(), 10));
 												}
 												else
 												{
 													// type(uintN).min = 0
-													constState.addAttribute(
-														"value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
+													valueAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
 												}
 											}
 											else
 											{
 												// Default fallback
-												constState.addAttribute(
-													"value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
+												valueAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
 											}
 
-											constState.addTypes(resultType);
-											return m_builder->create(constState)->getResult(0);
+											return m_builder->create<mlir::solidity::ConstantOp>(loc, valueAttr, resultType);
 										}
 									}
 								}
 
 								// Fallback for other type() members
 								auto dummyType = translateSolidityType(*_expr.annotation().type);
-								mlir::OperationState constState(loc, "solidity.constant");
-								constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
-								constState.addTypes(dummyType);
-								return m_builder->create(constState)->getResult(0);
+								return m_builder->create<mlir::solidity::ConstantOp>(
+									loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
 							}
 						}
 					}
@@ -1445,20 +1258,16 @@ public:
 					{
 						// Skip to dummy value - these require special external call handling
 						auto dummyType = translateSolidityType(*_expr.annotation().type);
-						mlir::OperationState constState(loc, "solidity.constant");
-						constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
-						constState.addTypes(dummyType);
-						return m_builder->create(constState)->getResult(0);
+						return m_builder->create<mlir::solidity::ConstantOp>(
+							loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
 					}
 
 					// For all other member access function calls (external contract/interface calls),
 					// skip to dummy value as these are external calls that need special handling
 					// Examples: receiver.onERC721Received(...), token.transfer(...), etc.
 					auto dummyType = translateSolidityType(*_expr.annotation().type);
-					mlir::OperationState constState(loc, "solidity.constant");
-					constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
-					constState.addTypes(dummyType);
-					return m_builder->create(constState)->getResult(0);
+					return m_builder->create<mlir::solidity::ConstantOp>(
+						loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
 				}
 
 				if (!funcName.empty())
@@ -1473,22 +1282,19 @@ public:
 					}
 
 					// Create function call operation
-					mlir::OperationState callState(loc, "solidity.function_call");
-					callState.addAttribute("callee", m_builder->getStringAttr(funcName));
-					callState.addOperands(args);
-
 					// Add result type if the function has a return value
 					if (!dynamic_cast<TupleType const*>(_expr.annotation().type)
 						|| !dynamic_cast<TupleType const*>(_expr.annotation().type)->components().empty())
 					{
 						auto resultType = translateSolidityType(*_expr.annotation().type);
-						callState.addTypes(resultType);
-						return m_builder->create(callState)->getResult(0);
+						return m_builder->create<mlir::solidity::FunctionCallOp>(
+							loc, mlir::TypeRange{resultType}, m_builder->getStringAttr(funcName), args).getResult(0);
 					}
 					else
 					{
 						// Void function
-						m_builder->create(callState);
+						m_builder->create<mlir::solidity::FunctionCallOp>(
+							loc, mlir::TypeRange{}, m_builder->getStringAttr(funcName), args);
 						return nullptr;
 					}
 				}
@@ -1498,10 +1304,8 @@ public:
 		// Return dummy value for unhandled cases
 		// Create a default value with the correct type to avoid type mismatches
 		auto dummyType = translateSolidityType(*_expr.annotation().type);
-		mlir::OperationState constState(loc, "solidity.constant");
-		constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
-		constState.addTypes(dummyType);
-		return m_builder->create(constState)->getResult(0);
+		return m_builder->create<mlir::solidity::ConstantOp>(
+			loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
 	}
 
 	mlir::Value generateSolidityStatement(Statement const& _stmt)
@@ -1513,17 +1317,15 @@ public:
 			if (block->unchecked())
 			{
 				// Unchecked blocks disable overflow/underflow checks
-				mlir::OperationState uncheckedState(loc, "solidity.unchecked");
-				uncheckedState.addRegion();
-				auto uncheckedOp = m_builder->create(uncheckedState);
+				auto uncheckedOp = m_builder->create<mlir::solidity::UncheckedOp>(loc);
 
 				// Generate body region with overflow checking disabled
-				m_builder->setInsertionPointToEnd(&uncheckedOp->getRegion(0).emplaceBlock());
+				m_builder->setInsertionPointToEnd(&uncheckedOp.getBody().emplaceBlock());
 				for (auto const& stmt: block->statements())
 					generateSolidityStatement(*stmt);
 
 				// Reset insertion point after the unchecked block
-				m_builder->setInsertionPointAfter(uncheckedOp);
+				m_builder->setInsertionPointAfter(uncheckedOp.getOperation());
 			}
 			else
 			{
@@ -1538,31 +1340,27 @@ public:
 			auto condition = generateSolidityExpression(ifStmt->condition());
 			bool hasElse = ifStmt->falseStatement() != nullptr;
 
-			mlir::OperationState ifState(loc, "solidity.if");
-			ifState.addOperands(condition);
-			ifState.addRegion(); // then region
-			ifState.addRegion(); // else region (always add both regions)
-			auto ifOp = m_builder->create(ifState);
+			auto ifOp = m_builder->create<mlir::solidity::IfOp>(loc, condition);
 
 			// Generate then region
-			m_builder->setInsertionPointToEnd(&ifOp->getRegion(0).emplaceBlock());
+			m_builder->setInsertionPointToEnd(&ifOp.getThenRegion().emplaceBlock());
 			generateSolidityStatement(ifStmt->trueStatement());
 
 			// Generate else region if present
 			if (hasElse)
 			{
-				m_builder->setInsertionPointToEnd(&ifOp->getRegion(1).emplaceBlock());
+				m_builder->setInsertionPointToEnd(&ifOp.getElseRegion().emplaceBlock());
 				generateSolidityStatement(*ifStmt->falseStatement());
 			}
 			else
 			{
 				// Create an empty else region - it will be empty which is valid for solidity.if
-				ifOp->getRegion(1).emplaceBlock();
+				ifOp.getElseRegion().emplaceBlock();
 			}
 
 			// Reset insertion point after the if statement
 			// This ensures subsequent statements are generated after the if, not inside it
-			m_builder->setInsertionPointAfter(ifOp);
+			m_builder->setInsertionPointAfter(ifOp.getOperation());
 		}
 		else if (auto* forStmt = dynamic_cast<ForStatement const*>(&_stmt))
 		{
@@ -1645,11 +1443,9 @@ public:
 			// If no loop-carried values, create a dummy one to satisfy SCF requirements
 			if (initialValues.empty())
 			{
-				mlir::OperationState zeroOp(loc, "solidity.constant");
-				zeroOp.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
-				zeroOp.addAttribute("value", m_builder->getI64IntegerAttr(0));
-				auto zeroValue = m_builder->create(zeroOp);
-				initialValues.push_back(zeroValue->getResult(0));
+				auto zeroValue = m_builder->create<mlir::solidity::ConstantOp>(
+					loc, m_builder->getI64IntegerAttr(0), mlir::solidity::UIntType::get(m_context.get(), 256));
+				initialValues.push_back(zeroValue);
 				loopCarriedTypes.push_back(mlir::solidity::UIntType::get(m_context.get(), 256));
 			}
 
@@ -1680,10 +1476,8 @@ public:
 				{
 					auto solidityBool = generateSolidityExpression(*forStmt->condition());
 					// Convert solidity.bool to i1 for SCF
-					mlir::OperationState toBoolOp(loc, "solidity.to_i1");
-					toBoolOp.addOperands(solidityBool);
-					toBoolOp.addTypes(m_builder->getI1Type());
-					condValue = m_builder->create(toBoolOp)->getResult(0);
+					condValue = m_builder->create<mlir::solidity::ToI1Op>(
+						loc, m_builder->getI1Type(), solidityBool);
 				}
 				else
 				{
@@ -1801,12 +1595,10 @@ public:
 				// If no loop-carried values, add a dummy value
 				if (initialValues.empty())
 				{
-					mlir::OperationState dummyOp(loc, "solidity.constant");
-					dummyOp.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
-					dummyOp.addAttribute("value", m_builder->getI64IntegerAttr(0));
-					auto dummyValue = m_builder->create(dummyOp);
-					initialValues.push_back(dummyValue->getResult(0));
-					loopCarriedTypes.push_back(dummyValue->getResult(0).getType());
+					auto dummyValue = m_builder->create<mlir::solidity::ConstantOp>(
+						loc, m_builder->getI64IntegerAttr(0), mlir::solidity::UIntType::get(m_context.get(), 256));
+					initialValues.push_back(dummyValue);
+					loopCarriedTypes.push_back(mlir::solidity::UIntType::get(m_context.get(), 256));
 				}
 
 				// Create the SCF while operation
@@ -1961,11 +1753,9 @@ public:
 			// If no loop-carried values, create a dummy one to satisfy SCF requirements
 			if (initialValues.empty())
 			{
-				mlir::OperationState zeroOp(loc, "solidity.constant");
-				zeroOp.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
-				zeroOp.addAttribute("value", m_builder->getI64IntegerAttr(0));
-				auto zeroValue = m_builder->create(zeroOp);
-				initialValues.push_back(zeroValue->getResult(0));
+				auto zeroValue = m_builder->create<mlir::solidity::ConstantOp>(
+					loc, m_builder->getI64IntegerAttr(0), mlir::solidity::UIntType::get(m_context.get(), 256));
+				initialValues.push_back(zeroValue);
 				loopCarriedTypes.push_back(mlir::solidity::UIntType::get(m_context.get(), 256));
 			}
 
@@ -1993,10 +1783,8 @@ public:
 				// Generate the condition (while always has a condition)
 				auto solidityBool = generateSolidityExpression(whileStmt->condition());
 				// Convert solidity.bool to i1 for SCF
-				mlir::OperationState toBoolOp(loc, "solidity.to_i1");
-				toBoolOp.addOperands(solidityBool);
-				toBoolOp.addTypes(m_builder->getI1Type());
-				auto condValue = m_builder->create(toBoolOp)->getResult(0);
+				auto condValue = m_builder->create<mlir::solidity::ToI1Op>(
+					loc, m_builder->getI1Type(), solidityBool);
 
 				// Pass all loop-carried values to the after region
 				std::vector<mlir::Value> blockArgs;
@@ -2065,13 +1853,15 @@ public:
 		}
 		else if (auto* ret = dynamic_cast<Return const*>(&_stmt))
 		{
-			mlir::OperationState returnState(loc, "solidity.return");
 			if (ret->expression())
 			{
 				auto value = generateSolidityExpression(*ret->expression());
-				returnState.addOperands(value);
+				m_builder->create<mlir::solidity::ReturnOp>(loc, mlir::ValueRange{value});
 			}
-			m_builder->create(returnState);
+			else
+			{
+				m_builder->create<mlir::solidity::ReturnOp>(loc, mlir::ValueRange{});
+			}
 		}
 		else if (auto* breakStmt = dynamic_cast<Break const*>(&_stmt))
 		{
@@ -2101,11 +1891,9 @@ public:
 				// If no loop-carried values, create a dummy value
 				if (currentValues.empty())
 				{
-					mlir::OperationState zeroOp(loc, "solidity.constant");
-					zeroOp.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
-					zeroOp.addAttribute("value", m_builder->getI64IntegerAttr(0));
-					auto zeroValue = m_builder->create(zeroOp);
-					currentValues.push_back(zeroValue->getResult(0));
+					auto zeroValue = m_builder->create<mlir::solidity::ConstantOp>(
+						loc, m_builder->getI64IntegerAttr(0), mlir::solidity::UIntType::get(m_context.get(), 256));
+					currentValues.push_back(zeroValue);
 				}
 
 				// Create the yield to exit the loop
@@ -2114,8 +1902,7 @@ public:
 			else
 			{
 				// Not in SCF context, generate a solidity.break operation
-				mlir::OperationState breakState(loc, "solidity.break");
-				m_builder->create(breakState);
+				m_builder->create<mlir::solidity::BreakOp>(loc);
 			}
 			return nullptr; // Return null to indicate we've handled the terminator
 		}
@@ -2140,11 +1927,9 @@ public:
 				// If no loop-carried values, create a dummy value
 				if (currentValues.empty())
 				{
-					mlir::OperationState zeroOp(loc, "solidity.constant");
-					zeroOp.addTypes(mlir::solidity::UIntType::get(m_context.get(), 256));
-					zeroOp.addAttribute("value", m_builder->getI64IntegerAttr(0));
-					auto zeroValue = m_builder->create(zeroOp);
-					currentValues.push_back(zeroValue->getResult(0));
+					auto zeroValue = m_builder->create<mlir::solidity::ConstantOp>(
+						loc, m_builder->getI64IntegerAttr(0), mlir::solidity::UIntType::get(m_context.get(), 256));
+					currentValues.push_back(zeroValue);
 				}
 
 				// Create the yield to continue the loop
@@ -2153,21 +1938,20 @@ public:
 			else
 			{
 				// Not in SCF context, generate a solidity.continue operation
-				mlir::OperationState continueState(loc, "solidity.continue");
-				m_builder->create(continueState);
+				m_builder->create<mlir::solidity::ContinueOp>(loc);
 			}
 			return nullptr; // Return null to indicate we've handled the terminator
 		}
 		else if (auto* revertStmt = dynamic_cast<RevertStatement const*>(&_stmt))
 		{
 			// Handle revert statement with custom error
-			mlir::OperationState revertState(loc, "solidity.revert");
+			mlir::StringAttr reasonAttr;
 			// Get the error name from the function call if possible
 			if (auto* ident = dynamic_cast<Identifier const*>(&revertStmt->errorCall().expression()))
 			{
-				revertState.addAttribute("reason", m_builder->getStringAttr(ident->name()));
+				reasonAttr = m_builder->getStringAttr(ident->name());
 			}
-			m_builder->create(revertState);
+			m_builder->create<mlir::solidity::RevertOp>(loc, reasonAttr);
 			return nullptr; // Revert is a terminator
 		}
 		else if (auto* emitStmt = dynamic_cast<EmitStatement const*>(&_stmt))
@@ -2224,21 +2008,20 @@ public:
 			}
 
 			// Create emit operation with full event signature
-			mlir::OperationState emitState(loc, "solidity.emit");
-			emitState.addAttribute("event", m_builder->getStringAttr(eventName));
-			emitState.addAttribute("eventSignature", m_builder->getStringAttr(eventSignature));
-
-			// Store indexed info as array attribute
+			mlir::ArrayAttr indexedArrayAttr;
 			if (!indexed.empty())
 			{
 				std::vector<mlir::Attribute> indexedAttrs;
 				for (bool isIndexed: indexed)
 					indexedAttrs.push_back(m_builder->getBoolAttr(isIndexed));
-				emitState.addAttribute("indexed", m_builder->getArrayAttr(indexedAttrs));
+				indexedArrayAttr = m_builder->getArrayAttr(indexedAttrs);
 			}
 
-			emitState.addOperands(args);
-			m_builder->create(emitState);
+			m_builder->create<mlir::solidity::EmitOp>(
+				loc, m_builder->getStringAttr(eventName),
+				m_builder->getStringAttr(eventSignature),
+				indexedArrayAttr,
+				args);
 			return nullptr;
 		}
 		else if (auto* exprStmt = dynamic_cast<ExpressionStatement const*>(&_stmt))
@@ -2270,19 +2053,15 @@ public:
 							if (dynamic_cast<BoolType const*>(decl->type()))
 							{
 								// For bool declarations, create a bool constant (will be set by the call)
-								mlir::OperationState boolState(declLoc, "solidity.constant");
-								boolState.addAttribute("value", m_builder->getBoolAttr(false));
-								boolState.addTypes(mlir::solidity::BoolType::get(m_context.get()));
-								auto boolValue = m_builder->create(boolState)->getResult(0);
+								auto boolValue = m_builder->create<mlir::solidity::ConstantOp>(
+									declLoc, m_builder->getBoolAttr(false), mlir::solidity::BoolType::get(m_context.get()));
 								m_valueMap[decl->id()] = boolValue;
 							}
 							else
 							{
 								// For other types, create appropriate placeholder
-								mlir::OperationState constState(declLoc, "solidity.constant");
-								constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
-								constState.addTypes(declType);
-								auto value = m_builder->create(constState)->getResult(0);
+								auto value = m_builder->create<mlir::solidity::ConstantOp>(
+									declLoc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), declType);
 								m_valueMap[decl->id()] = value;
 							}
 						}
@@ -2301,10 +2080,7 @@ public:
 					auto loc = this->loc(*varDeclStmt);
 					auto type = translateSolidityType(*varDeclStmt->initialValue()->annotation().type);
 					auto zeroAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-					mlir::OperationState constState(loc, "solidity.constant");
-					constState.addAttribute("value", zeroAttr);
-					constState.addTypes(type);
-					value = m_builder->create(constState)->getResult(0);
+					value = m_builder->create<mlir::solidity::ConstantOp>(loc, zeroAttr, type);
 				}
 				for (auto const& decl: declarations)
 				{
@@ -2790,10 +2566,8 @@ public:
 		// Return dummy value for unhandled cases
 		// Create a default value with the correct type to avoid type mismatches
 		auto dummyType = translateType(*_expr.annotation().type);
-		mlir::OperationState constState(loc, "solidity.constant");
-		constState.addAttribute("value", m_builder->getIntegerAttr(m_builder->getI64Type(), 0));
-		constState.addTypes(dummyType);
-		return m_builder->create(constState)->getResult(0);
+		return m_builder->create<mlir::solidity::ConstantOp>(
+			loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
 	}
 
 	void generateStatement(Statement const& _stmt)

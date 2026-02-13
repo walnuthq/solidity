@@ -17,7 +17,7 @@ contract NestedMapTest {
 // CHECK: solidity.contract "NestedMapTest"
 // CHECK: solidity.state_var "allowances"
 // CHECK: sym_name = "approve"
-// CHECK: "solidity.mapping_store"
+// CHECK: solidity.mapping_store
 // CHECK: solidity.return
 // CHECK: sym_name = "getAllowance"
 // CHECK: solidity.return

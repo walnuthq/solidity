@@ -15,8 +15,8 @@ contract MsgTest {
 
 // CHECK: solidity.contract "MsgTest"
 // CHECK: stateMutability = "view", sym_name = "getSender"
-// CHECK: "solidity.msg_sender"() : () -> !solidity.address
+// CHECK: solidity.msg_sender : !solidity.address
 // CHECK: solidity.return
 // CHECK: stateMutability = "payable", sym_name = "getValue"
-// CHECK: "solidity.msg_value"() : () -> !solidity.uint<256>
+// CHECK: solidity.msg_value : !solidity.uint<256>
 // CHECK: solidity.return
