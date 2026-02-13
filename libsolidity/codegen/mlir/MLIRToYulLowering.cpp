@@ -1760,6 +1760,8 @@ private:
 					{yul::Identifier{debugData, yul::YulName("ret0")}},
 					std::make_unique<yul::Expression>(yul::Identifier{debugData, yul::YulName(value)})};
 			}
+			// Void return - no Yul statement needed
+			return std::nullopt;
 		}
 		else if (mlir::isa<mlir::solidity::AddOp>(op))
 		{
@@ -3023,6 +3025,23 @@ private:
 			}
 		}
 
+		// UncheckedOp: just lower the body ops (unchecked semantics don't affect Yul)
+		if (mlir::isa<mlir::solidity::UncheckedOp>(op))
+		{
+			std::vector<yul::Statement> bodyStatements;
+			for (auto& region: op->getRegions())
+				for (auto& block: region)
+					for (auto& innerOp: block)
+					{
+						auto stmt = processOperationToStatement(&innerOp);
+						if (stmt)
+							addStatementFlattened(bodyStatements, std::move(*stmt));
+					}
+			return yul::Block{debugData, std::move(bodyStatements)};
+		}
+
+		std::cerr << "Warning: unsupported MLIR operation in Yul lowering: "
+				  << op->getName().getStringRef().str() << "\n";
 		return std::nullopt;
 	}
 

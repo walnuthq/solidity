@@ -23,10 +23,13 @@
 #include <libsolidity/codegen/mlir/MLIRToYulLowering.h>
 #include <libsolidity/interface/CompilerStack.h>
 
+#include <cxxabi.h>
+#include <iostream>
 #include <map>
 #include <set>
 #include <sstream>
 #include <stack>
+#include <typeinfo>
 
 #ifdef SOLIDITY_HAS_MLIR
 // Disable warnings for LLVM/MLIR headers
@@ -56,6 +59,18 @@
 
 namespace solidity::frontend
 {
+
+namespace
+{
+std::string demangle(char const* name)
+{
+	int status = 0;
+	char* demangled = abi::__cxa_demangle(name, nullptr, nullptr, &status);
+	std::string result = (status == 0 && demangled) ? demangled : name;
+	free(demangled);
+	return result;
+}
+} // anonymous namespace
 
 // Private implementation class
 class MLIRGenerator::MLIRGeneratorImpl
@@ -1301,8 +1316,9 @@ public:
 			}
 		}
 
-		// Return dummy value for unhandled cases
-		// Create a default value with the correct type to avoid type mismatches
+		// Unhandled expression type - emit warning and return dummy value
+		std::cerr << "Warning: unsupported expression type in MLIRGen: "
+				  << demangle(typeid(_expr).name()) << "\n";
 		auto dummyType = translateSolidityType(*_expr.annotation().type);
 		return m_builder->create<mlir::solidity::ConstantOp>(
 			loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
@@ -2091,7 +2107,11 @@ public:
 			}
 		}
 
-		// Most statements don't return a value
+		else
+		{
+			std::cerr << "Warning: unsupported statement type in MLIRGen: "
+					  << demangle(typeid(_stmt).name()) << "\n";
+		}
 		return mlir::Value();
 	}
 
@@ -2563,8 +2583,9 @@ public:
 			}
 		}
 
-		// Return dummy value for unhandled cases
-		// Create a default value with the correct type to avoid type mismatches
+		// Unhandled expression type - emit warning and return dummy value
+		std::cerr << "Warning: unsupported expression type in MLIRGen: "
+				  << demangle(typeid(_expr).name()) << "\n";
 		auto dummyType = translateType(*_expr.annotation().type);
 		return m_builder->create<mlir::solidity::ConstantOp>(
 			loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
@@ -2642,6 +2663,11 @@ public:
 						m_valueMap[decl->id()] = value;
 				}
 			}
+		}
+		else
+		{
+			std::cerr << "Warning: unsupported statement type in MLIRGen: "
+					  << demangle(typeid(_stmt).name()) << "\n";
 		}
 	}
 
