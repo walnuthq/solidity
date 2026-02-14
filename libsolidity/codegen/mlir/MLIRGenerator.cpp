@@ -241,6 +241,10 @@ public:
 			}
 		}
 
+		if (m_unsupportedCount > 0)
+			std::cerr << "Warning: [MLIR] " << _contract.name()
+					  << ": " << m_unsupportedCount << " unsupported feature(s) dropped\n";
+
 		// Convert module to string with proper MLIR formatting
 		std::string output;
 		llvm::raw_string_ostream stream(output);
@@ -506,8 +510,7 @@ public:
 				  || literal->token() == langutil::Token::UnicodeStringLiteral
 				  || literal->token() == langutil::Token::HexStringLiteral)
 			{
-				return m_builder->create<mlir::solidity::ConstantOp>(
-					loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), type);
+				return emitUnsupported(loc, type, "string/hex literal '" + literal->value().substr(0, 20) + "'");
 			}
 		}
 		else if (auto* ident = dynamic_cast<Identifier const*>(&_expr))
@@ -526,11 +529,8 @@ public:
 				else
 				{
 					// Variable not found - this can happen with loop-local variables
-					// Create a zero value as a fallback to prevent crashes
 					auto type = translateSolidityType(*_expr.annotation().type);
-					auto zeroAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-					auto zeroValue = m_builder->create<mlir::solidity::ConstantOp>(loc, zeroAttr, type);
-					// Store it for future reference
+					auto zeroValue = emitUnsupported(loc, type, "undefined variable '" + varDecl->name() + "'");
 					m_valueMap[varDecl->id()] = zeroValue;
 					return zeroValue;
 				}
@@ -558,10 +558,8 @@ public:
 			else
 			{
 				// Function references, contract references, etc.
-				// These typically appear as callees in FunctionCall and are handled there
 				auto type = translateSolidityType(*_expr.annotation().type);
-				return m_builder->create<mlir::solidity::ConstantOp>(
-					loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), type);
+				return emitUnsupported(loc, type, "unresolved identifier '" + ident->name() + "'");
 			}
 		}
 		else if (auto* binOp = dynamic_cast<BinaryOperation const*>(&_expr))
@@ -572,10 +570,8 @@ public:
 			// Check if either operand is null
 			if (!lhs || !rhs)
 			{
-				// Return a zero constant as fallback
 				auto type = translateSolidityType(*_expr.annotation().type);
-				auto zeroAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-				return m_builder->create<mlir::solidity::ConstantOp>(loc, zeroAttr, type);
+				return emitUnsupported(loc, type, "binary op with unsupported operand");
 			}
 
 			auto resultType = lhs.getType();
@@ -727,10 +723,8 @@ public:
 				// Check if either operand is null
 				if (!currentValue || !rightValue)
 				{
-					// Return a zero constant as fallback
 					auto type = translateSolidityType(*_expr.annotation().type);
-					auto zeroAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-					return m_builder->create<mlir::solidity::ConstantOp>(loc, zeroAttr, type);
+					return emitUnsupported(loc, type, "compound assignment with unsupported operand");
 				}
 
 				// Apply the operation based on the compound operator
@@ -972,10 +966,8 @@ public:
 			auto base = generateSolidityExpression(memberAccess->expression());
 			if (!base)
 			{
-				// Create a zero constant if base is null
 				auto type = translateSolidityType(*_expr.annotation().type);
-				auto zeroAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-				return m_builder->create<mlir::solidity::ConstantOp>(loc, zeroAttr, type);
+				return emitUnsupported(loc, type, "member access '." + memberAccess->memberName() + "' on unsupported base");
 			}
 
 			// Handle array.length
@@ -1053,10 +1045,8 @@ public:
 						auto value = generateSolidityExpression(*arg);
 						if (!value)
 						{
-							// Create a zero constant if value is null
 							auto type = translateSolidityType(*arg->annotation().type);
-							auto zeroAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-							value = m_builder->create<mlir::solidity::ConstantOp>(loc, zeroAttr, type);
+							value = emitUnsupported(loc, type, "struct constructor argument");
 						}
 						operands.push_back(value);
 					}
@@ -1134,10 +1124,8 @@ public:
 					// Skip if already handled (require/assert/revert)
 					if (funcName == "require" || funcName == "assert" || funcName == "revert")
 					{
-						// Already handled above, return dummy for expression value
 						auto dummyType = translateSolidityType(*_expr.annotation().type);
-						return m_builder->create<mlir::solidity::ConstantOp>(
-							loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
+						return emitUnsupported(loc, dummyType, funcName + "() (semantics not implemented)");
 					}
 
 					// Handle built-in functions with proper MLIR operations
@@ -1227,20 +1215,15 @@ public:
 
 						m_builder->create<mlir::solidity::SelfdestructOp>(loc, recipient);
 
-						// selfdestruct doesn't return a value, return a dummy for expression context
 						auto dummyType = translateSolidityType(*_expr.annotation().type);
-						return m_builder->create<mlir::solidity::ConstantOp>(
-							loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
+						return emitUnsupported(loc, dummyType, "selfdestruct()");
 					}
 
 					// type(X) - handled separately as member access (type(uint256).max etc.)
 					if (funcName == "type")
 					{
-						// The actual value is extracted from member access (type(X).max, type(X).min)
-						// Just return a dummy here - real handling is in member access below
 						auto dummyType = translateSolidityType(*_expr.annotation().type);
-						return m_builder->create<mlir::solidity::ConstantOp>(
-							loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
+						return emitUnsupported(loc, dummyType, "type() expression");
 					}
 				}
 				// Handle member function calls (e.g., library.func() or obj.method())
@@ -1288,9 +1271,7 @@ public:
 							}
 							else
 							{
-								// Fallback for unknown abi functions
-								return m_builder->create<mlir::solidity::ConstantOp>(
-									loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), resultType);
+								return emitUnsupported(loc, resultType, "abi." + abiFunc + "()");
 							}
 						}
 					}
@@ -1394,8 +1375,7 @@ public:
 
 								// Fallback for other type() members
 								auto dummyType = translateSolidityType(*_expr.annotation().type);
-								return m_builder->create<mlir::solidity::ConstantOp>(
-									loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
+								return emitUnsupported(loc, dummyType, "type()." + memberAccess->memberName());
 							}
 						}
 					}
@@ -1403,23 +1383,17 @@ public:
 					funcName = memberAccess->memberName();
 
 					// Check for address member functions (transfer, send, call, delegatecall, staticcall)
-					// These are built-in functions on address types that need special Yul handling
 					if (funcName == "transfer" || funcName == "send" || funcName == "call" || funcName == "delegatecall"
 						|| funcName == "staticcall")
 					{
-						// Skip to dummy value - these require special external call handling
 						auto dummyType = translateSolidityType(*_expr.annotation().type);
-						return m_builder->create<mlir::solidity::ConstantOp>(
-							loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
+						return emitUnsupported(loc, dummyType, "low-level call '." + funcName + "()'");
 					}
 
-					// For all other member access function calls (external contract/interface calls),
-					// return dummy value as these require ABI encoding + CALL opcode handling
-					// Examples: receiver.onERC721Received(...), token.transfer(...), etc.
+					// For all other member access function calls (external contract/interface calls)
 					{
 						auto dummyType = translateSolidityType(*_expr.annotation().type);
-						return m_builder->create<mlir::solidity::ConstantOp>(
-							loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
+						return emitUnsupported(loc, dummyType, "external call '." + funcName + "()'");
 					}
 				}
 
@@ -1472,8 +1446,7 @@ public:
 				if (indexAccess->indexExpression())
 					generateSolidityExpression(*indexAccess->indexExpression());
 				auto type = translateSolidityType(*_expr.annotation().type);
-				return m_builder->create<mlir::solidity::ConstantOp>(
-					loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), type);
+				return emitUnsupported(loc, type, "array element access");
 			}
 			else
 			{
@@ -1481,8 +1454,7 @@ public:
 				if (indexAccess->indexExpression())
 					generateSolidityExpression(*indexAccess->indexExpression());
 				auto type = translateSolidityType(*_expr.annotation().type);
-				return m_builder->create<mlir::solidity::ConstantOp>(
-					loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), type);
+				return emitUnsupported(loc, type, "index access");
 			}
 		}
 		else if (auto* conditional = dynamic_cast<Conditional const*>(&_expr))
@@ -1504,16 +1476,12 @@ public:
 				if (comp)
 					return generateSolidityExpression(*comp);
 			auto type = translateSolidityType(*_expr.annotation().type);
-			return m_builder->create<mlir::solidity::ConstantOp>(
-				loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), type);
+			return emitUnsupported(loc, type, "empty tuple expression");
 		}
 
-		// Unhandled expression type - emit warning and return dummy value
-		std::cerr << "Warning: unsupported expression type in MLIRGen: "
-				  << demangle(typeid(_expr).name()) << "\n";
+		// Unhandled expression type
 		auto dummyType = translateSolidityType(*_expr.annotation().type);
-		return m_builder->create<mlir::solidity::ConstantOp>(
-			loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
+		return emitUnsupported(loc, dummyType, "unsupported expression: " + demangle(typeid(_expr).name()));
 	}
 
 	mlir::Value generateSolidityStatement(Statement const& _stmt)
@@ -2258,16 +2226,13 @@ public:
 							// This handles cases like low-level calls returning (bool, bytes)
 							if (dynamic_cast<BoolType const*>(decl->type()))
 							{
-								// For bool declarations, create a bool constant (will be set by the call)
-								auto boolValue = m_builder->create<mlir::solidity::ConstantOp>(
-									declLoc, m_builder->getBoolAttr(false), mlir::solidity::BoolType::get(m_context.get()));
+								auto boolType = mlir::solidity::BoolType::get(m_context.get());
+								auto boolValue = emitUnsupported(declLoc, boolType, "tuple destructuring (bool from low-level call)");
 								m_valueMap[decl->id()] = boolValue;
 							}
 							else
 							{
-								// For other types, create appropriate placeholder
-								auto value = m_builder->create<mlir::solidity::ConstantOp>(
-									declLoc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), declType);
+								auto value = emitUnsupported(declLoc, declType, "tuple destructuring ('" + decl->name() + "' from low-level call)");
 								m_valueMap[decl->id()] = value;
 							}
 						}
@@ -2282,11 +2247,9 @@ public:
 				auto value = generateSolidityExpression(*varDeclStmt->initialValue());
 				if (!value)
 				{
-					// Create a zero constant if value is null
 					auto loc = this->loc(*varDeclStmt);
 					auto type = translateSolidityType(*varDeclStmt->initialValue()->annotation().type);
-					auto zeroAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-					value = m_builder->create<mlir::solidity::ConstantOp>(loc, zeroAttr, type);
+					value = emitUnsupported(loc, type, "variable declaration with unsupported initializer");
 				}
 				for (auto const& decl: declarations)
 				{
@@ -2298,13 +2261,15 @@ public:
 		}
 		else if (dynamic_cast<InlineAssembly const*>(&_stmt))
 		{
-			// InlineAssembly: Yul code is preserved in the standard compilation pipeline.
-			// The MLIR path skips assembly blocks — they compile via the normal Yul path.
+			auto loc = this->loc(_stmt);
+			auto dummyType = mlir::solidity::UIntType::get(m_context.get(), 256);
+			emitUnsupported(loc, dummyType, "inline assembly block");
 		}
 		else
 		{
-			std::cerr << "Warning: unsupported statement type in MLIRGen: "
-					  << demangle(typeid(_stmt).name()) << "\n";
+			auto loc = this->loc(_stmt);
+			auto dummyType = mlir::solidity::UIntType::get(m_context.get(), 256);
+			emitUnsupported(loc, dummyType, "unsupported statement: " + demangle(typeid(_stmt).name()));
 		}
 		return mlir::Value();
 	}
@@ -2695,15 +2660,8 @@ public:
 						resultTypes.push_back(translateType(*ret->type()));
 					}
 
-					// TODO: Implement function calls using standard MLIR operations
-					// For now, return first argument as placeholder
-					if (!args.empty())
-						return args[0];
-					else
-					{
-						auto zeroAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-						return m_builder->create<mlir::arith::ConstantOp>(loc, zeroAttr).getResult();
-					}
+					auto dummyType = translateType(*_expr.annotation().type);
+					return emitUnsupported(loc, dummyType, "function call '" + ident->name() + "()'");
 				}
 				// Handle special functions like require, assert, revert
 				else if (ident->name() == "require")
@@ -2748,16 +2706,13 @@ public:
 			// Special case for array.length
 			if (memberName == "length")
 			{
-				// TODO: Implement array length with standard MLIR
-				// For now, return constant placeholder
-				auto lengthAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 10);
-				return m_builder->create<mlir::arith::ConstantOp>(loc, lengthAttr).getResult();
+				auto dummyType = translateType(*_expr.annotation().type);
+				return emitUnsupported(loc, dummyType, "array.length access");
 			}
 			else
 			{
-				// TODO: Implement member access with standard MLIR
-				// For now, return the object itself as placeholder
-				return object;
+				auto dummyType = translateType(*_expr.annotation().type);
+				return emitUnsupported(loc, dummyType, "member access '." + memberName + "'");
 			}
 		}
 		else if (auto* indexAccess = dynamic_cast<IndexAccess const*>(&_expr))
@@ -2769,24 +2724,17 @@ public:
 			// Check if it's an array or mapping based on base type
 			if (dynamic_cast<ArrayType const*>(indexAccess->baseExpression().annotation().type))
 			{
-				// TODO: Implement array access with standard MLIR
-				// For now, return the base as placeholder
-				return base;
+				return emitUnsupported(loc, elementType, "array element access");
 			}
 			else if (dynamic_cast<MappingType const*>(indexAccess->baseExpression().annotation().type))
 			{
-				// TODO: Implement mapping access with standard MLIR
-				// For now, return the base as placeholder
-				return base;
+				return emitUnsupported(loc, elementType, "mapping access");
 			}
 		}
 
-		// Unhandled expression type - emit warning and return dummy value
-		std::cerr << "Warning: unsupported expression type in MLIRGen: "
-				  << demangle(typeid(_expr).name()) << "\n";
+		// Unhandled expression type
 		auto dummyType = translateType(*_expr.annotation().type);
-		return m_builder->create<mlir::solidity::ConstantOp>(
-			loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), dummyType);
+		return emitUnsupported(loc, dummyType, "unsupported expression: " + demangle(typeid(_expr).name()));
 	}
 
 	void generateStatement(Statement const& _stmt)
@@ -3015,6 +2963,22 @@ private:
 		Solidity
 	};
 	LoopContext m_immediateLoopContext = LoopContext::None;
+
+	// Counter for unsupported expression/statement drops
+	size_t m_unsupportedCount = 0;
+
+	/// Emit a warning about an unsupported pattern and return a zero-constant placeholder.
+	/// This replaces silent drops so that every dropped expression is visible.
+	mlir::Value emitUnsupported(mlir::Location _loc, mlir::Type _type, std::string const& _what)
+	{
+		m_unsupportedCount++;
+		std::cerr << "Warning: [MLIR unsupported] " << _what << " (drop #" << m_unsupportedCount << ")\n";
+		return m_builder->create<mlir::solidity::ConstantOp>(
+			_loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), _type);
+	}
+
+	/// Return the total number of unsupported drops encountered
+	size_t unsupportedCount() const { return m_unsupportedCount; }
 #endif
 };
 
