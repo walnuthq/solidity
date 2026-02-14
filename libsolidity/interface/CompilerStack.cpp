@@ -776,9 +776,9 @@ bool CompilerStack::compile(State _stopAfter)
 
 					try
 					{
-						if (m_mlirOptimize)
+						if (m_mlirOptimize && !contract->abstract() && !contract->isInterface())
 						{
-							// Generate MLIR from AST
+							// Generate MLIR from AST (skip abstract/interface contracts)
 							MLIRGenerator generator(*this, m_evmVersion, m_optimiserSettings);
 							auto mlirModule = generator.generate(*contract);
 							

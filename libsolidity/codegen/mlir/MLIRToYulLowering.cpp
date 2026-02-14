@@ -638,6 +638,20 @@ private:
 			}
 		}
 
+		// Also collect free functions from the module level (outside ContractOp).
+		// These are file-level functions imported from other source units.
+		if (auto parentModule = contractOp->getParentOfType<mlir::ModuleOp>())
+		{
+			for (auto& op: parentModule.getBody()->getOperations())
+			{
+				if (mlir::isa<mlir::solidity::FunctionOp>(op)
+					&& !mlir::isa<mlir::solidity::ContractOp>(op.getParentOp()))
+				{
+					functions.push_back(&op);
+				}
+			}
+		}
+
 		// Generate ABI helper functions
 		auto abiHelpers = generateABIHelperFunctions();
 		for (auto& helper: abiHelpers)
@@ -4663,6 +4677,33 @@ private:
 	// Generate unique function name for call operations based on operand types
 	std::string getUniqueFuncNameForCall(mlir::Operation* callOp, const std::string& funcName)
 	{
+		// Try to find the target function definition and use its parameter types
+		// (avoids mismatches when e.g. string literal is passed to bytes parameter)
+		if (auto contractOp = callOp->getParentOfType<mlir::solidity::ContractOp>())
+		{
+			for (auto& op: contractOp.getBody().front())
+			{
+				if (auto nameAttr = op.getAttrOfType<mlir::StringAttr>("sym_name"))
+				{
+					if (nameAttr.getValue().str() == funcName)
+						return getUniqueFuncName(&op);
+				}
+			}
+		}
+		// Also check module-level functions (free functions)
+		if (auto moduleOp = callOp->getParentOfType<mlir::ModuleOp>())
+		{
+			for (auto& op: moduleOp.getBody()->getOperations())
+			{
+				if (auto nameAttr = op.getAttrOfType<mlir::StringAttr>("sym_name"))
+				{
+					if (nameAttr.getValue().str() == funcName)
+						return getUniqueFuncName(&op);
+				}
+			}
+		}
+
+		// Fallback: use operand types from call site
 		std::string typeSuffix;
 
 		for (unsigned i = 0; i < callOp->getNumOperands(); ++i)

@@ -175,11 +175,11 @@ public:
 			}
 		}
 
-		// Generate functions from all base contracts (in reverse order: base to derived)
-		// Track generated functions by signature to avoid duplicates from overrides
+		// Generate functions from all contracts in C3 linearization order (derived to base).
+		// Derived contract overrides take precedence over base implementations.
 		std::set<std::string> generatedFunctions;
-		for (auto it = _contract.annotation().linearizedBaseContracts.rbegin();
-			 it != _contract.annotation().linearizedBaseContracts.rend();
+		for (auto it = _contract.annotation().linearizedBaseContracts.begin();
+			 it != _contract.annotation().linearizedBaseContracts.end();
 			 ++it)
 		{
 			ContractDefinition const* baseContract = *it;
@@ -203,6 +203,39 @@ public:
 					{
 						generatedFunctions.insert(signature);
 						generateSolidityFunction(*func);
+					}
+				}
+			}
+		}
+
+		// Generate free functions from all reachable source units (including imports).
+		// Free functions are file-level functions not inside any contract.
+		{
+			std::set<SourceUnit const*> allUnits = _contract.sourceUnit().referencedSourceUnits(true);
+			allUnits.insert(&_contract.sourceUnit());
+			for (auto const* unit: allUnits)
+			{
+				for (auto const& node: unit->nodes())
+				{
+					if (auto const* funcDef = dynamic_cast<FunctionDefinition const*>(node.get()))
+					{
+						if (funcDef->isFree() && funcDef->isImplemented())
+						{
+							std::string signature = funcDef->name() + "(";
+							for (size_t i = 0; i < funcDef->parameters().size(); ++i)
+							{
+								if (i > 0)
+									signature += ",";
+								signature += funcDef->parameters()[i]->type()->toString();
+							}
+							signature += ")";
+
+							if (generatedFunctions.find(signature) == generatedFunctions.end())
+							{
+								generatedFunctions.insert(signature);
+								generateSolidityFunction(*funcDef);
+							}
+						}
 					}
 				}
 			}
@@ -328,7 +361,7 @@ public:
 		if (!entryBlock.empty())
 		{
 			auto& lastOp = entryBlock.back();
-			if (mlir::isa<mlir::solidity::ReturnOp>(lastOp))
+			if (mlir::isa<mlir::solidity::ReturnOp>(lastOp) || mlir::isa<mlir::solidity::RevertOp>(lastOp))
 				hasReturn = true;
 		}
 
@@ -451,8 +484,12 @@ public:
 
 			if (literal->token() == langutil::Token::Number)
 			{
-				auto value = std::stoull(literal->value());
-				auto attr = m_builder->getIntegerAttr(m_builder->getI64Type(), value);
+				// Use the type's literalValue() to properly parse all numeric formats
+				// (decimal, hex, underscores, etc.) and handle values up to 256 bits
+				u256 bigValue = _expr.annotation().type->literalValue(literal);
+				auto attr = m_builder->getIntegerAttr(
+					mlir::IntegerType::get(m_context.get(), 256, mlir::IntegerType::Unsigned),
+					llvm::APInt(256, bigValue.str(), 10));
 				return m_builder->create<mlir::solidity::ConstantOp>(loc, attr, type);
 			}
 			else if (literal->token() == langutil::Token::TrueLiteral)
@@ -1487,16 +1524,14 @@ public:
 		{
 			if (block->unchecked())
 			{
-				// Unchecked blocks disable overflow/underflow checks
-				auto uncheckedOp = m_builder->create<mlir::solidity::UncheckedOp>(loc);
-
-				// Generate body region with overflow checking disabled
-				m_builder->setInsertionPointToEnd(&uncheckedOp.getBody().emplaceBlock());
+				// Generate unchecked block statements inline to avoid SSA scope issues.
+				// Creating a nested UncheckedOp region causes values defined inside
+				// (like loop counter increments) to be inaccessible in the parent scope.
+				// Unchecked semantics don't affect Yul lowering.
+				mlir::Value lastValue;
 				for (auto const& stmt: block->statements())
-					generateSolidityStatement(*stmt);
-
-				// Reset insertion point after the unchecked block
-				m_builder->setInsertionPointAfter(uncheckedOp.getOperation());
+					lastValue = generateSolidityStatement(*stmt);
+				return lastValue;
 			}
 			else
 			{
@@ -2471,8 +2506,12 @@ public:
 
 			if (literal->token() == langutil::Token::Number)
 			{
-				auto value = std::stoull(literal->value());
-				auto attr = m_builder->getIntegerAttr(type, value);
+				// Use the type's literalValue() to properly parse all numeric formats
+				// (decimal, hex, underscores, etc.) and handle values up to 256 bits
+				u256 bigValue = _expr.annotation().type->literalValue(literal);
+				auto attr = m_builder->getIntegerAttr(
+					mlir::IntegerType::get(m_context.get(), 256, mlir::IntegerType::Unsigned),
+					llvm::APInt(256, bigValue.str(), 10));
 				return m_builder->create<mlir::arith::ConstantOp>(loc, attr).getResult();
 			}
 			else if (literal->token() == langutil::Token::TrueLiteral)
