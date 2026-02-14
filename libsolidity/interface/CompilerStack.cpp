@@ -808,10 +808,25 @@ bool CompilerStack::compile(State _stopAfter)
 								
 								// Set the generated Yul as the contract's IR
 								compiledContract.yulIR = yulCode;
-								
-								YulStack stack = loadGeneratedIR(*compiledContract.yulIR);
-								
-								// Optimize the generated Yul using the same optimizer as the regular pipeline
+
+								// Use standard optimizer settings for MLIR pipeline (the MLIR
+								// pipeline is designed for optimization, so always fully optimize
+								// the generated Yul regardless of the --optimize flag)
+								auto mlirOptSettings = OptimiserSettings::standard();
+								mlirOptSettings.expectedExecutionsPerDeployment = m_optimiserSettings.expectedExecutionsPerDeployment;
+								YulStack stack(
+									m_evmVersion,
+									m_eofVersion,
+									YulStack::Language::StrictAssembly,
+									mlirOptSettings,
+									m_debugInfoSelection,
+									this,
+									m_objectOptimizer
+								);
+								bool parseOk = stack.parseAndAnalyze("", *compiledContract.yulIR);
+								solAssert(parseOk, "Failed to parse MLIR-generated Yul");
+
+								// Optimize the generated Yul
 								stack.optimize();
 								
 								// Store optimized version (required for generateEVMFromIR)
@@ -834,11 +849,37 @@ bool CompilerStack::compile(State _stopAfter)
 									contract->location(),
 									errorMsg
 								);
-								
+
 								// Reset and fall back
 								compiledContract.yulIR.reset();
 								compiledContract.yulIROptimized.reset();
-								
+
+								if (pipelineConfig.needIR(m_viaIR))
+									generateIR(*contract, pipelineConfig.needIRCodegenOnly(m_viaIR));
+								if (pipelineConfig.needBytecode())
+								{
+									if (m_viaIR)
+										generateEVMFromIR(*contract);
+									else
+										compileContract(*contract, otherCompilers);
+								}
+							}
+							catch (util::Exception const& _exception)
+							{
+								// Catch InternalCompilerError and other util::Exception types
+								// that don't inherit from Error (e.g., from invalid MLIR-generated Yul)
+								std::string errorMsg = "MLIR compilation failed. Falling back to regular compilation.\nError: ";
+								errorMsg += _exception.what();
+								m_errorReporter.warning(
+									9999_error,
+									contract->location(),
+									errorMsg
+								);
+
+								// Reset and fall back
+								compiledContract.yulIR.reset();
+								compiledContract.yulIROptimized.reset();
+
 								if (pipelineConfig.needIR(m_viaIR))
 									generateIR(*contract, pipelineConfig.needIRCodegenOnly(m_viaIR));
 								if (pipelineConfig.needBytecode())

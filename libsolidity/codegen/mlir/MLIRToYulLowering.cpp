@@ -4679,15 +4679,31 @@ private:
 	{
 		// Try to find the target function definition and use its parameter types
 		// (avoids mismatches when e.g. string literal is passed to bytes parameter)
+		// For overloaded functions, match by argument count to find the right overload.
+		unsigned numCallArgs = callOp->getNumOperands();
+
+		auto matchFunc = [&](mlir::Operation& op) -> bool {
+			auto nameAttr = op.getAttrOfType<mlir::StringAttr>("sym_name");
+			if (!nameAttr || nameAttr.getValue().str() != funcName)
+				return false;
+			// Check parameter count from function_type attribute
+			if (auto funcTypeAttr = op.getAttrOfType<mlir::TypeAttr>("function_type"))
+			{
+				if (auto funcType = mlir::dyn_cast<mlir::FunctionType>(funcTypeAttr.getValue()))
+				{
+					if (funcType.getNumInputs() != numCallArgs)
+						return false;
+				}
+			}
+			return true;
+		};
+
 		if (auto contractOp = callOp->getParentOfType<mlir::solidity::ContractOp>())
 		{
 			for (auto& op: contractOp.getBody().front())
 			{
-				if (auto nameAttr = op.getAttrOfType<mlir::StringAttr>("sym_name"))
-				{
-					if (nameAttr.getValue().str() == funcName)
-						return getUniqueFuncName(&op);
-				}
+				if (matchFunc(op))
+					return getUniqueFuncName(&op);
 			}
 		}
 		// Also check module-level functions (free functions)
@@ -4695,11 +4711,8 @@ private:
 		{
 			for (auto& op: moduleOp.getBody()->getOperations())
 			{
-				if (auto nameAttr = op.getAttrOfType<mlir::StringAttr>("sym_name"))
-				{
-					if (nameAttr.getValue().str() == funcName)
-						return getUniqueFuncName(&op);
-				}
+				if (matchFunc(op))
+					return getUniqueFuncName(&op);
 			}
 		}
 
