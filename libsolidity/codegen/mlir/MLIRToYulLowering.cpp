@@ -3051,6 +3051,20 @@ private:
 			}
 		}
 
+		// SelfAddressOp: address() opcode — returns current contract address
+		if (mlir::isa<mlir::solidity::SelfAddressOp>(op))
+		{
+			if (op->getNumResults() > 0)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(
+						yul::FunctionCall{debugData, yul::Identifier{debugData, yul::YulName("address")}, {}})};
+			}
+		}
+
 		// UncheckedOp: just lower the body ops (unchecked semantics don't affect Yul)
 		if (mlir::isa<mlir::solidity::UncheckedOp>(op))
 		{

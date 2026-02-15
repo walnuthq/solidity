@@ -555,6 +555,11 @@ public:
 				return m_builder->create<mlir::solidity::ConstantOp>(
 					loc, m_builder->getIntegerAttr(m_builder->getI64Type(), val), type);
 			}
+			else if (ident->name() == "this")
+			{
+				return m_builder->create<mlir::solidity::SelfAddressOp>(
+					loc, mlir::solidity::AddressType::get(m_context.get()));
+			}
 			else
 			{
 				// Function references, contract references, etc.
@@ -963,6 +968,76 @@ public:
 				}
 			}
 
+			// Handle type(X).max, type(X).min — base is a FunctionCall to type()
+			if (auto* funcCallExpr = dynamic_cast<FunctionCall const*>(&memberAccess->expression()))
+			{
+				if (auto* typeIdent = dynamic_cast<Identifier const*>(&funcCallExpr->expression()))
+				{
+					if (typeIdent->name() == "type" && !funcCallExpr->arguments().empty())
+					{
+						auto const* typeArg = funcCallExpr->arguments()[0].get();
+						if (auto* typeArgExpr = dynamic_cast<ElementaryTypeNameExpression const*>(typeArg))
+						{
+							auto const& typeName = typeArgExpr->type();
+							auto resultType = translateSolidityType(*_expr.annotation().type);
+
+							if (memberName == "max")
+							{
+								mlir::Attribute valueAttr;
+								if (auto* intType = dynamic_cast<IntegerType const*>(&typeName))
+								{
+									if (intType->isSigned())
+									{
+										unsigned bits = intType->numBits();
+										u256 maxVal = (u256(1) << (bits - 1)) - 1;
+										valueAttr = m_builder->getIntegerAttr(
+											mlir::IntegerType::get(m_context.get(), 256, mlir::IntegerType::Unsigned),
+											llvm::APInt(256, maxVal.str(), 10));
+									}
+									else
+									{
+										unsigned bits = intType->numBits();
+										u256 maxVal = (u256(1) << bits) - 1;
+										valueAttr = m_builder->getIntegerAttr(
+											mlir::IntegerType::get(m_context.get(), 256, mlir::IntegerType::Unsigned),
+											llvm::APInt(256, maxVal.str(), 10));
+									}
+								}
+								else
+								{
+									valueAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
+								}
+								return m_builder->create<mlir::solidity::ConstantOp>(loc, valueAttr, resultType);
+							}
+							else if (memberName == "min")
+							{
+								mlir::Attribute valueAttr;
+								if (auto* intType = dynamic_cast<IntegerType const*>(&typeName))
+								{
+									if (intType->isSigned())
+									{
+										unsigned bits = intType->numBits();
+										u256 minVal = u256(1) << (bits - 1);
+										valueAttr = m_builder->getIntegerAttr(
+											mlir::IntegerType::get(m_context.get(), 256, mlir::IntegerType::Unsigned),
+											llvm::APInt(256, minVal.str(), 10));
+									}
+									else
+									{
+										valueAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
+									}
+								}
+								else
+								{
+									valueAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
+								}
+								return m_builder->create<mlir::solidity::ConstantOp>(loc, valueAttr, resultType);
+							}
+						}
+					}
+				}
+			}
+
 			auto base = generateSolidityExpression(memberAccess->expression());
 			if (!base)
 			{
@@ -1017,18 +1092,26 @@ public:
 			// Handle member function calls first (e.g., array.push())
 			if (auto* memberAccess = dynamic_cast<MemberAccess const*>(&funcCall->expression()))
 			{
-				auto base = generateSolidityExpression(memberAccess->expression());
-				std::string memberName = memberAccess->memberName();
-				auto baseType = memberAccess->expression().annotation().type;
+				// Don't generate base for abi.* calls - handled in FunctionCallKind section below
+				bool skipBaseGen = false;
+				if (auto* baseIdent = dynamic_cast<Identifier const*>(&memberAccess->expression()))
+					skipBaseGen = (baseIdent->name() == "abi");
 
-				// Handle array.push()
-				if (auto* arrayType = dynamic_cast<ArrayType const*>(baseType))
+				if (!skipBaseGen)
 				{
-					if (memberName == "push" && !funcCall->arguments().empty())
+					auto base = generateSolidityExpression(memberAccess->expression());
+					std::string memberName = memberAccess->memberName();
+					auto baseType = memberAccess->expression().annotation().type;
+
+					// Handle array.push()
+					if (auto* arrayType = dynamic_cast<ArrayType const*>(baseType))
 					{
-						auto value = generateSolidityExpression(*funcCall->arguments()[0]);
-						m_builder->create<mlir::solidity::ArrayPushOp>(loc, base, value);
-						return base;
+						if (memberName == "push" && !funcCall->arguments().empty())
+						{
+							auto value = generateSolidityExpression(*funcCall->arguments()[0]);
+							m_builder->create<mlir::solidity::ArrayPushOp>(loc, base, value);
+							return base;
+						}
 					}
 				}
 			}
@@ -1209,9 +1292,7 @@ public:
 						auto recipient = generateSolidityExpression(*funcCall->arguments()[0]);
 
 						m_builder->create<mlir::solidity::SelfdestructOp>(loc, recipient);
-
-						auto dummyType = translateSolidityType(*_expr.annotation().type);
-						return emitUnsupported(loc, dummyType, "selfdestruct()");
+						return nullptr;
 					}
 
 					// type(X) - handled separately as member access (type(uint256).max etc.)
@@ -1270,111 +1351,6 @@ public:
 							}
 						}
 					}
-					// Check for type(X).max, type(X).min
-					else if (auto* funcCallExpr = dynamic_cast<FunctionCall const*>(&memberAccess->expression()))
-					{
-						if (auto* typeIdent = dynamic_cast<Identifier const*>(&funcCallExpr->expression()))
-						{
-							if (typeIdent->name() == "type")
-							{
-								// Extract the type argument from type(X)
-								std::string memberName = memberAccess->memberName();
-								auto resultType = translateSolidityType(*_expr.annotation().type);
-
-								// Get the type being queried from the type() call
-								if (!funcCallExpr->arguments().empty())
-								{
-									auto const* typeArg = funcCallExpr->arguments()[0].get();
-									if (auto* typeArgIdent = dynamic_cast<ElementaryTypeNameExpression const*>(typeArg))
-									{
-										auto const& typeName = typeArgIdent->type();
-
-										if (memberName == "max")
-										{
-											// Generate max value constant
-											mlir::Attribute valueAttr;
-
-											if (auto* intType = dynamic_cast<IntegerType const*>(&typeName))
-											{
-												if (intType->isSigned())
-												{
-													// type(intN).max = 2^(N-1) - 1
-													// For int256: 2^255 - 1
-													unsigned bits = intType->numBits();
-													u256 maxVal = (u256(1) << (bits - 1)) - 1;
-													valueAttr = m_builder->getIntegerAttr(
-														mlir::IntegerType::
-															get(m_context.get(), 256, mlir::IntegerType::Unsigned),
-														llvm::APInt(256, maxVal.str(), 10));
-												}
-												else
-												{
-													// type(uintN).max = 2^N - 1
-													// For uint256: 2^256 - 1 = 0xffffffff...
-													unsigned bits = intType->numBits();
-													u256 maxVal = (u256(1) << bits) - 1;
-													valueAttr = m_builder->getIntegerAttr(
-														mlir::IntegerType::
-															get(m_context.get(), 256, mlir::IntegerType::Unsigned),
-														llvm::APInt(256, maxVal.str(), 10));
-												}
-											}
-											else
-											{
-												// Default fallback
-												valueAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-											}
-
-											return m_builder->create<mlir::solidity::ConstantOp>(loc, valueAttr, resultType);
-										}
-										else if (memberName == "min")
-										{
-											// Generate min value constant
-											mlir::Attribute valueAttr;
-
-											if (auto* intType = dynamic_cast<IntegerType const*>(&typeName))
-											{
-												if (intType->isSigned())
-												{
-													// type(intN).min = -2^(N-1)
-													// For int256: -2^255
-													// We need to represent this as a two's complement value
-													unsigned bits = intType->numBits();
-													// -2^(N-1) in two's complement is the value with only the sign bit
-													// set
-													u256 minVal
-														= u256(1)
-														  << (bits
-															  - 1); // This is 2^(N-1), treated as signed it's the min
-													valueAttr = m_builder->getIntegerAttr(
-														mlir::IntegerType::
-															get(m_context.get(), 256, mlir::IntegerType::Unsigned),
-														llvm::APInt(256, minVal.str(), 10));
-												}
-												else
-												{
-													// type(uintN).min = 0
-													valueAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-												}
-											}
-											else
-											{
-												// Default fallback
-												valueAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-											}
-
-											return m_builder->create<mlir::solidity::ConstantOp>(loc, valueAttr, resultType);
-										}
-									}
-								}
-
-								// Fallback for other type() members
-								auto dummyType = translateSolidityType(*_expr.annotation().type);
-								return emitUnsupported(loc, dummyType, "type()." + memberAccess->memberName());
-							}
-						}
-					}
-
 					funcName = memberAccess->memberName();
 
 					// Check for address member functions (transfer, send, call, delegatecall, staticcall)

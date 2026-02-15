@@ -654,6 +654,14 @@ def Solidity_EcrecoverOp : Solidity_Op<"ecrecover", [Pure]> {
   let assemblyFormat = "$hash `,` $v `,` $r `,` $s attr-dict `:` type($hash) `,` type($v) `,` type($r) `,` type($s) `->` type($result)";
 }
 
+// Self address (address(this))
+def Solidity_SelfAddressOp : Solidity_Op<"self_address", [Pure]> {
+  let summary = "Get current contract address";
+  let description = [{ Returns the address of the current contract (address(this)). }];
+  let results = (outs Solidity_AddressType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
 // Self-destruct (deprecated but needed for compatibility)
 def Solidity_SelfdestructOp : Solidity_Op<"selfdestruct"> {
   let summary = "Destroy contract and send balance";
