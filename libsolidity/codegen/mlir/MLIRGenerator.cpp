@@ -1073,6 +1073,7 @@ public:
 						}
 						m_builder->create<mlir::solidity::RequireOp>(loc, cond, msgAttr);
 					}
+					return nullptr;
 				}
 				else if (ident->name() == "assert")
 				{
@@ -1081,6 +1082,7 @@ public:
 						auto cond = generateSolidityExpression(*funcCall->arguments()[0]);
 						m_builder->create<mlir::solidity::AssertOp>(loc, cond);
 					}
+					return nullptr;
 				}
 				else if (ident->name() == "revert")
 				{
@@ -1120,13 +1122,6 @@ public:
 				if (auto* ident = dynamic_cast<Identifier const*>(&funcCall->expression()))
 				{
 					funcName = ident->name();
-
-					// Skip if already handled (require/assert/revert)
-					if (funcName == "require" || funcName == "assert" || funcName == "revert")
-					{
-						auto dummyType = translateSolidityType(*_expr.annotation().type);
-						return emitUnsupported(loc, dummyType, funcName + "() (semantics not implemented)");
-					}
 
 					// Handle built-in functions with proper MLIR operations
 
