@@ -246,6 +246,15 @@ private:
 	yul::Dialect const* m_dialect = nullptr;
 	std::map<std::string, uint32_t> m_stateVariableSlots; // Map state variable names to storage slots
 	std::map<std::string, u256> m_constants;			  // Map constant names to their values
+	size_t m_codegenWarningCount = 0;
+	std::string m_currentContractName;
+
+	void emitCodegenWarning(std::string const& _what)
+	{
+		m_codegenWarningCount++;
+		std::cerr << "Warning: [MLIR codegen] " << _what
+				  << " (warning #" << m_codegenWarningCount << ")\n";
+	}
 
 	/// Helper to convert MLIR Location to Yul DebugData
 	langutil::DebugData::ConstPtr getDebugData(mlir::Operation* op)
@@ -336,6 +345,9 @@ private:
 					if (auto nameAttr = op->getAttrOfType<mlir::StringAttr>("name"))
 						contractName = nameAttr.getValue().str();
 
+					m_currentContractName = contractName;
+					m_codegenWarningCount = 0;
+
 					// Get the contract ID if available
 					std::string contractId;
 					if (auto idAttr = op->getAttrOfType<mlir::IntegerAttr>("id"))
@@ -376,6 +388,10 @@ private:
 					auto metadataData = std::make_shared<yul::Data>(yul::Object::metadataName(), metadataBytes);
 					deployedObject->subObjects.push_back(metadataData);
 					deployedObject->subIndexByName[yul::Object::metadataName()] = deployedObject->subObjects.size() - 1;
+
+					if (m_codegenWarningCount > 0)
+						std::cerr << "Warning: [MLIR] " << contractName
+								  << ": " << m_codegenWarningCount << " codegen warning(s) (simplified lowering)\n";
 				}
 			});
 
@@ -1958,14 +1974,11 @@ private:
 		}
 		else if (mlir::isa<mlir::solidity::StructCreateOp>(op))
 		{
-			// For now, structs are flattened to tuples in memory
-			// This is a simplified implementation
+			emitCodegenWarning("struct_create lowered to zero literal (no memory allocation)");
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0)
 			{
 				std::string resultVar = getOrCreateVariableName(op->getResult(0));
-				// For simplicity, we'll create a placeholder value
-				// In a full implementation, this would create a memory struct
 				return yul::VariableDeclaration{
 					debugData,
 					{{debugData, yul::YulName(resultVar)}},
@@ -2074,12 +2087,12 @@ private:
 		}
 		else if (mlir::isa<mlir::solidity::ArrayLengthOp>(op))
 		{
+			emitCodegenWarning("array_length assumes length at array slot (may be wrong for dynamic arrays)");
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
 			{
 				std::string resultVar = getOrCreateVariableName(op->getResult(0));
 				std::string arrayVar = getVariableName(op->getOperand(0));
-				// Simplified: arrays store their length at their storage slot
 				return yul::VariableDeclaration{
 					debugData,
 					{{debugData, yul::YulName(resultVar)}},
@@ -2091,13 +2104,12 @@ private:
 		}
 		else if (mlir::isa<mlir::solidity::MemberAccessOp>(op))
 		{
+			emitCodegenWarning("member_access is identity pass-through (no field offset calculation)");
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
 			{
 				std::string resultVar = getOrCreateVariableName(op->getResult(0));
 				std::string objectVar = getVariableName(op->getOperand(0));
-				// Simplified: member access returns the object itself for now
-				// In a full implementation, this would calculate the offset
 				return yul::VariableDeclaration{
 					debugData,
 					{{debugData, yul::YulName(resultVar)}},
@@ -2122,15 +2134,12 @@ private:
 		}
 		else if (mlir::isa<mlir::solidity::AddressCodeOp>(op))
 		{
-			// address.code returns bytes memory containing the code
-			// In Yul, we need to allocate memory and use extcodecopy
+			emitCodegenWarning("address.code returns extcodesize instead of actual code bytes");
 			auto debugData = langutil::DebugData::create();
 			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
 			{
 				std::string resultVar = getOrCreateVariableName(op->getResult(0));
 				std::string addrVar = getVariableName(op->getOperand(0));
-				// For now, return extcodesize as a simplification
-				// Full implementation would allocate memory and copy code
 				return yul::VariableDeclaration{
 					debugData,
 					{{debugData, yul::YulName(resultVar)}},
@@ -2158,7 +2167,7 @@ private:
 		}
 		else if (mlir::isa<mlir::solidity::ToI1Op>(op))
 		{
-			// Convert bool to i1 - this is essentially a pass-through in Yul
+			emitCodegenWarning("bool-to-i1 is identity pass-through (no iszero(iszero(x)) normalization)");
 			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
 			{
 				std::string resultVar = getOrCreateVariableName(op->getResult(0));
@@ -2172,8 +2181,7 @@ private:
 		}
 		else if (mlir::isa<mlir::solidity::ConvertOp>(op))
 		{
-			// Type conversion - in Yul, most conversions are just assignments
-			// The EVM automatically handles the conversion at runtime
+			emitCodegenWarning("type conversion is identity pass-through (no masking/sign-extension)");
 			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
 			{
 				std::string resultVar = getOrCreateVariableName(op->getResult(0));
@@ -3035,15 +3043,12 @@ private:
 		}
 		else if (mlir::isa<mlir::solidity::AbiDecodeOp>(op))
 		{
-			// abi.decode(data, (types)) - for now handle as loading from memory
+			emitCodegenWarning("abi.decode simplified to single mload (no proper ABI decoding)");
 			auto debugData = getDebugData(op);
 			if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
 			{
 				std::string resultVar = getOrCreateVariableName(op->getResult(0));
 				std::string data = getVariableName(op->getOperand(0));
-
-				// Simple case: decode a single value from the data pointer
-				// result = mload(add(data, 0))
 				return yul::VariableDeclaration{
 					debugData,
 					{{debugData, yul::YulName(resultVar)}},
@@ -3057,6 +3062,7 @@ private:
 		// StringLiteralOp: store string in memory and return pointer
 		if (mlir::isa<mlir::solidity::StringLiteralOp>(op))
 		{
+			emitCodegenWarning("string literal as hex value (no memory allocation/ABI encoding)");
 			if (op->getNumResults() > 0)
 			{
 				std::string resultVar = getOrCreateVariableName(op->getResult(0));
@@ -4331,6 +4337,7 @@ private:
 
 	std::optional<yul::Statement> processArrayAccessOpToAST(mlir::Operation* op)
 	{
+		emitCodegenWarning("array access uses simple sload(add(array,index)) (no keccak256 slot computation)");
 		auto debugData = langutil::DebugData::create();
 		if (op->getNumResults() > 0 && op->getNumOperands() >= 2)
 		{
@@ -4355,6 +4362,7 @@ private:
 
 	std::optional<yul::Statement> processArrayStoreOpToAST(mlir::Operation* op)
 	{
+		emitCodegenWarning("array store uses simple sstore(add(array,index),value) (no keccak256 slot computation)");
 		auto debugData = langutil::DebugData::create();
 		if (op->getNumOperands() >= 3)
 		{
@@ -4379,6 +4387,7 @@ private:
 
 	std::optional<yul::Statement> processMappingAccessOpToAST(mlir::Operation* op)
 	{
+		emitCodegenWarning("mapping access uses hardcoded slot index (may be wrong for multi-mapping contracts)");
 		auto debugData = langutil::DebugData::create();
 		if (op->getNumResults() > 0 && op->getNumOperands() >= 1)
 		{
@@ -4439,6 +4448,7 @@ private:
 
 	std::optional<yul::Statement> processMappingStoreOpToAST(mlir::Operation* op)
 	{
+		emitCodegenWarning("mapping store uses hardcoded slot index (may be wrong for multi-mapping contracts)");
 		auto debugData = langutil::DebugData::create();
 		if (op->getNumOperands() >= 2)
 		{
