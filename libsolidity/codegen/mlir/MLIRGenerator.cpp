@@ -22,6 +22,9 @@
 #include <libsolidity/codegen/mlir/MLIRGenerator.h>
 #include <libsolidity/codegen/mlir/MLIRToYulLowering.h>
 #include <libsolidity/interface/CompilerStack.h>
+#include <libyul/AST.h>
+#include <libyul/AsmPrinter.h>
+#include <libyul/backends/evm/EVMDialect.h>
 
 #include <cxxabi.h>
 #include <iostream>
@@ -510,7 +513,8 @@ public:
 				  || literal->token() == langutil::Token::UnicodeStringLiteral
 				  || literal->token() == langutil::Token::HexStringLiteral)
 			{
-				return emitUnsupported(loc, type, "string/hex literal '" + literal->value().substr(0, 20) + "'");
+				return m_builder->create<mlir::solidity::StringLiteralOp>(
+					loc, type, m_builder->getStringAttr(literal->value()));
 			}
 		}
 		else if (auto* ident = dynamic_cast<Identifier const*>(&_expr))
@@ -721,6 +725,12 @@ public:
 							loc, valueType, m_builder->getStringAttr(varName), key);
 					}
 				}
+				else
+				{
+					// Generic fallback: use generateSolidityExpression for any LHS
+					// Handles MemberAccess on IndexAccess (e.g., getStream[id].balance)
+					currentValue = generateSolidityExpression(assignment->leftHandSide());
+				}
 
 				// Get the right-hand side value
 				auto rightValue = generateSolidityExpression(assignment->rightHandSide());
@@ -788,6 +798,19 @@ public:
 					std::string varName = extractMappingVarName(indexAccess->baseExpression());
 
 					m_builder->create<mlir::solidity::MappingStoreOp>(loc, m_builder->getStringAttr(varName), key, value);
+				}
+			}
+			else if (auto* memberAccess = dynamic_cast<MemberAccess const*>(&assignment->leftHandSide()))
+			{
+				// Handle store to struct field in mapping: m[k].field = v or m[k].field += v
+				if (auto* indexAccess = dynamic_cast<IndexAccess const*>(&memberAccess->expression()))
+				{
+					if (dynamic_cast<MappingType const*>(indexAccess->baseExpression().annotation().type))
+					{
+						auto key = generateSolidityExpression(*indexAccess->indexExpression());
+						std::string varName = extractMappingVarName(indexAccess->baseExpression());
+						m_builder->create<mlir::solidity::MappingStoreOp>(loc, m_builder->getStringAttr(varName), key, value);
+					}
 				}
 			}
 
@@ -1089,7 +1112,41 @@ public:
 		}
 		else if (auto* funcCall = dynamic_cast<FunctionCall const*>(&_expr))
 		{
-			// Handle member function calls first (e.g., array.push())
+			// Handle .call{value: amount}("") pattern — FunctionCallOptions wrapping
+			if (auto* funcCallOpts = dynamic_cast<FunctionCallOptions const*>(&funcCall->expression()))
+			{
+				if (auto* memberAccess = dynamic_cast<MemberAccess const*>(&funcCallOpts->expression()))
+				{
+					if (memberAccess->memberName() == "call")
+					{
+						auto address = generateSolidityExpression(memberAccess->expression());
+
+						// Extract {value: ...} option
+						mlir::Value callValue;
+						for (size_t i = 0; i < funcCallOpts->names().size(); ++i)
+						{
+							if (*funcCallOpts->names()[i] == "value")
+							{
+								callValue = generateSolidityExpression(*funcCallOpts->options()[i]);
+								break;
+							}
+						}
+
+						if (!callValue)
+						{
+							auto zero = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
+							callValue = m_builder->create<mlir::solidity::ConstantOp>(
+								loc, zero, mlir::solidity::UIntType::get(m_context.get(), 256));
+						}
+
+						auto boolType = mlir::solidity::BoolType::get(m_context.get());
+						return m_builder->create<mlir::solidity::LowLevelCallOp>(
+							loc, boolType, address, callValue);
+					}
+				}
+			}
+
+			// Handle member function calls first (e.g., array.push(), .transfer())
 			if (auto* memberAccess = dynamic_cast<MemberAccess const*>(&funcCall->expression()))
 			{
 				// Don't generate base for abi.* calls - handled in FunctionCallKind section below
@@ -1111,6 +1168,17 @@ public:
 							auto value = generateSolidityExpression(*funcCall->arguments()[0]);
 							m_builder->create<mlir::solidity::ArrayPushOp>(loc, base, value);
 							return base;
+						}
+					}
+
+					// Handle .transfer(amount) — reverts on failure
+					if (memberName == "transfer" && funcCall->arguments().size() == 1 && base)
+					{
+						auto amount = generateSolidityExpression(*funcCall->arguments()[0]);
+						if (amount)
+						{
+							m_builder->create<mlir::solidity::TransferOp>(loc, base, amount);
+							return nullptr;
 						}
 					}
 				}
@@ -1138,6 +1206,27 @@ public:
 					return m_builder->create<mlir::solidity::StructCreateOp>(
 						loc, resultType, m_builder->getStringAttr(structDecl->name()), operands);
 				}
+			}
+			// Handle new ContractName(args) — contract creation
+			else if (auto* newExpr = dynamic_cast<NewExpression const*>(&funcCall->expression()))
+			{
+				std::string typeName;
+				if (auto* userDefined = dynamic_cast<UserDefinedTypeName const*>(&newExpr->typeName()))
+					typeName = userDefined->pathNode().path().back();
+				else
+					typeName = "UnknownContract";
+
+				std::vector<mlir::Value> args;
+				for (auto const& arg: funcCall->arguments())
+				{
+					auto argValue = generateSolidityExpression(*arg);
+					if (argValue)
+						args.push_back(argValue);
+				}
+
+				auto resultType = translateSolidityType(*_expr.annotation().type);
+				return m_builder->create<mlir::solidity::FunctionCallOp>(
+					loc, mlir::TypeRange{resultType}, m_builder->getStringAttr("$create_" + typeName), args).getResult(0);
 			}
 
 			if (auto* ident = dynamic_cast<Identifier const*>(&funcCall->expression()))
@@ -1353,19 +1442,15 @@ public:
 					}
 					funcName = memberAccess->memberName();
 
-					// Check for address member functions (transfer, send, call, delegatecall, staticcall)
-					if (funcName == "transfer" || funcName == "send" || funcName == "call" || funcName == "delegatecall"
-						|| funcName == "staticcall")
+					// Check for remaining low-level calls (send, delegatecall, staticcall)
+					// Note: .transfer() is handled earlier, .call{value:} via FunctionCallOptions
+					if (funcName == "send" || funcName == "delegatecall" || funcName == "staticcall")
 					{
 						auto dummyType = translateSolidityType(*_expr.annotation().type);
 						return emitUnsupported(loc, dummyType, "low-level call '." + funcName + "()'");
 					}
 
-					// For all other member access function calls (external contract/interface calls)
-					{
-						auto dummyType = translateSolidityType(*_expr.annotation().type);
-						return emitUnsupported(loc, dummyType, "external call '." + funcName + "()'");
-					}
+					// External contract/interface calls — fall through to FunctionCallOp generation
 				}
 
 				if (!funcName.empty())
@@ -2183,35 +2268,35 @@ public:
 				// For cases like: (bool ok, ) = msg.sender.call{value: bal}("")
 				if (declarations.size() > 1)
 				{
-					// For tuple destructuring, create values with correct types for each declaration
-					// The initialValue might return a tuple, but we handle each component separately
+					// Generate the init expression (e.g., the low-level call)
+					auto initValue = generateSolidityExpression(*varDeclStmt->initialValue());
+
+					// Use the expression result for the first declared variable,
+					// and zero-initialize the rest
+					bool firstAssigned = false;
 					for (auto const& decl: declarations)
 					{
 						if (decl)
 						{
-							// Create a value with the declaration's actual type
 							auto declType = translateSolidityType(*decl->type());
 							auto declLoc = this->loc(*decl);
 
-							// Generate a placeholder value with the correct type
-							// This handles cases like low-level calls returning (bool, bytes)
-							if (dynamic_cast<BoolType const*>(decl->type()))
+							if (!firstAssigned && initValue)
 							{
-								auto boolType = mlir::solidity::BoolType::get(m_context.get());
-								auto boolValue = emitUnsupported(declLoc, boolType, "tuple destructuring (bool from low-level call)");
-								m_valueMap[decl->id()] = boolValue;
+								// Use the call result for the first component (e.g., bool success)
+								m_valueMap[decl->id()] = initValue;
+								firstAssigned = true;
 							}
 							else
 							{
-								auto value = emitUnsupported(declLoc, declType, "tuple destructuring ('" + decl->name() + "' from low-level call)");
-								m_valueMap[decl->id()] = value;
+								// Other components get zero/default values
+								auto zero = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
+								m_valueMap[decl->id()] = m_builder->create<mlir::solidity::ConstantOp>(
+									declLoc, zero, declType);
 							}
 						}
 					}
-					// Generate the actual expression (e.g., the low-level call)
-					// This is done for side effects
-					generateSolidityExpression(*varDeclStmt->initialValue());
-					return mlir::Value();
+					return initValue ? initValue : mlir::Value();
 				}
 
 				// Single declaration.
@@ -2230,11 +2315,30 @@ public:
 				return value;
 			}
 		}
-		else if (dynamic_cast<InlineAssembly const*>(&_stmt))
+		else if (auto* inlineAsm = dynamic_cast<InlineAssembly const*>(&_stmt))
 		{
 			auto loc = this->loc(_stmt);
-			auto dummyType = mlir::solidity::UIntType::get(m_context.get(), 256);
-			emitUnsupported(loc, dummyType, "inline assembly block");
+			// Serialize the Yul block to text using AsmPrinter
+			yul::AsmPrinter printer(inlineAsm->dialect());
+			std::string yulSource = printer(inlineAsm->operations().root());
+
+			// Create the InlineAssemblyOp with serialized Yul source
+			m_builder->create<mlir::solidity::InlineAssemblyOp>(
+				loc, m_builder->getStringAttr(yulSource));
+
+			// For external references pointing to Solidity variables,
+			// create AssemblyBindOp so subsequent code can reference them.
+			// This handles patterns like: address proxy; assembly { proxy := create2(...) }
+			for (auto const& [yulIdent, info]: inlineAsm->annotation().externalReferences)
+			{
+				if (auto* varDecl = dynamic_cast<VariableDeclaration const*>(info.declaration))
+				{
+					auto varType = translateSolidityType(*varDecl->type());
+					auto bindOp = m_builder->create<mlir::solidity::AssemblyBindOp>(
+						loc, varType, m_builder->getStringAttr(yulIdent->name.str()));
+					m_valueMap[varDecl->id()] = bindOp.getResult();
+				}
+			}
 		}
 		else
 		{

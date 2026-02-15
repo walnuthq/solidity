@@ -20,11 +20,14 @@
 
 #include <liblangutil/DebugData.h>
 #include <liblangutil/EVMVersion.h>
+#include <liblangutil/ErrorReporter.h>
+#include <liblangutil/CharStream.h>
 #include <libsolutil/CommonData.h>
 #include <libsolutil/FunctionSelector.h>
 #include <libsolutil/Numeric.h>
 #include <libyul/AST.h>
 #include <libyul/ASTForward.h>
+#include <libyul/AsmParser.h>
 #include <libyul/Dialect.h>
 #include <libyul/Object.h>
 #include <libyul/backends/evm/EVMDialect.h>
@@ -3051,6 +3054,125 @@ private:
 			}
 		}
 
+		// StringLiteralOp: store string in memory and return pointer
+		if (mlir::isa<mlir::solidity::StringLiteralOp>(op))
+		{
+			if (op->getNumResults() > 0)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				auto strAttr = op->getAttrOfType<mlir::StringAttr>("value");
+				std::string strVal = strAttr ? strAttr.getValue().str() : "";
+
+				// Convert string to hex for Yul literal
+				std::string hexStr;
+				for (unsigned char c: strVal)
+				{
+					char buf[3];
+					snprintf(buf, sizeof(buf), "%02x", c);
+					hexStr += buf;
+				}
+				if (hexStr.empty())
+					hexStr = "00"; // empty string → single zero byte
+
+				// Store string in memory: mstore(freePtr, hexValue), return freePtr
+				// For simplicity, use a Yul literal with the hex-encoded value
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::Literal{
+						debugData,
+						yul::LiteralKind::Number,
+						yul::LiteralValue(u256("0x" + hexStr))})};
+			}
+		}
+
+		// TransferOp: address.transfer(amount) — reverts on failure
+		if (mlir::isa<mlir::solidity::TransferOp>(op))
+		{
+			if (op->getNumOperands() >= 2)
+			{
+				std::string to = getVariableName(op->getOperand(0));
+				std::string amount = getVariableName(op->getOperand(1));
+
+				// let success := call(gas(), to, amount, 0, 0, 0, 0)
+				// if iszero(success) { revert(0, 0) }
+				std::vector<yul::Statement> stmts;
+				std::string successVar = "transfer_success_" + std::to_string(m_varCounter++);
+
+				std::vector<yul::Expression> callArgs;
+				callArgs.emplace_back(yul::FunctionCall{debugData, yul::Identifier{debugData, yul::YulName("gas")}, {}});
+				callArgs.emplace_back(yul::Identifier{debugData, yul::YulName(to)});
+				callArgs.emplace_back(yul::Identifier{debugData, yul::YulName(amount)});
+				callArgs.emplace_back(yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))});
+				callArgs.emplace_back(yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))});
+				callArgs.emplace_back(yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))});
+				callArgs.emplace_back(yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))});
+
+				stmts.emplace_back(yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(successVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("call")},
+						std::move(callArgs)})});
+
+				// if iszero(success) { revert(0, 0) }
+				std::vector<yul::Expression> isZeroArgs;
+				isZeroArgs.emplace_back(yul::Identifier{debugData, yul::YulName(successVar)});
+
+				std::vector<yul::Expression> revertArgs;
+				revertArgs.emplace_back(yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))});
+				revertArgs.emplace_back(yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))});
+
+				std::vector<yul::Statement> revertBody;
+				revertBody.emplace_back(yul::ExpressionStatement{
+					debugData,
+					yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("revert")},
+						std::move(revertArgs)}});
+
+				stmts.emplace_back(yul::If{
+					debugData,
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("iszero")},
+						std::move(isZeroArgs)}),
+					yul::Block{debugData, std::move(revertBody)}});
+
+				return yul::Block{debugData, std::move(stmts)};
+			}
+		}
+
+		// LowLevelCallOp: addr.call{value: amount}("") → returns bool success
+		if (mlir::isa<mlir::solidity::LowLevelCallOp>(op))
+		{
+			if (op->getNumResults() > 0 && op->getNumOperands() >= 2)
+			{
+				std::string resultVar = getOrCreateVariableName(op->getResult(0));
+				std::string to = getVariableName(op->getOperand(0));
+				std::string value = getVariableName(op->getOperand(1));
+
+				// let success := call(gas(), to, value, 0, 0, 0, 0)
+				std::vector<yul::Expression> callArgs;
+				callArgs.emplace_back(yul::FunctionCall{debugData, yul::Identifier{debugData, yul::YulName("gas")}, {}});
+				callArgs.emplace_back(yul::Identifier{debugData, yul::YulName(to)});
+				callArgs.emplace_back(yul::Identifier{debugData, yul::YulName(value)});
+				callArgs.emplace_back(yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))});
+				callArgs.emplace_back(yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))});
+				callArgs.emplace_back(yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))});
+				callArgs.emplace_back(yul::Literal{debugData, yul::LiteralKind::Number, yul::LiteralValue(u256(0))});
+
+				return yul::VariableDeclaration{
+					debugData,
+					{{debugData, yul::YulName(resultVar)}},
+					std::make_unique<yul::Expression>(yul::FunctionCall{
+						debugData,
+						yul::Identifier{debugData, yul::YulName("call")},
+						std::move(callArgs)})};
+			}
+		}
+
 		// SelfAddressOp: address() opcode — returns current contract address
 		if (mlir::isa<mlir::solidity::SelfAddressOp>(op))
 		{
@@ -3063,6 +3185,54 @@ private:
 					std::make_unique<yul::Expression>(
 						yul::FunctionCall{debugData, yul::Identifier{debugData, yul::YulName("address")}, {}})};
 			}
+		}
+
+		// InlineAssemblyOp: parse Yul source back and emit as a Yul block
+		if (mlir::isa<mlir::solidity::InlineAssemblyOp>(op))
+		{
+			auto yulSourceAttr = op->getAttrOfType<mlir::StringAttr>("yul_source");
+			if (yulSourceAttr)
+			{
+				std::string yulSource = yulSourceAttr.getValue().str();
+
+				// Parse the Yul source back into a Yul AST
+				langutil::ErrorList errors;
+				langutil::ErrorReporter errorReporter(errors);
+				auto const& dialect = yul::EVMDialect::strictAssemblyForEVM(langutil::EVMVersion{}, std::nullopt);
+				langutil::CharStream charStream(yulSource, "inline-asm");
+				yul::Parser parser(errorReporter, dialect);
+				auto ast = parser.parse(charStream);
+
+				if (ast)
+				{
+					// Move the root block out of the parsed AST
+					// Safe because we own the unique_ptr and won't use ast again
+					yul::Block block = std::move(const_cast<yul::Block&>(ast->root()));
+					return yul::Statement{std::move(block)};
+				}
+			}
+			return std::nullopt;
+		}
+
+		// AssemblyBindOp: register variable name binding from assembly, emit no Yul
+		if (mlir::isa<mlir::solidity::AssemblyBindOp>(op))
+		{
+			if (op->getNumResults() > 0)
+			{
+				auto varNameAttr = op->getAttrOfType<mlir::StringAttr>("var_name");
+				if (varNameAttr)
+				{
+					std::string varName = varNameAttr.getValue().str();
+					// Force this MLIR value to use the assembly variable name
+					void* key = op->getResult(0).getAsOpaquePointer();
+					yul::YulName yulName(varName);
+					if (!m_currentFunction.empty())
+						m_functionScopedNames[m_currentFunction][key] = yulName;
+					else
+						m_valueNames[key] = yulName;
+				}
+			}
+			return std::nullopt;
 		}
 
 		// UncheckedOp: just lower the body ops (unchecked semantics don't affect Yul)

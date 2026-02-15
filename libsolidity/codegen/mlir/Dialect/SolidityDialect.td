@@ -889,4 +889,63 @@ def Solidity_EmitOp : Solidity_Op<"emit"> {
   );
 }
 
+//===----------------------------------------------------------------------===//
+// String literal operation
+//===----------------------------------------------------------------------===//
+
+def Solidity_StringLiteralOp : Solidity_Op<"string_literal", [Pure]> {
+  let summary = "String or hex literal value";
+  let description = [{ Represents a string or hex literal constant. }];
+  let arguments = (ins StrAttr:$value);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "$value attr-dict `:` type($result)";
+}
+
+//===----------------------------------------------------------------------===//
+// Low-level call operations
+//===----------------------------------------------------------------------===//
+
+def Solidity_TransferOp : Solidity_Op<"transfer"> {
+  let summary = "Transfer Ether to address (reverts on failure)";
+  let description = [{
+    Transfers Ether to the given address. Reverts if the transfer fails.
+    Equivalent to address.transfer(amount) in Solidity.
+  }];
+  let arguments = (ins Solidity_AddressType:$to, Solidity_AnyType:$amount);
+  let assemblyFormat = "$to `,` $amount attr-dict `:` type($to) `,` type($amount)";
+}
+
+def Solidity_LowLevelCallOp : Solidity_Op<"low_level_call"> {
+  let summary = "Low-level call to address";
+  let description = [{
+    Performs a low-level call to the given address with the specified value.
+    Returns a boolean indicating success. Equivalent to addr.call{value: amount}("").
+  }];
+  let arguments = (ins Solidity_AddressType:$to, Solidity_AnyType:$value);
+  let results = (outs Solidity_BoolType:$success);
+  let assemblyFormat = "$to `,` $value attr-dict `:` type($to) `,` type($value)";
+}
+
+def Solidity_InlineAssemblyOp : Solidity_Op<"inline_assembly"> {
+  let summary = "Inline Yul assembly block";
+  let description = [{
+    Represents an inline assembly block with its serialized Yul source code.
+    The source is serialized via AsmPrinter and parsed back in the Yul lowering.
+  }];
+  let arguments = (ins StrAttr:$yul_source);
+  let assemblyFormat = "$yul_source attr-dict";
+}
+
+def Solidity_AssemblyBindOp : Solidity_Op<"assembly_bind", [Pure]> {
+  let summary = "Bind a variable name from inline assembly to an MLIR value";
+  let description = [{
+    Creates an MLIR value that corresponds to a variable defined or modified
+    inside an inline assembly block. In the Yul lowering, the variable name
+    from the assembly block is used directly instead of generating a new name.
+  }];
+  let arguments = (ins StrAttr:$var_name);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "$var_name attr-dict `:` type($result)";
+}
+
 #endif // SOLIDITY_DIALECT
