@@ -1948,11 +1948,11 @@ private:
 		{
 			return processStoreStateOpToAST(op);
 		}
-		else if (opName == "solidity.array_access")
+		else if (mlir::isa<mlir::solidity::ArrayAccessOp>(op))
 		{
 			return processArrayAccessOpToAST(op);
 		}
-		else if (opName == "solidity.array_store")
+		else if (mlir::isa<mlir::solidity::ArrayStoreOp>(op))
 		{
 			return processArrayStoreOpToAST(op);
 		}

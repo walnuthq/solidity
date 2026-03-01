@@ -430,6 +430,25 @@ def Solidity_ConvertOp : Solidity_Op<"convert", [Pure]> {
 }
 
 // Array operations
+def Solidity_ArrayAccessOp : Solidity_Op<"array_access", [Pure]> {
+  let summary = "Access array element by index";
+  let description = [{
+    Returns the element at the given index in a dynamic or fixed-size array.
+  }];
+  let arguments = (ins Solidity_AnyType:$array, Solidity_AnyType:$index);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "$array `[` $index `]` attr-dict `:` type($array) `,` type($index) `->` type($result)";
+}
+
+def Solidity_ArrayStoreOp : Solidity_Op<"array_store"> {
+  let summary = "Store value to array element by index";
+  let description = [{
+    Stores a value at the given index in a dynamic or fixed-size array.
+  }];
+  let arguments = (ins Solidity_AnyType:$array, Solidity_AnyType:$index, Solidity_AnyType:$value);
+  let assemblyFormat = "$array `[` $index `]` `,` $value attr-dict `:` type($array) `,` type($index) `,` type($value)";
+}
+
 def Solidity_ArrayPushOp : Solidity_Op<"array_push"> {
   let summary = "Push element to dynamic array";
   let description = [{

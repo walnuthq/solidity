@@ -564,6 +564,14 @@ public:
 				return m_builder->create<mlir::solidity::SelfAddressOp>(
 					loc, mlir::solidity::AddressType::get(m_context.get()));
 			}
+			else if (dynamic_cast<ContractDefinition const*>(ident->annotation().referencedDeclaration))
+			{
+				// Contract/interface/library reference — return zero placeholder.
+				// Actual semantics handled at FunctionCall/MemberAccess level.
+				auto type = translateSolidityType(*_expr.annotation().type);
+				return m_builder->create<mlir::solidity::ConstantOp>(
+					loc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), type);
+			}
 			else
 			{
 				// Function references, contract references, etc.
@@ -1061,6 +1069,21 @@ public:
 				}
 			}
 
+			// Handle EnumDefinition.member (e.g., State.OPEN)
+			if (auto* baseIdent = dynamic_cast<Identifier const*>(&memberAccess->expression()))
+			{
+				if (auto* enumDef = dynamic_cast<EnumDefinition const*>(baseIdent->annotation().referencedDeclaration))
+				{
+					auto type = translateSolidityType(*_expr.annotation().type);
+					int64_t val = 0;
+					for (size_t i = 0; i < enumDef->members().size(); ++i)
+						if (enumDef->members()[i]->name() == memberAccess->memberName())
+						{ val = static_cast<int64_t>(i); break; }
+					return m_builder->create<mlir::solidity::ConstantOp>(
+						loc, m_builder->getIntegerAttr(m_builder->getI64Type(), val), type);
+				}
+			}
+
 			auto base = generateSolidityExpression(memberAccess->expression());
 			if (!base)
 			{
@@ -1149,10 +1172,14 @@ public:
 			// Handle member function calls first (e.g., array.push(), .transfer())
 			if (auto* memberAccess = dynamic_cast<MemberAccess const*>(&funcCall->expression()))
 			{
-				// Don't generate base for abi.* calls - handled in FunctionCallKind section below
+				// Don't generate base for abi.* calls or contract/library calls
 				bool skipBaseGen = false;
 				if (auto* baseIdent = dynamic_cast<Identifier const*>(&memberAccess->expression()))
+				{
 					skipBaseGen = (baseIdent->name() == "abi");
+					if (!skipBaseGen && dynamic_cast<ContractDefinition const*>(baseIdent->annotation().referencedDeclaration))
+						skipBaseGen = true;
+				}
 
 				if (!skipBaseGen)
 				{
@@ -1498,11 +1525,14 @@ public:
 			}
 			else if (dynamic_cast<ArrayType const*>(indexAccess->baseExpression().annotation().type))
 			{
-				generateSolidityExpression(indexAccess->baseExpression());
+				auto base = generateSolidityExpression(indexAccess->baseExpression());
+				mlir::Value index;
 				if (indexAccess->indexExpression())
-					generateSolidityExpression(*indexAccess->indexExpression());
-				auto type = translateSolidityType(*_expr.annotation().type);
-				return emitUnsupported(loc, type, "array element access");
+					index = generateSolidityExpression(*indexAccess->indexExpression());
+				auto elementType = translateSolidityType(*_expr.annotation().type);
+				if (base && index)
+					return m_builder->create<mlir::solidity::ArrayAccessOp>(loc, elementType, base, index);
+				return emitUnsupported(loc, elementType, "array element access with null operand");
 			}
 			else
 			{
@@ -2313,6 +2343,20 @@ public:
 						m_valueMap[decl->id()] = value;
 				}
 				return value;
+			}
+			else
+			{
+				// No initializer — zero-initialize all declared variables
+				for (auto const& decl: varDeclStmt->declarations())
+				{
+					if (decl)
+					{
+						auto declType = translateSolidityType(*decl->type());
+						auto declLoc = this->loc(*decl);
+						m_valueMap[decl->id()] = m_builder->create<mlir::solidity::ConstantOp>(
+							declLoc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), declType);
+					}
+				}
 			}
 		}
 		else if (auto* inlineAsm = dynamic_cast<InlineAssembly const*>(&_stmt))
