@@ -35,6 +35,7 @@ __pycache__/
 # Build directory
 /cmake-build-*/
 /build*/
+/test/lit/.lit/
 emscripten_build/
 /docs/_build/
 /docs/_static/robots.txt

@@ -237,3 +237,4 @@ endif()
 
 add_subdirectory(tools)
 add_subdirectory(evmc)
+add_subdirectory(lit)
