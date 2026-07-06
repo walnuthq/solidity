@@ -16,4 +16,21 @@ if(MLIR_FOUND)
         yul-dialect-test.cpp
         PROPERTIES COMPILE_FLAGS "-Wno-error -w"
     )
+
+    add_executable(yul-import-test yul-import-test.cpp)
+
+    target_link_libraries(yul-import-test PRIVATE
+        YulASTImport
+        YulTextTarget
+        YulMLIRDialect
+        yul
+        langutil
+        solutil
+        MLIRParser
+    )
+
+    set_source_files_properties(
+        yul-import-test.cpp
+        PROPERTIES COMPILE_FLAGS "-Wno-error -w"
+    )
 endif()
