@@ -51,4 +51,24 @@ if(MLIR_FOUND)
         evm-lower-test.cpp
         PROPERTIES COMPILE_FLAGS "-Wno-error -w"
     )
+
+    add_executable(sol-lower-test sol-lower-test.cpp)
+
+    target_link_libraries(sol-lower-test PRIVATE
+        SolToYulConversion
+        YulToEVMConversion
+        YulTextTarget
+        SolidityDialect
+        YulMLIRDialect
+        EVMMLIRDialect
+        yul
+        langutil
+        solutil
+        MLIRParser
+    )
+
+    set_source_files_properties(
+        sol-lower-test.cpp
+        PROPERTIES COMPILE_FLAGS "-Wno-error -w"
+    )
 endif()
