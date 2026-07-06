@@ -18,12 +18,26 @@ today's EVM bytecode backend reachable as the differential anchor), the
 | Path | Content | Status |
 |---|---|---|
 | `Dialect/Sol/` | `sol` dialect (ported from `feature/mlir-pipeline`) | ported (M0) |
-| `Dialect/Yul/` | `yul` dialect: builtins 1:1, if/for CF, mutable vars | scaffolded (M1) |
-| `Dialect/EVM/` | `evm` dialect: machine-level EVM, landmine-exact ops | scaffolded (M3) |
+| `Dialect/Yul/` | `yul` dialect: builtins 1:1, if/for CF, mutable vars, immutables | working (M1) |
+| `Dialect/EVM/` | `evm` dialect: machine-level EVM, landmine-exact ops | working (M3) |
 | `Target/YulText/` | `yul` dialect -> Yul source emitter | working (M1) |
-| `Import/LibyulAST/` | libyul AST -> `yul` dialect importer | scaffolded (M2b) |
-| `Conversion/YulToEVM/` | CF flattening + builtin mapping | scaffolded (M4) |
-| `tools/` | `yul-dialect-test`, `yul-import-test` | working |
+| `Target/RISCV/` | LLVM-dialect -> RV32IM objects (in-process llc) + test wrappers | working (M5) |
+| `Import/LibyulAST/` | libyul AST -> `yul` dialect (incl. object trees, real via-ir) | working (M2b) |
+| `Conversion/SolToYul/` | `sol` -> `yul` (storage slots, cmp predicates, if/else, require) | scaffolded (M2) |
+| `Conversion/YulToEVM/` | block-local var promotion + CF flattening + builtin mapping | scaffolded (M4) |
+| `Conversion/EVMToLLVM/` | landmine legalization + evm-rt calls + clamped shifts | working (M5, pure subset) |
+| `runtime/evm-rt/` | i256/i512 runtime in LLVM IR (div family, exp, byte, signextend) | working (M5) |
+| `tools/` | 5 test drivers + `yul2rv` (ladder-stage reporter for real contracts) | working |
+
+Real-contract coverage (see `riscv_bench.py` in solidity-compiler-benchmarks):
+**82/82 objects** of the 30-contract suite import + verify; all reach
+`promote` — next unlock is the region-aware variable promotion pass
+(loop-carried vars -> block args), then module-level statements in
+YulToEVM (`evm.program` objects), then ERHI host ops in EVMToLLVM (M6).
+
+The landmine semantics are execution-proven: `evm-riscv-test` JITs the
+compiled functions against an independent APInt oracle (24/24 vectors) and
+links a real RV32IM ELF (rv32im/ilp32, `ld.lld`).
 
 ## Design decisions
 
