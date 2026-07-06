@@ -7,4 +7,5 @@
 add_subdirectory(Dialect)
 add_subdirectory(Target/YulText)
 add_subdirectory(Import/LibyulAST)
+add_subdirectory(Conversion/YulToEVM)
 add_subdirectory(tools)

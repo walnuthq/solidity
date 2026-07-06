@@ -33,4 +33,22 @@ if(MLIR_FOUND)
         yul-import-test.cpp
         PROPERTIES COMPILE_FLAGS "-Wno-error -w"
     )
+
+    add_executable(evm-lower-test evm-lower-test.cpp)
+
+    target_link_libraries(evm-lower-test PRIVATE
+        YulToEVMConversion
+        YulASTImport
+        YulMLIRDialect
+        EVMMLIRDialect
+        yul
+        langutil
+        solutil
+        MLIRParser
+    )
+
+    set_source_files_properties(
+        evm-lower-test.cpp
+        PROPERTIES COMPILE_FLAGS "-Wno-error -w"
+    )
 endif()
