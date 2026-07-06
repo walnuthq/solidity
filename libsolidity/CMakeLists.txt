@@ -172,6 +172,12 @@ set(sources
 
 add_library(solidity ${sources})
 target_link_libraries(solidity PUBLIC yul evmasm langutil smtutil solutil Boost::boost fmt::fmt-header-only Threads::Threads)
+
+# MLIR dialect ladder (sol -> yul -> evm -> RISC-V); standalone libraries,
+# only built when MLIR is available (see root CMakeLists).
+if(MLIR_FOUND)
+    add_subdirectory(codegen/mlir)
+endif()
 if (EMSCRIPTEN)
     if(NOT ${Z3_FOUND})
             message(FATAL_ERROR "Z3 library must be present for EMSCRIPTEN build")

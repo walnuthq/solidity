@@ -72,6 +72,19 @@ endif()
 
 find_package(Threads)
 
+# Try to find MLIR (optional) - enables the MLIR dialect ladder (sol -> yul -> evm -> RISC-V).
+find_package(MLIR QUIET)
+if(MLIR_FOUND)
+    message(STATUS "MLIR support enabled")
+    add_definitions(-DSOLIDITY_HAS_MLIR=1)
+
+    # Include MLIR CMake utilities
+    list(APPEND CMAKE_MODULE_PATH "${MLIR_DIR}")
+    include(AddMLIR)
+else()
+    message(STATUS "MLIR support disabled (MLIR not found)")
+endif()
+
 if(NOT PEDANTIC)
   message(WARNING "-- Pedantic build flags turned off. Warnings will not make compilation fail. This is NOT recommended in development builds.")
 endif()
