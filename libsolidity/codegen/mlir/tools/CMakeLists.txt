@@ -106,4 +106,24 @@ if(MLIR_FOUND)
         evm-riscv-test.cpp
         PROPERTIES COMPILE_FLAGS "-Wno-error -w"
     )
+
+    add_executable(yul2rv yul2rv.cpp)
+
+    target_link_libraries(yul2rv PRIVATE
+        EVMToLLVMConversion
+        RISCVTarget
+        YulToEVMConversion
+        YulASTImport
+        YulMLIRDialect
+        EVMMLIRDialect
+        yul
+        langutil
+        solutil
+        MLIRParser
+    )
+
+    set_source_files_properties(
+        yul2rv.cpp
+        PROPERTIES COMPILE_FLAGS "-Wno-error -w"
+    )
 endif()

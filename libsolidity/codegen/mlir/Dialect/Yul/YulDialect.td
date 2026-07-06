@@ -159,6 +159,13 @@ class Yul_TernaryOp<string mnemonic, list<Trait> traits = []> :
   ];
 }
 
+// builtin(a, b, c) - statement form, no result (the copy family)
+class Yul_TernaryStmtOp<string mnemonic, list<Trait> traits = []> :
+    Yul_Op<mnemonic, traits> {
+  let arguments = (ins Yul_Word:$a, Yul_Word:$b, Yul_Word:$c);
+  let assemblyFormat = "$a `,` $b `,` $c attr-dict";
+}
+
 //===----------------------------------------------------------------------===//
 // Literals
 //===----------------------------------------------------------------------===//
@@ -292,7 +299,7 @@ def Yul_MStore8Op : Yul_Op<"mstore8"> {
   let arguments = (ins Yul_Word:$offset, Yul_Word:$value);
   let assemblyFormat = "$offset `,` $value attr-dict";
 }
-def Yul_MCopyOp : Yul_TernaryOp<"mcopy"> {
+def Yul_MCopyOp : Yul_TernaryStmtOp<"mcopy"> {
   let summary = "Memory-to-memory copy (dst, src, length); EIP-5656";
 }
 def Yul_MSizeOp : Yul_NullaryOp<"msize"> {
@@ -328,15 +335,15 @@ def Yul_CallDataLoadOp : Yul_UnaryOp<"calldataload"> {
   let summary = "Load a word from calldata; out-of-range bytes are zero";
 }
 def Yul_CallDataSizeOp : Yul_NullaryOp<"calldatasize">;
-def Yul_CallDataCopyOp : Yul_TernaryOp<"calldatacopy"> {
+def Yul_CallDataCopyOp : Yul_TernaryStmtOp<"calldatacopy"> {
   let summary = "Copy calldata to memory (dst, src, length); zero-padded";
 }
 def Yul_CodeSizeOp : Yul_NullaryOp<"codesize">;
-def Yul_CodeCopyOp : Yul_TernaryOp<"codecopy"> {
+def Yul_CodeCopyOp : Yul_TernaryStmtOp<"codecopy"> {
   let summary = "Copy own code to memory (dst, src, length); zero-padded";
 }
 def Yul_ReturnDataSizeOp : Yul_NullaryOp<"returndatasize">;
-def Yul_ReturnDataCopyOp : Yul_TernaryOp<"returndatacopy"> {
+def Yul_ReturnDataCopyOp : Yul_TernaryStmtOp<"returndatacopy"> {
   let summary = "Copy returndata to memory (dst, src, length); OOB reverts (unlike calldatacopy!)";
 }
 def Yul_ExtCodeSizeOp : Yul_UnaryOp<"extcodesize">;
@@ -510,8 +517,27 @@ def Yul_DataSizeOp : Yul_Op<"datasize", [Pure]> {
     }]>
   ];
 }
-def Yul_DataCopyOp : Yul_TernaryOp<"datacopy"> {
+def Yul_DataCopyOp : Yul_TernaryStmtOp<"datacopy"> {
   let summary = "Copy an object/data segment to memory (dst, src, length)";
+}
+def Yul_LoadImmutableOp : Yul_Op<"loadimmutable", [Pure]> {
+  let summary = "Load a named immutable (deployed-code objects)";
+  let arguments = (ins StrAttr:$immutable_name);
+  let results = (outs Yul_Word:$result);
+  let assemblyFormat = "$immutable_name attr-dict";
+  let builders = [
+    OpBuilder<(ins "::llvm::StringRef":$immutableName), [{
+      $_state.getOrAddProperties<Properties>().immutable_name =
+          $_builder.getStringAttr(immutableName);
+      $_state.addTypes($_builder.getIntegerType(256));
+    }]>
+  ];
+}
+def Yul_SetImmutableOp : Yul_Op<"setimmutable"> {
+  let summary = "Patch a named immutable into deployed code (creation objects)";
+  let arguments = (ins Yul_Word:$offset, StrAttr:$immutable_name,
+                       Yul_Word:$value);
+  let assemblyFormat = "$offset `,` $immutable_name `,` $value attr-dict";
 }
 def Yul_MemoryGuardOp : Yul_Op<"memoryguard", [Pure]> {
   let summary = "Declare the memory region reserved by the compiler";

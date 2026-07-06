@@ -92,7 +92,16 @@ public:
 		}
 		if (failed(mlir::verify(*module)))
 		{
-			_error = "imported module failed MLIR verification";
+			// Pinpoint the classic failure shape (terminator not last).
+			std::string info;
+			module->walk([&](mlir::Block* block) {
+				for (auto it = block->begin(); it != block->end(); ++it)
+					if (it->hasTrait<mlir::OpTrait::IsTerminator>() && std::next(it) != block->end())
+						info = " [" + it->getName().getStringRef().str() + " followed by "
+							   + std::next(it)->getName().getStringRef().str() + " inside "
+							   + block->getParentOp()->getName().getStringRef().str() + "]";
+			});
+			_error = "imported module failed MLIR verification" + info;
 			return nullptr;
 		}
 		return module;
@@ -130,6 +139,30 @@ private:
 
 	private:
 		Importer& m_importer;
+	};
+
+	/// Exception-safe variable isolation for function bodies (Yul functions
+	/// cannot see outer locals): swaps the variable scopes out on entry and
+	/// back on destruction, and balances the return-variable stack - also
+	/// when an ImportError unwinds through a function body.
+	class FunctionIsolation
+	{
+	public:
+		explicit FunctionIsolation(Importer& _importer)
+			: m_importer(_importer), m_savedVarScopes(std::move(_importer.m_varScopes))
+		{
+			m_importer.m_varScopes.clear();
+			m_importer.m_returnVarStack.emplace_back();
+		}
+		~FunctionIsolation()
+		{
+			m_importer.m_returnVarStack.pop_back();
+			m_importer.m_varScopes = std::move(m_savedVarScopes);
+		}
+
+	private:
+		Importer& m_importer;
+		std::vector<std::map<std::string, mlir::Value>> m_savedVarScopes;
 	};
 
 	[[noreturn]] static void fail(std::string _message) { throw ImportError{std::move(_message)}; }
@@ -227,9 +260,27 @@ private:
 			return {m_builder.create<mlir::yul::MemoryGuardOp>(
 				loc(), mlir::IntegerAttr::get(wordType(), toAPInt(lit.value.value())))};
 		}
+		if (name == "loadimmutable")
+			return {m_builder.create<mlir::yul::LoadImmutableOp>(loc(), literalStringArgument(_call, "loadimmutable"))};
+		if (name == "setimmutable")
+		{
+			if (_call.arguments.size() != 3 || !std::holds_alternative<yul::Literal>(_call.arguments[1]))
+				fail("expected setimmutable(offset, \"name\", value)");
+			yul::Literal const& nameLit = std::get<yul::Literal>(_call.arguments[1]);
+			if (!nameLit.value.unlimited())
+				fail("expected a string literal immutable name");
+			// Right-to-left evaluation of the value operands.
+			mlir::Value value = importExpression(_call.arguments[2]);
+			mlir::Value offset = importExpression(_call.arguments[0]);
+			mlir::OperationState state(loc(), "yul.setimmutable");
+			state.addOperands({offset, value});
+			state.addAttribute("immutable_name", m_builder.getStringAttr(nameLit.value.builtinStringLiteralValue()));
+			m_builder.create(state);
+			return {};
+		}
 		if (name.substr(0, 8) == "verbatim")
 			fail("verbatim builtins are not supported yet");
-		if (name == "linkersymbol" || name == "loadimmutable" || name == "setimmutable")
+		if (name == "linkersymbol")
 			fail("builtin '" + name + "' is not supported yet");
 
 		// Generic 1:1 builtin (ADR-003): op name == builtin name. Arguments
@@ -335,9 +386,19 @@ private:
 	{
 		Scope scope(*this);
 		hoistFunctionSignatures(_block);
+		// Function definitions are position-independent declarations in Yul
+		// (via-ir places them after terminating statements): import their
+		// bodies first, then walk the executable statements.
 		for (yul::Statement const& stmt: _block.statements)
+			if (std::holds_alternative<yul::FunctionDefinition>(stmt))
+				importFunction(std::get<yul::FunctionDefinition>(stmt));
+		for (yul::Statement const& stmt: _block.statements)
+		{
+			if (std::holds_alternative<yul::FunctionDefinition>(stmt))
+				continue;
 			if (importStatement(stmt))
 				return true; // terminator: anything further is unreachable (ADR-005)
+		}
 		return false;
 	}
 
@@ -349,10 +410,18 @@ private:
 			yul::Expression const& expr = std::get<yul::ExpressionStatement>(_stmt).expression;
 			if (!std::holds_alternative<yul::FunctionCall>(expr))
 				fail("expression statement must be a call");
-			auto results = importCall(std::get<yul::FunctionCall>(expr));
+			yul::FunctionCall const& call = std::get<yul::FunctionCall>(expr);
+
+			// Terminating builtins (revert/return/stop/invalid/...) end the
+			// block; anything following is unreachable and dropped (ADR-005).
+			bool terminates = false;
+			if (auto const* builtinName = std::get_if<yul::BuiltinName>(&call.functionName))
+				terminates = !m_yulDialect.builtin(builtinName->handle).controlFlowSideEffects.canContinue;
+
+			auto results = importCall(call);
 			if (!results.empty())
 				fail("expression statement with results");
-			return false;
+			return terminates;
 		}
 		if (std::holds_alternative<yul::VariableDeclaration>(_stmt))
 		{
@@ -448,25 +517,18 @@ private:
 
 		// Yul functions are isolated: only params/returns are in scope.
 		// (Function signatures remain visible - symbol calls, not SSA values.)
-		auto savedVarScopes = std::move(m_varScopes);
-		m_varScopes.clear();
-		{
-			Scope scope(*this);
+		FunctionIsolation isolation(*this);
+		Scope scope(*this);
 
-			m_returnVarStack.emplace_back();
-			// Parameters and named returns are mutable variables.
-			for (auto const& param: _fun.parameters)
-				defineVar(param.name.str(), body->addArgument(wordType(), loc()));
-			for (auto const& returnVariable: _fun.returnVariables)
-				m_returnVarStack.back().push_back(defineVar(returnVariable.name.str(), constant(uint64_t(0))));
+		// Parameters and named returns are mutable variables.
+		for (auto const& param: _fun.parameters)
+			defineVar(param.name.str(), body->addArgument(wordType(), loc()));
+		for (auto const& returnVariable: _fun.returnVariables)
+			m_returnVarStack.back().push_back(defineVar(returnVariable.name.str(), constant(uint64_t(0))));
 
-			bool terminated = importBlockInline(_fun.body);
-			if (!terminated)
-				createLeave(); // implicit leave at the end of the body
-
-			m_returnVarStack.pop_back();
-		}
-		m_varScopes = std::move(savedVarScopes);
+		bool terminated = importBlockInline(_fun.body);
+		if (!terminated)
+			createLeave(); // implicit leave at the end of the body
 	}
 
 	void importForLoop(yul::ForLoop const& _for)
@@ -579,8 +641,61 @@ mlir::OwningOpRef<mlir::ModuleOp> solidity::mlirgen::importYulSource(
 	}
 	if (!object->subObjects.empty())
 	{
-		_error = "objects with sub-objects are not supported yet";
+		_error = "objects with sub-objects are not supported yet (use importYulObjects)";
 		return nullptr;
 	}
 	return importYulAST(*object->code(), _context, _error);
+}
+
+namespace
+{
+
+void collectObjects(yul::Object const& _object, std::vector<yul::Object const*>& _out)
+{
+	_out.push_back(&_object);
+	for (auto const& sub: _object.subObjects)
+		if (auto const* child = dynamic_cast<yul::Object const*>(sub.get()))
+			collectObjects(*child, _out);
+}
+
+} // anonymous namespace
+
+std::vector<solidity::mlirgen::ImportedObject> solidity::mlirgen::importYulObjects(
+	std::string const& _sourceName, std::string const& _source, mlir::MLIRContext& _context, std::string& _parseError)
+{
+	std::vector<ImportedObject> results;
+
+	yul::YulStack stack;
+	if (!stack.parseAndAnalyze(_sourceName, _source))
+	{
+		_parseError = "libyul failed to parse/analyze the source";
+		for (auto const& error: stack.errors())
+			if (error->comment())
+				_parseError += "\n  " + *error->comment();
+		return results;
+	}
+	std::shared_ptr<yul::Object> root = stack.parserResult();
+	if (!root)
+	{
+		_parseError = "no Yul object was produced";
+		return results;
+	}
+
+	std::vector<yul::Object const*> objects;
+	collectObjects(*root, objects);
+
+	for (yul::Object const* object: objects)
+	{
+		ImportedObject entry;
+		entry.name = object->name;
+		// Object names are stored as string literals including the quotes.
+		if (entry.name.size() >= 2 && entry.name.front() == '"' && entry.name.back() == '"')
+			entry.name = entry.name.substr(1, entry.name.size() - 2);
+		if (!object->code())
+			entry.error = "object has no code";
+		else
+			entry.module = importYulAST(*object->code(), _context, entry.error);
+		results.push_back(std::move(entry));
+	}
+	return results;
 }

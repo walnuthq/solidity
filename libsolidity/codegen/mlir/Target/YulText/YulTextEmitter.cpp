@@ -317,6 +317,16 @@ private:
 			m_names[memoryGuard.getResult()] = name;
 			return line("let " + name + " := memoryguard(" + literal(memoryGuard.getSize()) + ")");
 		}
+		if (auto loadImmutable = llvm::dyn_cast<mlir::yul::LoadImmutableOp>(_op))
+		{
+			std::string name = freshName("v");
+			m_names[loadImmutable.getResult()] = name;
+			return line("let " + name + " := loadimmutable(\"" + loadImmutable.getImmutableName().str() + "\")");
+		}
+		if (auto setImmutable = llvm::dyn_cast<mlir::yul::SetImmutableOp>(_op))
+			return line(
+				"setimmutable(" + nameOf(setImmutable.getOffset()) + ", \"" + setImmutable.getImmutableName().str()
+				+ "\", " + nameOf(setImmutable.getValue()) + ")");
 
 		// Generic builtin: the op mnemonic is the Yul builtin name (ADR-003).
 		assert(_op->getDialect() && _op->getDialect()->getNamespace() == "yul" && "non-yul op in Yul text emission");

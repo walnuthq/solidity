@@ -34,6 +34,7 @@
 #pragma GCC diagnostic pop
 
 #include <string>
+#include <vector>
 
 namespace solidity::yul
 {
@@ -52,6 +53,20 @@ importYulAST(solidity::yul::AST const& _ast, mlir::MLIRContext& _context, std::s
 /// assembly), then imports the resulting AST.
 mlir::OwningOpRef<mlir::ModuleOp> importYulSource(
 	std::string const& _sourceName, std::string const& _source, mlir::MLIRContext& _context, std::string& _error);
+
+struct ImportedObject
+{
+	std::string name;
+	mlir::OwningOpRef<mlir::ModuleOp> module; ///< null when the import failed
+	std::string error;
+};
+
+/// Parses and analyzes _source, then imports every Yul object in the object
+/// tree (creation objects and deployed sub-objects) as a separate module -
+/// the entry point for real-world via-ir output. On parse failure returns an
+/// empty vector and sets _parseError.
+std::vector<ImportedObject> importYulObjects(
+	std::string const& _sourceName, std::string const& _source, mlir::MLIRContext& _context, std::string& _parseError);
 
 } // namespace solidity::mlirgen
 

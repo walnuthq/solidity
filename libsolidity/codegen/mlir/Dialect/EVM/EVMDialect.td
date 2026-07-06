@@ -125,6 +125,13 @@ class EVM_TernaryOp<string mnemonic, list<Trait> traits = []> :
   ];
 }
 
+// builtin(a, b, c) - statement form, no result (the copy family)
+class EVM_TernaryStmtOp<string mnemonic, list<Trait> traits = []> :
+    EVM_Op<mnemonic, traits> {
+  let arguments = (ins EVM_Word:$a, EVM_Word:$b, EVM_Word:$c);
+  let assemblyFormat = "$a `,` $b `,` $c attr-dict";
+}
+
 //===----------------------------------------------------------------------===//
 // Landmine arithmetic (EVM-exact semantics upstream arith cannot express)
 //===----------------------------------------------------------------------===//
@@ -184,7 +191,7 @@ def EVM_MStore8Op : EVM_Op<"mstore8"> {
   let arguments = (ins EVM_Word:$offset, EVM_Word:$value);
   let assemblyFormat = "$offset `,` $value attr-dict";
 }
-def EVM_MCopyOp : EVM_TernaryOp<"mcopy"> {
+def EVM_MCopyOp : EVM_TernaryStmtOp<"mcopy"> {
   let summary = "Memory copy (dst, src, length)";
 }
 def EVM_MSizeOp : EVM_NullaryOp<"msize"> {
@@ -214,13 +221,13 @@ def EVM_CallDataLoadOp : EVM_UnaryOp<"calldataload"> {
   let summary = "Load a word from calldata; out-of-range bytes are zero";
 }
 def EVM_CallDataSizeOp : EVM_NullaryOp<"calldatasize">;
-def EVM_CallDataCopyOp : EVM_TernaryOp<"calldatacopy"> {
+def EVM_CallDataCopyOp : EVM_TernaryStmtOp<"calldatacopy"> {
   let summary = "Copy calldata to memory (dst, src, length); zero-padded";
 }
 def EVM_CodeSizeOp : EVM_NullaryOp<"codesize">;
-def EVM_CodeCopyOp : EVM_TernaryOp<"codecopy">;
+def EVM_CodeCopyOp : EVM_TernaryStmtOp<"codecopy">;
 def EVM_ReturnDataSizeOp : EVM_NullaryOp<"returndatasize">;
-def EVM_ReturnDataCopyOp : EVM_TernaryOp<"returndatacopy"> {
+def EVM_ReturnDataCopyOp : EVM_TernaryStmtOp<"returndatacopy"> {
   let summary = "Copy returndata to memory; out-of-range REVERTS (landmine #10)";
 }
 def EVM_ExtCodeSizeOp : EVM_UnaryOp<"extcodesize">;
