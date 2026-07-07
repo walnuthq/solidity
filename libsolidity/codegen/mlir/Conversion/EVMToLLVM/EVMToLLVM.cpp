@@ -47,27 +47,48 @@ namespace
 
 IntegerType wordType(MLIRContext* _ctx) { return IntegerType::get(_ctx, 256); }
 
-/// Finds or declares `void <name>(ptr, ptr, ...)` at module scope.
-LLVM::LLVMFuncOp lookupOrCreateRtFn(ConversionPatternRewriter& _rewriter, Operation* _op, StringRef _name, unsigned _numPtrArgs)
+/// Finds or declares `void <name>(<argTypes>)` at module scope.
+LLVM::LLVMFuncOp
+lookupOrCreateRtFn(ConversionPatternRewriter& _rewriter, Operation* _op, StringRef _name, ArrayRef<Type> _argTypes)
 {
 	auto module = _op->getParentOfType<ModuleOp>();
 	if (auto existing = module.lookupSymbol<LLVM::LLVMFuncOp>(_name))
 		return existing;
 
-	auto ptrType = LLVM::LLVMPointerType::get(module.getContext());
-	SmallVector<Type, 4> argTypes(_numPtrArgs, ptrType);
-	auto fnType = LLVM::LLVMFunctionType::get(LLVM::LLVMVoidType::get(module.getContext()), argTypes);
+	auto fnType = LLVM::LLVMFunctionType::get(LLVM::LLVMVoidType::get(module.getContext()), _argTypes);
 
 	OpBuilder::InsertionGuard guard(_rewriter);
 	_rewriter.setInsertionPointToStart(module.getBody());
 	return _rewriter.create<LLVM::LLVMFuncOp>(module.getLoc(), _name, fnType);
 }
 
+/// Interned private global holding a segment/immutable name; returns its
+/// address (opaque ptr).
+Value nameConstant(ConversionPatternRewriter& _rewriter, Operation* _op, StringRef _name)
+{
+	auto module = _op->getParentOfType<ModuleOp>();
+	std::string symbol = "__evm_name";
+	for (char c: _name)
+		symbol += (isalnum(static_cast<unsigned char>(c)) || c == '_') ? c : '_';
+
+	auto global = module.lookupSymbol<LLVM::GlobalOp>(symbol);
+	if (!global)
+	{
+		OpBuilder::InsertionGuard guard(_rewriter);
+		_rewriter.setInsertionPointToStart(module.getBody());
+		auto arrayType = LLVM::LLVMArrayType::get(IntegerType::get(module.getContext(), 8), _name.size());
+		global = _rewriter.create<LLVM::GlobalOp>(
+			module.getLoc(), arrayType, /*isConstant=*/true, LLVM::Linkage::Private, symbol,
+			_rewriter.getStringAttr(_name));
+	}
+	return _rewriter.create<LLVM::AddressOfOp>(_op->getLoc(), global);
+}
+
 /// Lowers an N-operand single-result evm op to a by-pointer evm-rt call.
 struct RtCallLowering: ConversionPattern
 {
 	RtCallLowering(MLIRContext* _ctx, StringRef _opName, StringRef _rtName)
-		: ConversionPattern(_opName, /*benefit=*/1, _ctx), m_rtName(_rtName.str())
+		: ConversionPattern(_opName, /*benefit=*/2, _ctx), m_rtName(_rtName.str())
 	{
 	}
 
@@ -92,7 +113,8 @@ struct RtCallLowering: ConversionPattern
 			callArgs.push_back(slot);
 		}
 
-		LLVM::LLVMFuncOp fn = lookupOrCreateRtFn(_rewriter, _op, m_rtName, callArgs.size());
+		SmallVector<Type, 4> argTypes(callArgs.size(), ptrType);
+		LLVM::LLVMFuncOp fn = lookupOrCreateRtFn(_rewriter, _op, m_rtName, argTypes);
 		_rewriter.create<LLVM::CallOp>(loc, fn, callArgs);
 
 		Value result = _rewriter.create<LLVM::LoadOp>(loc, i256, resultSlot);
@@ -117,7 +139,7 @@ enum class ShiftKind
 struct ShiftLowering: ConversionPattern
 {
 	ShiftLowering(MLIRContext* _ctx, StringRef _opName, ShiftKind _kind)
-		: ConversionPattern(_opName, /*benefit=*/1, _ctx), m_kind(_kind)
+		: ConversionPattern(_opName, /*benefit=*/2, _ctx), m_kind(_kind)
 	{
 	}
 
@@ -166,6 +188,80 @@ private:
 	ShiftKind m_kind;
 };
 
+/// ERHI v0 fallback: every remaining evm.* op lowers to a host/runtime call
+/// with the by-pointer word ABI -
+///   value ops:      void __evm_<op>(ptr result, ptr operands... [, ptr name, i32 len])
+///   statement ops:  void __evm_<op>(ptr operands... [, ptr name, i32 len])
+/// String-named ops (dataoffset/datasize/loadimmutable/setimmutable) pass an
+/// interned (ptr, i32 length) name reference last. Halting terminators
+/// (stop/return/revert/invalid/selfdestruct) additionally end the block with
+/// llvm.unreachable - the host unwinds.
+struct ErhiCallLowering: ConversionPattern
+{
+	explicit ErhiCallLowering(MLIRContext* _ctx): ConversionPattern(MatchAnyOpTypeTag(), /*benefit=*/1, _ctx) {}
+
+	LogicalResult
+	matchAndRewrite(Operation* _op, ArrayRef<Value> _operands, ConversionPatternRewriter& _rewriter) const override
+	{
+		if (!_op->getDialect() || _op->getDialect()->getNamespace() != "evm")
+			return failure();
+		if (_op->getNumRegions() != 0 || _op->getNumResults() > 1)
+			return failure();
+
+		Location loc = _op->getLoc();
+		MLIRContext* ctx = _op->getContext();
+		auto ptrType = LLVM::LLVMPointerType::get(ctx);
+		auto i256 = wordType(ctx);
+		auto i32Type = IntegerType::get(ctx, 32);
+
+		Value one = _rewriter.create<LLVM::ConstantOp>(loc, i32Type, _rewriter.getI32IntegerAttr(1));
+
+		SmallVector<Value, 10> callArgs;
+		SmallVector<Type, 10> argTypes;
+		Value resultSlot;
+		if (_op->getNumResults() == 1)
+		{
+			resultSlot = _rewriter.create<LLVM::AllocaOp>(loc, ptrType, i256, one);
+			callArgs.push_back(resultSlot);
+			argTypes.push_back(ptrType);
+		}
+		for (Value operand: _operands)
+		{
+			Value slot = _rewriter.create<LLVM::AllocaOp>(loc, ptrType, i256, one);
+			_rewriter.create<LLVM::StoreOp>(loc, operand, slot);
+			callArgs.push_back(slot);
+			argTypes.push_back(ptrType);
+		}
+
+		StringAttr name = _op->getAttrOfType<StringAttr>("segment");
+		if (!name)
+			name = _op->getAttrOfType<StringAttr>("immutable_name");
+		if (name)
+		{
+			callArgs.push_back(nameConstant(_rewriter, _op, name.getValue()));
+			argTypes.push_back(ptrType);
+			callArgs.push_back(_rewriter.create<LLVM::ConstantOp>(
+				loc, i32Type, _rewriter.getI32IntegerAttr(name.getValue().size())));
+			argTypes.push_back(i32Type);
+		}
+
+		std::string fnName = "__evm_" + _op->getName().stripDialect().str();
+		LLVM::LLVMFuncOp fn = lookupOrCreateRtFn(_rewriter, _op, fnName, argTypes);
+		_rewriter.create<LLVM::CallOp>(loc, fn, callArgs);
+
+		if (resultSlot)
+		{
+			Value result = _rewriter.create<LLVM::LoadOp>(loc, i256, resultSlot);
+			_rewriter.replaceOp(_op, result);
+			return success();
+		}
+		if (_op->hasTrait<OpTrait::IsTerminator>())
+			_rewriter.create<LLVM::UnreachableOp>(loc);
+		_rewriter.eraseOp(_op);
+		return success();
+	}
+};
+
 } // anonymous namespace
 
 bool solidity::mlirgen::convertEVMToLLVM(mlir::ModuleOp _module, std::string& _error)
@@ -192,6 +288,9 @@ bool solidity::mlirgen::convertEVMToLLVM(mlir::ModuleOp _module, std::string& _e
 	patterns.add<ShiftLowering>(ctx, "evm.shl", ShiftKind::Shl);
 	patterns.add<ShiftLowering>(ctx, "evm.shr", ShiftKind::Shr);
 	patterns.add<ShiftLowering>(ctx, "evm.sar", ShiftKind::Sar);
+	// ERHI v0 fallback for the whole remaining op set (memory, storage, env,
+	// calldata, logs, calls, terminators, data segments, immutables).
+	patterns.add<ErhiCallLowering>(ctx);
 
 	LLVMConversionTarget target(*ctx);
 	target.addLegalOp<ModuleOp>();

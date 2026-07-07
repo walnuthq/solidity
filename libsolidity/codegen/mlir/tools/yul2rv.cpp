@@ -127,13 +127,9 @@ int main(int argc, char** argv)
 			object.module->walk([&](mlir::Operation*) { ++ops; });
 			object.module->walk([&](mlir::yul::FuncOp) { ++funcs; });
 
+			// Block-local cleanup; region-crossing vars are handled by the
+			// converter's structured-CF SSA construction.
 			unpromoted = solidity::mlirgen::promoteBlockLocalVars(*object.module);
-			if (unpromoted > 0)
-			{
-				stage = "promote";
-				detail = "region-crossing variables need the full promotion pass";
-			}
-			else
 			{
 				stage = "promote";
 				std::string error;

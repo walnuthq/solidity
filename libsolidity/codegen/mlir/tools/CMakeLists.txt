@@ -107,6 +107,27 @@ if(MLIR_FOUND)
         PROPERTIES COMPILE_FLAGS "-Wno-error -w"
     )
 
+    add_executable(erhi-host-test erhi-host-test.cpp)
+
+    target_link_libraries(erhi-host-test PRIVATE
+        EVMToLLVMConversion
+        RISCVTarget
+        YulToEVMConversion
+        YulASTImport
+        YulMLIRDialect
+        EVMMLIRDialect
+        yul
+        langutil
+        solutil
+        MLIRExecutionEngine
+        MLIRParser
+    )
+
+    set_source_files_properties(
+        erhi-host-test.cpp
+        PROPERTIES COMPILE_FLAGS "-Wno-error -w"
+    )
+
     add_executable(yul2rv yul2rv.cpp)
 
     target_link_libraries(yul2rv PRIVATE

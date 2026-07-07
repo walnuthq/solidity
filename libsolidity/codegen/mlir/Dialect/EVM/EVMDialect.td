@@ -337,6 +337,38 @@ def EVM_Create2Op : EVM_Op<"create2"> {
 }
 
 //===----------------------------------------------------------------------===//
+// Object data segments and immutables (resolved by the ERHI host / linker)
+//===----------------------------------------------------------------------===//
+
+def EVM_DataOffsetOp : EVM_Op<"dataoffset", [Pure]> {
+  let summary = "Offset of a named object/data segment";
+  let arguments = (ins StrAttr:$segment);
+  let results = (outs EVM_Word:$result);
+  let assemblyFormat = "$segment attr-dict";
+}
+def EVM_DataSizeOp : EVM_Op<"datasize", [Pure]> {
+  let summary = "Size of a named object/data segment";
+  let arguments = (ins StrAttr:$segment);
+  let results = (outs EVM_Word:$result);
+  let assemblyFormat = "$segment attr-dict";
+}
+def EVM_DataCopyOp : EVM_TernaryStmtOp<"datacopy"> {
+  let summary = "Copy an object/data segment to memory (dst, src, length)";
+}
+def EVM_LoadImmutableOp : EVM_Op<"loadimmutable", [Pure]> {
+  let summary = "Load a named immutable (deployed-code objects)";
+  let arguments = (ins StrAttr:$immutable_name);
+  let results = (outs EVM_Word:$result);
+  let assemblyFormat = "$immutable_name attr-dict";
+}
+def EVM_SetImmutableOp : EVM_Op<"setimmutable"> {
+  let summary = "Patch a named immutable into deployed code (creation objects)";
+  let arguments = (ins EVM_Word:$offset, StrAttr:$immutable_name,
+                       EVM_Word:$value);
+  let assemblyFormat = "$offset `,` $immutable_name `,` $value attr-dict";
+}
+
+//===----------------------------------------------------------------------===//
 // Halting terminators
 //===----------------------------------------------------------------------===//
 

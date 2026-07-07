@@ -108,8 +108,8 @@ int main()
 		}
 	}
 
-	// 2. Loop sample: the region-crossing variable must be reported, not
-	//    miscompiled (full promotion is a follow-up milestone).
+	// 2. Loop sample: loop-carried variables become block arguments (full
+	//    structured-CF SSA construction in the converter).
 	{
 		mlir::MLIRContext ctx;
 		std::string error;
@@ -119,11 +119,23 @@ int main()
 		if (module)
 		{
 			unsigned remaining = solidity::mlirgen::promoteBlockLocalVars(*module);
-			ok &= check(remaining > 0, "loop-carried variables detected as unpromoted");
+			ok &= check(remaining > 0, "loop-carried variables survive block-local promotion");
 
 			mlir::OwningOpRef<mlir::ModuleOp> lowered = solidity::mlirgen::convertYulToEVM(*module, error);
-			ok &= check(!lowered && !error.empty(), "conversion rejects unpromoted variables gracefully");
-			std::cout << "  (reported: " << error << ")" << std::endl;
+			if (!check(static_cast<bool>(lowered), "loop-carried variables become block arguments"))
+				std::cout << "  error: " << error << std::endl;
+			else
+			{
+				std::string printed;
+				{
+					llvm::raw_string_ostream os(printed);
+					lowered->print(os);
+				}
+				std::cout << "--- lowered loop ---\n" << printed << std::endl;
+				ok &= check(printed.find("cf.cond_br") != std::string::npos, "loop lowered to CFG");
+				ok &= check(printed.find("i256)") != std::string::npos, "block arguments carry loop state");
+				ok &= check(printed.find("yul.") == std::string::npos, "no yul ops remain in loop");
+			}
 		}
 	}
 

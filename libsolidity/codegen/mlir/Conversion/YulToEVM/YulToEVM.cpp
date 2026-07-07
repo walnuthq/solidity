@@ -17,6 +17,22 @@
 // SPDX-License-Identifier: GPL-3.0
 /**
  * YulToEVM conversion implementation.
+ *
+ * Mutable variables are promoted to SSA *during* control-flow flattening
+ * (structured-CF SSA construction): the converter tracks the current value
+ * of every yul.var while walking; at control-flow merge points the variables
+ * assigned inside the construct become block arguments -
+ *
+ *  - yul.if:  the continuation block receives one argument per assigned
+ *    variable (then-edge passes the then-end values, the false edge passes
+ *    the pre-if values);
+ *  - yul.for: the condition block carries the loop-carried variables, the
+ *    post and exit blocks receive per-edge values from body-end, continue,
+ *    break, and the condition's false edge.
+ *
+ * Module-level (object) code - real via-ir objects are top-level statements
+ * plus functions - is synthesized into a `func.func @__entry()` whose end
+ * falls through to evm.stop, matching EVM's implicit halt.
  */
 
 #include "YulToEVM.h"
@@ -32,6 +48,7 @@
 #pragma GCC diagnostic ignored "-Wconversion"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -48,14 +65,12 @@ using namespace mlir;
 using namespace solidity::mlirgen;
 
 //===----------------------------------------------------------------------===//
-// Block-local variable promotion (mini mem2reg)
+// Block-local variable promotion (mini mem2reg; kept as a cleanup utility -
+// the converter below no longer requires it)
 //===----------------------------------------------------------------------===//
 
 unsigned solidity::mlirgen::promoteBlockLocalVars(mlir::ModuleOp _module)
 {
-	// A var is promotable when every user (loads and assigns) lives in the
-	// same block as the yul.var itself - then a single linear scan renames
-	// loads to the current value.
 	llvm::DenseSet<mlir::Operation*> promotable;
 	_module->walk([&](mlir::yul::VarOp varOp) {
 		for (mlir::Operation* user: varOp.getRef().getUsers())
@@ -127,13 +142,43 @@ public:
 		mlir::OwningOpRef<mlir::ModuleOp> dst = mlir::ModuleOp::create(m_builder.getUnknownLoc());
 		try
 		{
+			m_dstModule = *dst;
+
+			// Functions first (they are position-independent declarations).
 			for (mlir::Operation& op: _src.getBody()->getOperations())
+				if (auto funcOp = llvm::dyn_cast<mlir::yul::FuncOp>(&op))
+				{
+					m_builder.setInsertionPointToEnd(dst->getBody());
+					convertFunction(funcOp);
+				}
+
+			// Module-level object code becomes @__entry (implicit stop).
+			bool hasTopLevelCode = false;
+			for (mlir::Operation& op: _src.getBody()->getOperations())
+				if (!llvm::isa<mlir::yul::FuncOp>(&op))
+					hasTopLevelCode = true;
+			if (hasTopLevelCode)
 			{
-				auto funcOp = llvm::dyn_cast<mlir::yul::FuncOp>(&op);
-				if (!funcOp)
-					fail("unsupported top-level operation: " + op.getName().getStringRef().str());
 				m_builder.setInsertionPointToEnd(dst->getBody());
-				convertFunction(funcOp);
+				auto entry = m_builder.create<mlir::func::FuncOp>(
+					m_builder.getUnknownLoc(), "__entry", mlir::FunctionType::get(m_builder.getContext(), {}, {}));
+				m_currentFunc = entry;
+				mlir::Block* block = entry.addEntryBlock();
+				mlir::OpBuilder::InsertionGuard guard(m_builder);
+				m_builder.setInsertionPointToEnd(block);
+				bool terminated = false;
+				for (mlir::Operation& op: _src.getBody()->getOperations())
+				{
+					if (llvm::isa<mlir::yul::FuncOp>(&op))
+						continue;
+					if (convertOp(op))
+					{
+						terminated = true;
+						break; // anything further at top level is unreachable
+					}
+				}
+				if (!terminated)
+					m_builder.create<mlir::evm::StopOp>(loc()); // implicit EVM halt
 			}
 		}
 		catch (ConversionError const& _e)
@@ -151,12 +196,16 @@ public:
 
 private:
 	mlir::OpBuilder m_builder;
+	mlir::ModuleOp m_dstModule;
 	llvm::DenseMap<mlir::Value, mlir::Value> m_map;
+	// Structured-CF SSA construction: current value of every mutable var.
+	llvm::DenseMap<mlir::Value, mlir::Value> m_curDef;
 
 	struct LoopCtx
 	{
 		mlir::Block* post;
 		mlir::Block* exit;
+		llvm::SmallVector<mlir::Value, 4> vars; // loop-carried variable refs
 	};
 	std::vector<LoopCtx> m_loops;
 	mlir::func::FuncOp m_currentFunc;
@@ -174,47 +223,85 @@ private:
 		return it->second;
 	}
 
+	mlir::Value currentDef(mlir::Value _ref)
+	{
+		auto it = m_curDef.find(_ref);
+		if (it == m_curDef.end())
+			fail("read of a variable before its definition");
+		return it->second;
+	}
+
 	mlir::Value wordConstant(llvm::APInt _value)
 	{
 		return m_builder.create<mlir::arith::ConstantOp>(loc(), mlir::IntegerAttr::get(wordType(), std::move(_value)));
 	}
 
-	/// i256 (0/1 semantics) from an i1.
 	mlir::Value boolToWord(mlir::Value _i1)
 	{
 		return m_builder.create<mlir::arith::ExtUIOp>(loc(), wordType(), _i1);
 	}
 
-	/// i1 truthiness of a word (non-zero).
 	mlir::Value wordToBool(mlir::Value _word)
 	{
 		mlir::Value zero = wordConstant(llvm::APInt(256, 0));
 		return m_builder.create<mlir::arith::CmpIOp>(loc(), mlir::arith::CmpIPredicate::ne, _word, zero);
 	}
 
-	mlir::Block* newBlock()
+	mlir::Block* newBlock(unsigned _numArgs = 0)
 	{
 		mlir::Block* block = new mlir::Block();
+		for (unsigned i = 0; i < _numArgs; ++i)
+			block->addArgument(wordType(), loc());
 		m_currentFunc.getBody().push_back(block);
 		return block;
 	}
 
+	/// Variables defined OUTSIDE _scope but assigned inside it - the merge
+	/// set for the construct's continuation.
+	llvm::SmallVector<mlir::Value, 4> assignedOuterVars(mlir::Operation* _scope)
+	{
+		llvm::SetVector<mlir::Value> vars;
+		_scope->walk([&](mlir::yul::AssignOp assign) {
+			mlir::Value ref = assign.getVar();
+			mlir::Operation* def = ref.getDefiningOp();
+			if (def && !_scope->isAncestor(def))
+				vars.insert(ref);
+		});
+		return llvm::SmallVector<mlir::Value, 4>(vars.begin(), vars.end());
+	}
+
+	llvm::SmallVector<mlir::Value, 4> currentValues(llvm::ArrayRef<mlir::Value> _vars)
+	{
+		llvm::SmallVector<mlir::Value, 4> values;
+		for (mlir::Value var: _vars)
+			values.push_back(currentDef(var));
+		return values;
+	}
+
 	void convertFunction(mlir::yul::FuncOp _func)
 	{
+		auto savedCurDef = std::move(m_curDef);
+		m_curDef.clear();
+		auto savedFunc = m_currentFunc;
+		auto savedLoops = std::move(m_loops);
+		m_loops.clear();
+
 		auto dstFunc = m_builder.create<mlir::func::FuncOp>(loc(), _func.getSymName(), _func.getFunctionType());
 		dstFunc.setPrivate();
 		m_currentFunc = dstFunc;
 
 		mlir::Block* entry = dstFunc.addEntryBlock();
-		if (!_func.getBody().empty())
 		{
-			mlir::Block& srcEntry = _func.getBody().front();
-			for (unsigned i = 0; i < srcEntry.getNumArguments(); ++i)
-				m_map[srcEntry.getArgument(i)] = entry->getArgument(i);
-
 			mlir::OpBuilder::InsertionGuard guard(m_builder);
 			m_builder.setInsertionPointToEnd(entry);
-			bool terminated = convertBlockOps(srcEntry);
+			bool terminated = false;
+			if (!_func.getBody().empty())
+			{
+				mlir::Block& srcEntry = _func.getBody().front();
+				for (unsigned i = 0; i < srcEntry.getNumArguments(); ++i)
+					m_map[srcEntry.getArgument(i)] = entry->getArgument(i);
+				terminated = convertBlockOps(srcEntry);
+			}
 			if (!terminated)
 			{
 				if (_func.getFunctionType().getNumResults() == 0)
@@ -223,17 +310,15 @@ private:
 					fail("function '" + _func.getSymName().str() + "' falls through with results");
 			}
 		}
-		else
-		{
-			mlir::OpBuilder::InsertionGuard guard(m_builder);
-			m_builder.setInsertionPointToEnd(entry);
-			m_builder.create<mlir::func::ReturnOp>(loc());
-		}
+
+		m_loops = std::move(savedLoops);
+		m_currentFunc = savedFunc;
+		m_curDef = std::move(savedCurDef);
 	}
 
 	/// Converts the ops of a structured yul block into the current insertion
-	/// block (which may change as control flow is flattened). @returns true
-	/// if conversion produced a terminator.
+	/// block (which changes as control flow is flattened). @returns true if
+	/// conversion produced a terminator for the current path.
 	bool convertBlockOps(mlir::Block& _src)
 	{
 		for (mlir::Operation& op: _src.getOperations())
@@ -245,6 +330,24 @@ private:
 	/// @returns true if the op terminated the current block.
 	bool convertOp(mlir::Operation& _op)
 	{
+		// Mutable variables: pure bookkeeping, no IR emitted (SSA
+		// construction happens at the merge points).
+		if (auto varOp = llvm::dyn_cast<mlir::yul::VarOp>(&_op))
+		{
+			m_curDef[varOp.getRef()] = mapped(varOp.getInit());
+			return false;
+		}
+		if (auto assign = llvm::dyn_cast<mlir::yul::AssignOp>(&_op))
+		{
+			m_curDef[assign.getVar()] = mapped(assign.getValue());
+			return false;
+		}
+		if (auto load = llvm::dyn_cast<mlir::yul::VarLoadOp>(&_op))
+		{
+			m_map[load.getResult()] = currentDef(load.getVar());
+			return false;
+		}
+
 		// Literals.
 		if (auto constOp = llvm::dyn_cast<mlir::yul::ConstOp>(&_op))
 		{
@@ -255,8 +358,6 @@ private:
 		// Upstream-exact arithmetic (ADR-003: arith reuse at this rung).
 		if (convertArithExact(_op))
 			return false;
-
-		// Comparisons -> arith.cmpi + extui.
 		if (convertComparison(_op))
 			return false;
 
@@ -275,6 +376,33 @@ private:
 			return false;
 		}
 
+		// Object data segments and immutables carry string attributes: map
+		// onto the corresponding evm.* ops explicitly.
+		if (auto dataOffset = llvm::dyn_cast<mlir::yul::DataOffsetOp>(&_op))
+		{
+			m_map[dataOffset.getResult()] = createAttrOp("evm.dataoffset", "segment", dataOffset.getSegment());
+			return false;
+		}
+		if (auto dataSize = llvm::dyn_cast<mlir::yul::DataSizeOp>(&_op))
+		{
+			m_map[dataSize.getResult()] = createAttrOp("evm.datasize", "segment", dataSize.getSegment());
+			return false;
+		}
+		if (auto loadImmutable = llvm::dyn_cast<mlir::yul::LoadImmutableOp>(&_op))
+		{
+			m_map[loadImmutable.getResult()] =
+				createAttrOp("evm.loadimmutable", "immutable_name", loadImmutable.getImmutableName());
+			return false;
+		}
+		if (auto setImmutable = llvm::dyn_cast<mlir::yul::SetImmutableOp>(&_op))
+		{
+			mlir::OperationState state(loc(), "evm.setimmutable");
+			state.addOperands({mapped(setImmutable.getOffset()), mapped(setImmutable.getValue())});
+			state.addAttribute("immutable_name", m_builder.getStringAttr(setImmutable.getImmutableName()));
+			m_builder.create(state);
+			return false;
+		}
+
 		// Control flow.
 		if (auto ifOp = llvm::dyn_cast<mlir::yul::IfOp>(&_op))
 		{
@@ -290,14 +418,14 @@ private:
 		{
 			if (m_loops.empty())
 				fail("break outside of a loop");
-			m_builder.create<mlir::cf::BranchOp>(loc(), m_loops.back().exit);
+			m_builder.create<mlir::cf::BranchOp>(loc(), m_loops.back().exit, currentValues(m_loops.back().vars));
 			return true;
 		}
 		if (llvm::isa<mlir::yul::ContinueOp>(&_op))
 		{
 			if (m_loops.empty())
 				fail("continue outside of a loop");
-			m_builder.create<mlir::cf::BranchOp>(loc(), m_loops.back().post);
+			m_builder.create<mlir::cf::BranchOp>(loc(), m_loops.back().post, currentValues(m_loops.back().vars));
 			return true;
 		}
 		if (auto leave = llvm::dyn_cast<mlir::yul::LeaveOp>(&_op))
@@ -326,53 +454,41 @@ private:
 		if (auto funcOp = llvm::dyn_cast<mlir::yul::FuncOp>(&_op))
 		{
 			mlir::OpBuilder::InsertionGuard guard(m_builder);
-			auto savedFunc = m_currentFunc;
-			auto savedLoops = std::move(m_loops);
-			m_loops.clear();
-			m_builder.setInsertionPointToEnd(
-				&m_currentFunc.getOperation()->getParentOfType<mlir::ModuleOp>().getBodyRegion().front());
+			m_builder.setInsertionPointToEnd(m_dstModule.getBody());
 			convertFunction(funcOp);
-			m_currentFunc = savedFunc;
-			m_loops = std::move(savedLoops);
 			return false;
 		}
-
-		// Unpromoted variables.
-		if (llvm::isa<mlir::yul::VarOp, mlir::yul::AssignOp, mlir::yul::VarLoadOp>(&_op))
-			fail("mutable variable survives promotion (region-crossing var; "
-				 "full promotion is a follow-up milestone)");
 
 		if (llvm::isa<mlir::yul::ConditionOp>(&_op))
 			fail("yul.condition outside a for-loop condition region");
 
-		if (llvm::isa<mlir::yul::DataOffsetOp, mlir::yul::DataSizeOp, mlir::yul::DataCopyOp>(&_op))
-			fail("object data builtins are not supported yet (evm.program objects "
-				 "are a follow-up milestone)");
-
 		// Everything else: the identically-named evm.* op (terminators included).
 		return convertGenericEvmOp(_op);
+	}
+
+	mlir::Value createAttrOp(llvm::StringRef _opName, llvm::StringRef _attrName, llvm::StringRef _attrValue)
+	{
+		mlir::OperationState state(loc(), _opName);
+		state.addAttribute(_attrName, m_builder.getStringAttr(_attrValue));
+		state.addTypes(wordType());
+		return m_builder.create(state)->getResult(0);
 	}
 
 	bool convertArithExact(mlir::Operation& _op)
 	{
 		mlir::Value result;
 		if (auto addOp = llvm::dyn_cast<mlir::yul::AddOp>(&_op))
-			result =
-				m_builder.create<mlir::arith::AddIOp>(loc(), mapped(addOp.getLhs()), mapped(addOp.getRhs()));
+			result = m_builder.create<mlir::arith::AddIOp>(loc(), mapped(addOp.getLhs()), mapped(addOp.getRhs()));
 		else if (auto subOp = llvm::dyn_cast<mlir::yul::SubOp>(&_op))
-			result =
-				m_builder.create<mlir::arith::SubIOp>(loc(), mapped(subOp.getLhs()), mapped(subOp.getRhs()));
+			result = m_builder.create<mlir::arith::SubIOp>(loc(), mapped(subOp.getLhs()), mapped(subOp.getRhs()));
 		else if (auto mulOp = llvm::dyn_cast<mlir::yul::MulOp>(&_op))
-			result =
-				m_builder.create<mlir::arith::MulIOp>(loc(), mapped(mulOp.getLhs()), mapped(mulOp.getRhs()));
+			result = m_builder.create<mlir::arith::MulIOp>(loc(), mapped(mulOp.getLhs()), mapped(mulOp.getRhs()));
 		else if (auto andOp = llvm::dyn_cast<mlir::yul::AndOp>(&_op))
-			result =
-				m_builder.create<mlir::arith::AndIOp>(loc(), mapped(andOp.getLhs()), mapped(andOp.getRhs()));
+			result = m_builder.create<mlir::arith::AndIOp>(loc(), mapped(andOp.getLhs()), mapped(andOp.getRhs()));
 		else if (auto orOp = llvm::dyn_cast<mlir::yul::OrOp>(&_op))
 			result = m_builder.create<mlir::arith::OrIOp>(loc(), mapped(orOp.getLhs()), mapped(orOp.getRhs()));
 		else if (auto xorOp = llvm::dyn_cast<mlir::yul::XorOp>(&_op))
-			result =
-				m_builder.create<mlir::arith::XOrIOp>(loc(), mapped(xorOp.getLhs()), mapped(xorOp.getRhs()));
+			result = m_builder.create<mlir::arith::XOrIOp>(loc(), mapped(xorOp.getLhs()), mapped(xorOp.getRhs()));
 		else
 			return false;
 		m_map[_op.getResult(0)] = result;
@@ -412,29 +528,41 @@ private:
 	void convertIf(mlir::yul::IfOp _if)
 	{
 		mlir::Value cond = wordToBool(mapped(_if.getCondition()));
+
+		llvm::SmallVector<mlir::Value, 4> vars = assignedOuterVars(_if.getOperation());
+		llvm::SmallVector<mlir::Value, 4> preValues = currentValues(vars);
+
 		mlir::Block* thenBlock = newBlock();
-		mlir::Block* contBlock = newBlock();
-		m_builder.create<mlir::cf::CondBranchOp>(loc(), cond, thenBlock, contBlock);
+		mlir::Block* contBlock = newBlock(vars.size());
+		m_builder.create<mlir::cf::CondBranchOp>(
+			loc(), cond, thenBlock, mlir::ValueRange{}, contBlock, preValues);
 
 		m_builder.setInsertionPointToEnd(thenBlock);
 		bool terminated = _if.getThenRegion().empty() ? false : convertBlockOps(_if.getThenRegion().front());
 		if (!terminated)
-			m_builder.create<mlir::cf::BranchOp>(loc(), contBlock);
+			m_builder.create<mlir::cf::BranchOp>(loc(), contBlock, currentValues(vars));
 
+		for (unsigned i = 0; i < vars.size(); ++i)
+			m_curDef[vars[i]] = contBlock->getArgument(i);
 		m_builder.setInsertionPointToEnd(contBlock);
 	}
 
 	void convertFor(mlir::yul::ForOp _for)
 	{
-		mlir::Block* condBlock = newBlock();
+		llvm::SmallVector<mlir::Value, 4> vars = assignedOuterVars(_for.getOperation());
+
+		mlir::Block* condBlock = newBlock(vars.size());
 		mlir::Block* bodyBlock = newBlock();
-		mlir::Block* postBlock = newBlock();
-		mlir::Block* exitBlock = newBlock();
+		mlir::Block* postBlock = newBlock(vars.size());
+		mlir::Block* exitBlock = newBlock(vars.size());
 
-		m_builder.create<mlir::cf::BranchOp>(loc(), condBlock);
+		m_builder.create<mlir::cf::BranchOp>(loc(), condBlock, currentValues(vars));
 
-		// Condition region: ops up to yul.condition, then a conditional branch.
+		// Condition block: loop-carried values arrive as block arguments.
 		m_builder.setInsertionPointToEnd(condBlock);
+		for (unsigned i = 0; i < vars.size(); ++i)
+			m_curDef[vars[i]] = condBlock->getArgument(i);
+
 		bool sawCondition = false;
 		if (!_for.getCondRegion().empty())
 			for (mlir::Operation& op: _for.getCondRegion().front().getOperations())
@@ -442,7 +570,8 @@ private:
 				if (auto condition = llvm::dyn_cast<mlir::yul::ConditionOp>(&op))
 				{
 					mlir::Value cond = wordToBool(mapped(condition.getCondition()));
-					m_builder.create<mlir::cf::CondBranchOp>(loc(), cond, bodyBlock, exitBlock);
+					m_builder.create<mlir::cf::CondBranchOp>(
+						loc(), cond, bodyBlock, mlir::ValueRange{}, exitBlock, currentValues(vars));
 					sawCondition = true;
 					break;
 				}
@@ -450,22 +579,26 @@ private:
 					fail("terminator inside a for-loop condition region");
 			}
 		if (!sawCondition)
-			// No condition: infinite loop unless the body breaks.
-			m_builder.create<mlir::cf::BranchOp>(loc(), bodyBlock);
+			m_builder.create<mlir::cf::BranchOp>(loc(), bodyBlock); // infinite loop unless the body breaks
 
-		m_loops.push_back(LoopCtx{postBlock, exitBlock});
+		m_loops.push_back(LoopCtx{postBlock, exitBlock, vars});
 
 		m_builder.setInsertionPointToEnd(bodyBlock);
 		bool bodyTerminated = _for.getBodyRegion().empty() ? false : convertBlockOps(_for.getBodyRegion().front());
 		if (!bodyTerminated)
-			m_builder.create<mlir::cf::BranchOp>(loc(), postBlock);
+			m_builder.create<mlir::cf::BranchOp>(loc(), postBlock, currentValues(vars));
 
 		m_builder.setInsertionPointToEnd(postBlock);
+		for (unsigned i = 0; i < vars.size(); ++i)
+			m_curDef[vars[i]] = postBlock->getArgument(i);
 		bool postTerminated = _for.getPostRegion().empty() ? false : convertBlockOps(_for.getPostRegion().front());
 		if (!postTerminated)
-			m_builder.create<mlir::cf::BranchOp>(loc(), condBlock);
+			m_builder.create<mlir::cf::BranchOp>(loc(), condBlock, currentValues(vars));
 
 		m_loops.pop_back();
+
+		for (unsigned i = 0; i < vars.size(); ++i)
+			m_curDef[vars[i]] = exitBlock->getArgument(i);
 		m_builder.setInsertionPointToEnd(exitBlock);
 	}
 
