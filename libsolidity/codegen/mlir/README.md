@@ -27,6 +27,7 @@ today's EVM bytecode backend reachable as the differential anchor), the
 | `Conversion/YulToEVM/` | block-local var promotion + CF flattening + builtin mapping | scaffolded (M4) |
 | `Conversion/EVMToLLVM/` | landmine legalization + evm-rt calls + clamped shifts | working (M5, pure subset) |
 | `runtime/evm-rt/` | i256/i512 runtime in LLVM IR (div family, exp, byte, signextend) | working (M5) |
+| `hosts/risc0/` | RISC Zero guest+host: zkVM execution, cycle counts, receipts | scaffolded (M7 groundwork) |
 | `tools/` | 5 test drivers + `yul2rv` (ladder-stage reporter for real contracts) | working |
 
 Real-contract coverage (see `riscv_bench.py` in solidity-compiler-benchmarks):

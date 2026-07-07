@@ -1,0 +1,10 @@
+[package]
+name = "evm-risc0-methods"
+version = "0.1.0"
+edition.workspace = true
+
+[build-dependencies]
+risc0-build = { version = "2" }
+
+[package.metadata.risc0]
+methods = ["guest"]

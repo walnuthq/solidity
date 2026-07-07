@@ -70,22 +70,25 @@ int main(int argc, char** argv)
 {
 	std::string inputPath;
 	std::string objDir;
+	bool wrappers = false;
 	for (int i = 1; i < argc; ++i)
 	{
 		std::string arg = argv[i];
 		if (arg == "--obj-dir" && i + 1 < argc)
 			objDir = argv[++i];
+		else if (arg == "--wrappers")
+			wrappers = true;
 		else if (inputPath.empty())
 			inputPath = arg;
 		else
 		{
-			std::cerr << "usage: yul2rv <file.yul> [--obj-dir <dir>]" << std::endl;
+			std::cerr << "usage: yul2rv <file.yul> [--obj-dir <dir>] [--wrappers]" << std::endl;
 			return 2;
 		}
 	}
 	if (inputPath.empty())
 	{
-		std::cerr << "usage: yul2rv <file.yul> [--obj-dir <dir>]" << std::endl;
+		std::cerr << "usage: yul2rv <file.yul> [--obj-dir <dir>] [--wrappers]" << std::endl;
 		return 2;
 	}
 
@@ -146,6 +149,8 @@ int main(int argc, char** argv)
 					else
 					{
 						stage = "llvm";
+						if (wrappers)
+							solidity::mlirgen::addI256TestWrappers(*evmModule);
 						std::string objPath = (objDir.empty() ? std::string("/tmp") : objDir) + "/"
 											  + sanitizeFileName(object.name) + ".o";
 						if (!solidity::mlirgen::emitRISCVObject(*evmModule, objPath, error))
