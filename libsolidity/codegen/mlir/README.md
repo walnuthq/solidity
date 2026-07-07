@@ -31,14 +31,23 @@ today's EVM bytecode backend reachable as the differential anchor), the
 | `tools/` | 5 test drivers + `yul2rv` (ladder-stage reporter for real contracts) | working |
 
 Real-contract coverage (see `riscv_bench.py` in solidity-compiler-benchmarks):
-**82/82 objects** of the 30-contract suite import + verify; all reach
-`promote` — next unlock is the region-aware variable promotion pass
-(loop-carried vars -> block args), then module-level statements in
-YulToEVM (`evm.program` objects), then ERHI host ops in EVMToLLVM (M6).
+**82/82 objects of the 30-contract suite compile to RV32IM object files**
+(`riscv` stage). Loop-carried variables are promoted via structured-CF SSA
+construction inside YulToEVM (merge points become block arguments),
+module-level object code synthesizes `@__entry`, and the full evm op set
+lowers through the ERHI v0 by-pointer C ABI (`__evm_<op>`; landmines keep
+optimized `__evm_rt_*` routes).
 
-The landmine semantics are execution-proven: `evm-riscv-test` JITs the
-compiled functions against an independent APInt oracle (24/24 vectors) and
-links a real RV32IM ELF (rv32im/ilp32, `ld.lld`).
+Execution-proven, twice:
+- `evm-riscv-test`: landmine functions JIT-executed against an independent
+  APInt oracle - 24/24 vectors exact; static RV32 ELF links (`ld.lld`).
+- `erhi-host-test`: a realistic deployed object (selector dispatcher,
+  keccak mapping slots, storage, loops, reverts) executes against a native
+  ERHI host - state transitions, revert-rollback, and returndata all exact
+  (18/18).
+
+Next: ERHI host ops in the RISC Zero guest (hosts/risc0), evmone/revm
+differential harness, gas modes, call family via host re-entry.
 
 ## Design decisions
 
