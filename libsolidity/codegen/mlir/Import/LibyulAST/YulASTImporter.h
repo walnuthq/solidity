@@ -33,6 +33,9 @@
 #include "mlir/IR/OwningOpRef.h"
 #pragma GCC diagnostic pop
 
+#include <libsolutil/Common.h>
+
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -54,11 +57,23 @@ importYulAST(solidity::yul::AST const& _ast, mlir::MLIRContext& _context, std::s
 mlir::OwningOpRef<mlir::ModuleOp> importYulSource(
 	std::string const& _sourceName, std::string const& _source, mlir::MLIRContext& _context, std::string& _error);
 
+/// A `data` segment of an object, addressable by `dataoffset`/`datasize`.
+struct ImportedDataSegment
+{
+	std::string name;
+	solidity::bytes data;
+};
+
 struct ImportedObject
 {
 	std::string name;
 	mlir::OwningOpRef<mlir::ModuleOp> module; ///< null when the import failed
 	std::string error;
+	/// Indices into the result vector, in declaration order. An object's
+	/// `dataoffset`/`datasize` can only name these and @a dataSegments, so the
+	/// tree has to survive the import for the EVM target to resolve them.
+	std::vector<size_t> subObjects;
+	std::vector<ImportedDataSegment> dataSegments;
 };
 
 /// Parses and analyzes _source, then imports every Yul object in the object

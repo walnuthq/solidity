@@ -101,10 +101,20 @@ explicit.
 the return address travels on the stack. Frames are addressed absolutely, so
 recursion is detected up front and rejected rather than miscompiled.
 
+**Object model.** The Yul object tree survives the import (`ImportedObject`
+carries its sub-objects and data segments), and objects are emitted leaf-first
+so a parent can register each child as a sub-assembly before referring to it.
+`dataoffset`/`datasize` become relocations - `PushSub`/`PushSubSize` for nested
+objects, a data item for `data` segments, and `appendProgramSize` when an object
+names itself - `datacopy` is a `CODECOPY`, and immutables map to
+`appendImmutable`/`appendImmutableAssignment`. Creation objects therefore
+compile and deploy.
+
 **Known divergences.** `MSIZE` observes the frame region, and the frame base is
-fixed rather than negotiated with `memoryguard`. The object model
-(`dataoffset`/`datasize`/`datacopy`/immutables) is not implemented, so creation
-objects stop at the `evm` stage while deployed objects compile through.
+fixed rather than negotiated with `memoryguard`. Because every value round-trips
+through a frame, memory grows with the number of live functions, so very large
+contracts emit creation code the chain will not accept - a size problem the
+stack scheduler removes, not a semantic one.
 
 ### Validation
 
@@ -134,13 +144,11 @@ Current status:
   wide intermediates, `EXP`, `BYTE`, `SIGNEXTEND`), comparisons, if/switch/
   nested loops with break and continue, multi-return functions with `leave`,
   memory and storage, and revert paths.
-- **Real contracts execute identically.** `Counter.sol` compiled through the
-  ladder and through `solc --via-ir --bin-runtime` agree on ABI dispatch,
-  storage and checked arithmetic (926 B vs 248 B).
-- **Coverage on solar's `tests/ui/codegen`**: 246 objects, 112 reach bytecode.
-  Everything short of it is one of four known gaps — 121 creation objects need
-  the object model, 3 need immutables, 3 use the `clz` builtin the `yul`
-  dialect lacks, 7 are recursive.
-- **Coverage on solar's benchmark sources** (Counter, Solarray, verifier,
-  OptimizorClub, repros): 58 objects, all 29 deployed objects reach bytecode;
-  the 29 creation objects stop only on the object model.
+- **21 contracts deploy and agree** end to end (`deploy_differential.py`):
+  creation code compiled through the ladder deploys, installs runtime code, and
+  answers every selector in the ABI exactly as the `solc --via-ir` build does -
+  up to 200 selectors per contract, with zero semantic divergences. The four
+  that fail all emit creation code too large for the chain to accept.
+- **Coverage on solar's `tests/ui/codegen`**: 246 objects, **227 (92.3%) reach
+  bytecode**. What remains is three uses of the `clz` builtin the `yul` dialect
+  lacks, seven recursive functions, and the objects that nest them.

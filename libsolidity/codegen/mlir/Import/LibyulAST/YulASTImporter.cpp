@@ -650,12 +650,40 @@ mlir::OwningOpRef<mlir::ModuleOp> solidity::mlirgen::importYulSource(
 namespace
 {
 
-void collectObjects(yul::Object const& _object, std::vector<yul::Object const*>& _out)
+/// Object names are stored as string literals, quotes included.
+std::string unquote(std::string _name)
 {
+	if (_name.size() >= 2 && _name.front() == '"' && _name.back() == '"')
+		return _name.substr(1, _name.size() - 2);
+	return _name;
+}
+
+/// Appends @a _object to @a _out in pre-order and returns its index, recording
+/// each object's children so the tree can be rebuilt by the caller.
+size_t collectObjects(
+	yul::Object const& _object,
+	std::vector<yul::Object const*>& _out,
+	std::vector<std::vector<size_t>>& _children,
+	std::vector<std::vector<solidity::mlirgen::ImportedDataSegment>>& _data)
+{
+	size_t const index = _out.size();
 	_out.push_back(&_object);
+	_children.emplace_back();
+	_data.emplace_back();
+
 	for (auto const& sub: _object.subObjects)
+	{
 		if (auto const* child = dynamic_cast<yul::Object const*>(sub.get()))
-			collectObjects(*child, _out);
+		{
+			// Recurse first: the call grows _children, so subscripting it in
+			// the same expression would hold a reference across a realloc.
+			size_t const childIndex = collectObjects(*child, _out, _children, _data);
+			_children[index].push_back(childIndex);
+		}
+		else if (auto const* data = dynamic_cast<yul::Data const*>(sub.get()))
+			_data[index].push_back({unquote(data->name), data->data});
+	}
+	return index;
 }
 
 } // anonymous namespace
@@ -682,15 +710,17 @@ std::vector<solidity::mlirgen::ImportedObject> solidity::mlirgen::importYulObjec
 	}
 
 	std::vector<yul::Object const*> objects;
-	collectObjects(*root, objects);
+	std::vector<std::vector<size_t>> children;
+	std::vector<std::vector<ImportedDataSegment>> data;
+	collectObjects(*root, objects, children, data);
 
-	for (yul::Object const* object: objects)
+	for (size_t index = 0; index < objects.size(); ++index)
 	{
+		yul::Object const* object = objects[index];
 		ImportedObject entry;
-		entry.name = object->name;
-		// Object names are stored as string literals including the quotes.
-		if (entry.name.size() >= 2 && entry.name.front() == '"' && entry.name.back() == '"')
-			entry.name = entry.name.substr(1, entry.name.size() - 2);
+		entry.name = unquote(object->name);
+		entry.subObjects = children[index];
+		entry.dataSegments = data[index];
 		if (!object->code())
 			entry.error = "object has no code";
 		else

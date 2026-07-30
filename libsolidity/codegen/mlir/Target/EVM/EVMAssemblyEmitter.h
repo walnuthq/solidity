@@ -66,13 +66,30 @@
 
 #include <libevmasm/Assembly.h>
 #include <liblangutil/EVMVersion.h>
+#include <libsolutil/Common.h>
 
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace solidity::mlirgen
 {
+
+/// A nested object, already emitted, that this one can address by name through
+/// `dataoffset`/`datasize` and copy with `datacopy`.
+struct EVMSubObject
+{
+	std::string name;
+	std::shared_ptr<solidity::evmasm::Assembly> assembly;
+};
+
+/// A `data` segment of the object, addressable the same way.
+struct EVMDataSegment
+{
+	std::string name;
+	solidity::bytes data;
+};
 
 struct EVMAssemblyOptions
 {
@@ -83,6 +100,9 @@ struct EVMAssemblyOptions
 	/// Emitted assembly is a creation object rather than deployed code.
 	bool creation = false;
 	std::string name = "MLIR";
+	/// Registered as sub-assemblies before emission, in declaration order.
+	std::vector<EVMSubObject> subObjects;
+	std::vector<EVMDataSegment> dataSegments;
 };
 
 /// Lowers @a _module (evm + arith/cf/func ops, as produced by convertYulToEVM)

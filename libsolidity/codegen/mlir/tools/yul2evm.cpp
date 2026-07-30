@@ -105,12 +105,25 @@ int main(int argc, char** argv)
 		return 1;
 	}
 
-	for (auto& object: objects)
+	// Objects arrive in pre-order, so emitting back to front guarantees a
+	// nested object's assembly exists before its parent registers it as a sub.
+	std::vector<std::shared_ptr<solidity::evmasm::Assembly>> emitted(objects.size());
+	std::vector<std::string> stages(objects.size(), "none");
+	std::vector<std::string> details(objects.size());
+	std::vector<size_t> byteCounts(objects.size(), 0);
+	std::vector<unsigned> funcCounts(objects.size(), 0), opCounts(objects.size(), 0);
+	std::vector<std::string> hexCode(objects.size()), asmText(objects.size());
+
+	for (size_t index = objects.size(); index > 0; --index)
 	{
-		std::string stage = "none";
-		std::string detail = object.error;
-		unsigned funcs = 0, ops = 0;
-		size_t byteCount = 0;
+		size_t const current = index - 1;
+		auto& object = objects[current];
+		std::string& stage = stages[current];
+		std::string& detail = details[current];
+		unsigned& funcs = funcCounts[current];
+		unsigned& ops = opCounts[current];
+		size_t& byteCount = byteCounts[current];
+		detail = object.error;
 
 		if (object.module)
 		{
@@ -131,6 +144,14 @@ int main(int argc, char** argv)
 				stage = "evm";
 				solidity::mlirgen::EVMAssemblyOptions options;
 				options.name = object.name;
+				// The root object is creation code; everything nested in it is
+				// the deployed artifact that code returns.
+				options.creation = (current == 0);
+				for (size_t child: object.subObjects)
+					options.subObjects.push_back({objects[child].name, emitted[child]});
+				for (auto const& segment: object.dataSegments)
+					options.dataSegments.push_back({segment.name, segment.data});
+
 				std::shared_ptr<solidity::evmasm::Assembly> assembly
 					= solidity::mlirgen::emitEVMAssembly(*evmModule, options, error);
 				if (!assembly)
@@ -138,6 +159,7 @@ int main(int argc, char** argv)
 				else
 				{
 					stage = "asm";
+					emitted[current] = assembly;
 					try
 					{
 						solidity::evmasm::LinkerObject const& linked = assembly->assemble();
@@ -145,10 +167,9 @@ int main(int argc, char** argv)
 						stage = "bytecode";
 						detail = std::to_string(byteCount) + " bytes";
 						if (printAsm)
-							std::cout << assembly->assemblyString({}) << std::endl;
+							asmText[current] = assembly->assemblyString({});
 						if (printHex)
-							std::cout << "HEX object=\"" << quoted(object.name) << "\" "
-									  << solidity::util::toHex(linked.bytecode) << std::endl;
+							hexCode[current] = solidity::util::toHex(linked.bytecode);
 					}
 					catch (std::exception const& _e)
 					{
@@ -157,9 +178,20 @@ int main(int argc, char** argv)
 				}
 			}
 		}
-
-		std::cout << "RESULT object=\"" << quoted(object.name) << "\" stage=" << stage << " funcs=" << funcs
-				  << " ops=" << ops << " bytes=" << byteCount << " detail=\"" << quoted(detail) << "\"" << std::endl;
 	}
+
+	// Report in declaration order even though emission ran the other way, so
+	// the root object - the creation code - is always reported first.
+	for (size_t index = 0; index < objects.size(); ++index)
+	{
+		if (!asmText[index].empty())
+			std::cout << asmText[index] << std::endl;
+		if (!hexCode[index].empty())
+			std::cout << "HEX object=\"" << quoted(objects[index].name) << "\" " << hexCode[index] << std::endl;
+	}
+	for (size_t index = 0; index < objects.size(); ++index)
+		std::cout << "RESULT object=\"" << quoted(objects[index].name) << "\" stage=" << stages[index]
+				  << " funcs=" << funcCounts[index] << " ops=" << opCounts[index] << " bytes=" << byteCounts[index]
+				  << " detail=\"" << quoted(details[index]) << "\"" << std::endl;
 	return 0;
 }

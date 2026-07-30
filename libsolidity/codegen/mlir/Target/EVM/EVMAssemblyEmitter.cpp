@@ -95,6 +95,7 @@ public:
 
 	std::shared_ptr<Assembly> run(mlir::ModuleOp _module)
 	{
+		registerSegments();
 		collectFunctions(_module);
 		rejectRecursion();
 		layoutFrames();
@@ -120,6 +121,21 @@ public:
 
 private:
 	bool isEntry(mlir::func::FuncOp _func) const { return _func.getName() == "__entry"; }
+
+	/// Nested objects become sub-assemblies and data segments become data
+	/// items; both are then addressable by name from `dataoffset`/`datasize`.
+	void registerSegments()
+	{
+		for (solidity::mlirgen::EVMSubObject const& sub: m_options.subObjects)
+		{
+			if (!sub.assembly)
+				fail("sub-object '" + sub.name + "' was not emitted");
+			AssemblyItem const item = m_assembly->newSub(sub.assembly);
+			m_subObjects.emplace(sub.name, SubAssemblyID(item.data()));
+		}
+		for (solidity::mlirgen::EVMDataSegment const& segment: m_options.dataSegments)
+			m_dataSegments.emplace(segment.name, m_assembly->newData(segment.data));
+	}
 
 	void collectFunctions(mlir::ModuleOp _module)
 	{
@@ -392,18 +408,79 @@ private:
 		storeResult(_cmp.getResult());
 	}
 
+	static std::string stringAttr(mlir::Operation& _op, char const* _name)
+	{
+		auto attr = _op.getAttrOfType<mlir::StringAttr>(_name);
+		if (!attr)
+			fail(std::string("op '") + _op.getName().getStringRef().str() + "' is missing its '" + _name
+				 + "' attribute");
+		return attr.getValue().str();
+	}
+
+	/// `dataoffset`/`datasize` of a nested object or data segment. Offsets and
+	/// sizes are only known once the whole assembly is laid out, so both become
+	/// relocations rather than computed constants.
+	void emitSegmentQuery(mlir::Operation& _op, bool _wantSize)
+	{
+		std::string const segment = stringAttr(_op, "segment");
+
+		if (auto sub = m_subObjects.find(segment); sub != m_subObjects.end())
+		{
+			if (_wantSize)
+				m_assembly->pushSubroutineSize(sub->second);
+			else
+				m_assembly->pushSubroutineOffset(sub->second);
+		}
+		else if (auto data = m_dataSegments.find(segment); data != m_dataSegments.end())
+		{
+			// A data item has no address of its own: `dataoffset` pushes the
+			// item itself and `datasize` its length, which is known already.
+			if (_wantSize)
+				push(u256(m_assembly->data(solidity::util::h256(data->second.data())).size()));
+			else
+				m_assembly->append(data->second);
+		}
+		else if (segment == m_options.name)
+		{
+			// An object may name itself: its offset is the origin it is already
+			// addressed from, and its size is the whole assembly's.
+			if (_wantSize)
+				m_assembly->appendProgramSize();
+			else
+				push(u256(0));
+		}
+		else
+			fail("object references unknown segment '" + segment + "'");
+
+		storeResult(_op.getResult(0));
+	}
+
 	void emitEvmOp(mlir::Operation& _op)
 	{
 		std::string mnemonic = _op.getName().stripDialect().str();
 
-		// Ops that are not single opcodes need the object model (data sections,
-		// immutables); they are out of scope until evm.program is materialised.
-		static std::set<std::string> const nonOpcode
-			= {"dataoffset", "datasize", "datacopy", "loadimmutable", "setimmutable", "program"};
-		if (nonOpcode.count(mnemonic))
-			fail("op 'evm." + mnemonic + "' needs the object model, which this target does not implement yet");
+		if (mnemonic == "dataoffset" || mnemonic == "datasize")
+			return emitSegmentQuery(_op, mnemonic == "datasize");
+		if (mnemonic == "loadimmutable")
+		{
+			m_assembly->appendImmutable(stringAttr(_op, "immutable_name"));
+			storeResult(_op.getResult(0));
+			return;
+		}
+		if (mnemonic == "setimmutable")
+		{
+			// Yul passes (offset, "name", value); the string is an attribute
+			// here, so the remaining operands land offset-on-top, which is the
+			// order AssignImmutable consumes them in.
+			pushOperands(_op);
+			m_assembly->appendImmutableAssignment(stringAttr(_op, "immutable_name"));
+			return;
+		}
+		if (mnemonic == "program")
+			fail("evm.program is not emitted by this pipeline");
 
-		std::string name = mnemonic;
+		// Copying a segment is a CODECOPY once its offset is a relocation.
+		std::string name = (mnemonic == "datacopy") ? "CODECOPY" : mnemonic;
 		for (char& c: name)
 			c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
 		auto it = c_instructions.find(name);
@@ -520,6 +597,8 @@ private:
 	std::map<std::string, Frame> m_frames;
 	std::map<std::string, AssemblyItem> m_functionTags;
 	std::map<mlir::Block*, AssemblyItem> m_blockTags;
+	std::map<std::string, SubAssemblyID> m_subObjects;
+	std::map<std::string, AssemblyItem> m_dataSegments;
 
 	Frame const* m_frame = nullptr;
 	mlir::func::FuncOp m_currentFunc;
