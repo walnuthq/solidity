@@ -74,3 +74,73 @@ cmake --build build --target yul-dialect-test && ./build/libsolidity/codegen/mli
 The test builds sample functions as `yul` dialect IR, verifies, round-trips
 through the MLIR printer/parser, emits Yul text, and validates the result
 with libyul's parser + analyzer.
+
+## The EVM assembly rung (`Target/EVM`)
+
+`Target/EVM/EVMAssemblyEmitter` closes the ladder on the EVM side:
+
+```
+Yul text -> yul dialect -> evm dialect -> libevmasm Assembly -> bytecode
+```
+
+No stage leaves MLIR until the final instruction stream, so the EVM backend is
+now reachable without the `Target/YulText` detour through libyul.
+
+**Value placement (v0).** Every non-constant SSA value gets a fixed 32-byte
+slot in a per-function frame; operands are materialised at each use and results
+written back, while constants are rematerialised as pushes. Outside a single
+instruction's emission the EVM stack therefore holds nothing but pending return
+addresses, which makes stack-too-deep unreachable and means no stack scheduler
+is needed for correctness. The cost is gas and code size — roughly 4x the
+reference backend. Replacing this with a real stack scheduler (solar's
+`backend/evm/stack`, LLVM's `EVMStackSolver`) is the next step and fits behind
+the same interface, since the operand order each opcode expects is already
+explicit.
+
+**Calling convention.** Arguments and results live in the callee's frame; only
+the return address travels on the stack. Frames are addressed absolutely, so
+recursion is detected up front and rejected rather than miscompiled.
+
+**Known divergences.** `MSIZE` observes the frame region, and the frame base is
+fixed rather than negotiated with `memoryguard`. The object model
+(`dataoffset`/`datasize`/`datacopy`/immutables) is not implemented, so creation
+objects stop at the `evm` stage while deployed objects compile through.
+
+### Validation
+
+Two instruments, both under `test/`:
+
+```sh
+anvil --silent --port 8546 &
+
+# Differential: same Yul through solc's backend and through the ladder,
+# both executed, comparing returndata, halt status and storage.
+python3 libsolidity/codegen/mlir/test/evm_differential.py \
+    --corpus libsolidity/codegen/mlir/test/corpus \
+    --solc build/solc/solc \
+    --yul2evm build/libsolidity/codegen/mlir/tools/yul2evm
+
+# Coverage: how far every Yul object of a real contract gets down the ladder.
+python3 libsolidity/codegen/mlir/test/corpus_coverage.py \
+    --solc build/solc/solc \
+    --yul2evm build/libsolidity/codegen/mlir/tools/yul2evm \
+    --corpus <dir-of-sol-files>
+```
+
+Current status:
+
+- **12/12 differential match** on the hand-written corpus, which covers the
+  §5 landmines (div/mod by zero, `SDIV(MIN,-1)`, shifts >= 256, addmod/mulmod
+  wide intermediates, `EXP`, `BYTE`, `SIGNEXTEND`), comparisons, if/switch/
+  nested loops with break and continue, multi-return functions with `leave`,
+  memory and storage, and revert paths.
+- **Real contracts execute identically.** `Counter.sol` compiled through the
+  ladder and through `solc --via-ir --bin-runtime` agree on ABI dispatch,
+  storage and checked arithmetic (926 B vs 248 B).
+- **Coverage on solar's `tests/ui/codegen`**: 246 objects, 112 reach bytecode.
+  Everything short of it is one of four known gaps — 121 creation objects need
+  the object model, 3 need immutables, 3 use the `clz` builtin the `yul`
+  dialect lacks, 7 are recursive.
+- **Coverage on solar's benchmark sources** (Counter, Solarray, verifier,
+  OptimizorClub, repros): 58 objects, all 29 deployed objects reach bytecode;
+  the 29 creation objects stop only on the object model.

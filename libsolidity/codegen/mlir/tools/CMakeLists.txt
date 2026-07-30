@@ -147,4 +147,24 @@ if(MLIR_FOUND)
         yul2rv.cpp
         PROPERTIES COMPILE_FLAGS "-Wno-error -w"
     )
+
+    add_executable(yul2evm yul2evm.cpp)
+
+    target_link_libraries(yul2evm PRIVATE
+        EVMAsmTarget
+        YulToEVMConversion
+        YulASTImport
+        YulMLIRDialect
+        EVMMLIRDialect
+        yul
+        evmasm
+        langutil
+        solutil
+        MLIRParser
+    )
+
+    set_source_files_properties(
+        yul2evm.cpp
+        PROPERTIES COMPILE_FLAGS "-Wno-error -w"
+    )
 endif()

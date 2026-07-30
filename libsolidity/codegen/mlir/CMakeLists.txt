@@ -6,6 +6,7 @@
 
 add_subdirectory(Dialect)
 add_subdirectory(Target/YulText)
+add_subdirectory(Target/EVM)
 add_subdirectory(Target/RISCV)
 add_subdirectory(Import/LibyulAST)
 add_subdirectory(Conversion/SolToYul)

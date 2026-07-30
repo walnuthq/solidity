@@ -1,0 +1,15 @@
+{
+    mstore(0x80, 0xdead)
+    mstore(0xa0, 0xbeef)
+    mstore8(0xc0, 0xff)
+    sstore(0, mload(0x80))
+    sstore(1, mload(0xa0))
+    sstore(2, mload(0xc0))
+    sstore(3, 12345)
+    sstore(4, sload(3))
+    mcopy(0xe0, 0x80, 32)
+    sstore(5, mload(0xe0))
+    sstore(6, keccak256(0x80, 64))
+    mstore(0, sload(4))
+    return(0, 32)
+}
