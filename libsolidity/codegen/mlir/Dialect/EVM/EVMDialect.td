@@ -172,6 +172,9 @@ def EVM_ByteOp : EVM_BinaryOp<"byte", [Pure]> {
 def EVM_SignExtendOp : EVM_BinaryOp<"signextend", [Pure]> {
   let summary = "Sign-extend from byte index";
 }
+def EVM_ClzOp : EVM_UnaryOp<"clz", [Pure]> {
+  let summary = "Count of leading zero bits; clz(0) is 256";
+}
 
 //===----------------------------------------------------------------------===//
 // Keccak and memory (byte-addressed, big-endian, zero-initialized)
@@ -354,6 +357,12 @@ def EVM_DataSizeOp : EVM_Op<"datasize", [Pure]> {
 }
 def EVM_DataCopyOp : EVM_TernaryStmtOp<"datacopy"> {
   let summary = "Copy an object/data segment to memory (dst, src, length)";
+}
+def EVM_LinkerSymbolOp : EVM_Op<"linkersymbol", [Pure]> {
+  let summary = "Address of a named library, resolved at link time";
+  let arguments = (ins StrAttr:$symbol);
+  let results = (outs EVM_Word:$result);
+  let assemblyFormat = "$symbol attr-dict";
 }
 def EVM_LoadImmutableOp : EVM_Op<"loadimmutable", [Pure]> {
   let summary = "Load a named immutable (deployed-code objects)";

@@ -28,6 +28,7 @@ STAGES = ["none", "import", "promote", "evm", "asm", "bytecode"]
 
 
 def compile_to_yul(solc, path, timeout):
+    """Returns one Yul source per contract in the file, or (None, reason)."""
     try:
         result = subprocess.run(
             [solc, "--ir-optimized", "--optimize", str(path)],
@@ -40,12 +41,23 @@ def compile_to_yul(solc, path, timeout):
     if result.returncode != 0:
         message = (result.stderr or "").strip().splitlines()
         return None, message[-1] if message else "solc failed"
-    # Strip the human-readable header preceding the first Yul object.
-    lines = result.stdout.splitlines()
-    for index, line in enumerate(lines):
-        if line.startswith("object "):
-            return "\n".join(lines[index:]), None
-    return None, "no Yul object in solc output"
+
+    # solc emits one object tree per contract, separated by prose headers whose
+    # wording varies. An unindented `object` is the reliable boundary, since
+    # nested objects are always indented; concatenating trees is not valid Yul.
+    sources = []
+    current = None
+    for line in result.stdout.splitlines():
+        if current is None:
+            if line.startswith("object "):
+                current = [line]
+            continue
+        current.append(line)
+        if line.rstrip() == "}":  # unindented brace closes the top-level object
+            sources.append("\n".join(current))
+            current = None
+
+    return (sources, None) if sources else (None, "no Yul object in solc output")
 
 
 def parse_results(stdout):
@@ -91,32 +103,35 @@ def main():
     total_bytes = 0
 
     for source in inputs:
-        yul, error = compile_to_yul(args.solc, source, args.timeout)
-        if yul is None:
+        contracts, error = compile_to_yul(args.solc, source, args.timeout)
+        if contracts is None:
             rejected[error[:90]] += 1
             records.append({"source": str(source), "outcome": "solc-rejected", "detail": error})
             continue
 
-        with tempfile.NamedTemporaryFile("w", suffix=".yul", delete=False) as handle:
-            handle.write(yul)
-            yul_path = handle.name
-        try:
-            driver = subprocess.run(
-                [args.yul2evm, yul_path], capture_output=True, text=True, timeout=args.timeout
-            )
-        except subprocess.TimeoutExpired:
-            rejected["yul2evm timed out"] += 1
-            continue
-        finally:
-            pathlib.Path(yul_path).unlink(missing_ok=True)
+        for yul in contracts:
+            with tempfile.NamedTemporaryFile("w", suffix=".yul", delete=False) as handle:
+                handle.write(yul)
+                yul_path = handle.name
+            try:
+                driver = subprocess.run(
+                    [args.yul2evm, yul_path], capture_output=True, text=True, timeout=args.timeout
+                )
+            except subprocess.TimeoutExpired:
+                rejected["yul2evm timed out"] += 1
+                continue
+            finally:
+                pathlib.Path(yul_path).unlink(missing_ok=True)
 
-        objects = parse_results(driver.stdout)
-        for record in objects:
-            histogram[record["stage"]] += 1
-            total_bytes += record["bytes"]
-            if record["stage"] != "bytecode":
-                reasons[record["detail"][:90]] += 1
-        records.append({"source": str(source), "objects": objects})
+            objects = parse_results(driver.stdout)
+            if not objects:
+                rejected["yul2evm produced no result line"] += 1
+            for record in objects:
+                histogram[record["stage"]] += 1
+                total_bytes += record["bytes"]
+                if record["stage"] != "bytecode":
+                    reasons[record["detail"][:90]] += 1
+            records.append({"source": str(source), "objects": objects})
 
     total = sum(histogram.values())
     print(f"\nsources: {len(inputs)}   yul objects: {total}   emitted bytes: {total_bytes}")

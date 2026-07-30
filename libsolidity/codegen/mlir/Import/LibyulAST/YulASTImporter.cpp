@@ -278,10 +278,10 @@ private:
 			m_builder.create(state);
 			return {};
 		}
+		if (name == "linkersymbol")
+			return {m_builder.create<mlir::yul::LinkerSymbolOp>(loc(), literalStringArgument(_call, "linkersymbol"))};
 		if (name.substr(0, 8) == "verbatim")
 			fail("verbatim builtins are not supported yet");
-		if (name == "linkersymbol")
-			fail("builtin '" + name + "' is not supported yet");
 
 		// Generic 1:1 builtin (ADR-003): op name == builtin name. Arguments
 		// are evaluated right-to-left per the Yul specification, keeping

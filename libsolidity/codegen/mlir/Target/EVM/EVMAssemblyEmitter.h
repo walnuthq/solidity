@@ -82,6 +82,9 @@ struct EVMSubObject
 {
 	std::string name;
 	std::shared_ptr<solidity::evmasm::Assembly> assembly;
+	/// Names of this object's own sub-objects, in the order it registered
+	/// them, so a qualified path like "Child.Grandchild" can be resolved.
+	std::vector<std::string> children;
 };
 
 /// A `data` segment of the object, addressable the same way.

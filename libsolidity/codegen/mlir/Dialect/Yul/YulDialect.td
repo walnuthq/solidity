@@ -261,6 +261,9 @@ def Yul_XorOp : Yul_BinaryOp<"xor", [Pure, Commutative]> {
 def Yul_NotOp : Yul_UnaryOp<"not", [Pure]> {
   let summary = "Bitwise negation";
 }
+def Yul_ClzOp : Yul_UnaryOp<"clz", [Pure]> {
+  let summary = "Count of leading zero bits in a 256-bit word";
+}
 def Yul_ByteOp : Yul_BinaryOp<"byte", [Pure]> {
   let summary = "Nth byte of a word, big-endian indexing (EVM BYTE)";
 }
@@ -529,6 +532,19 @@ def Yul_LoadImmutableOp : Yul_Op<"loadimmutable", [Pure]> {
     OpBuilder<(ins "::llvm::StringRef":$immutableName), [{
       $_state.getOrAddProperties<Properties>().immutable_name =
           $_builder.getStringAttr(immutableName);
+      $_state.addTypes($_builder.getIntegerType(256));
+    }]>
+  ];
+}
+def Yul_LinkerSymbolOp : Yul_Op<"linkersymbol", [Pure]> {
+  let summary = "Address of a named library, resolved at link time";
+  let arguments = (ins StrAttr:$symbol);
+  let results = (outs Yul_Word:$result);
+  let assemblyFormat = "$symbol attr-dict";
+  let builders = [
+    OpBuilder<(ins "::llvm::StringRef":$symbolName), [{
+      $_state.getOrAddProperties<Properties>().symbol =
+          $_builder.getStringAttr(symbolName);
       $_state.addTypes($_builder.getIntegerType(256));
     }]>
   ];

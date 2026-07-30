@@ -98,8 +98,12 @@ the same interface, since the operand order each opcode expects is already
 explicit.
 
 **Calling convention.** Arguments and results live in the callee's frame; only
-the return address travels on the stack. Frames are addressed absolutely, so
-recursion is detected up front and rejected rather than miscompiled.
+the return address travels on the stack. Frames are addressed absolutely, so a
+function that can re-enter itself would share slots between two live
+activations: those functions are found up front, and a call into one banks the
+callee's frame before the call and puts it back after. Results are parked on the
+stack across the restore, because in a self-call their destination slot is
+inside the frame being restored.
 
 **Object model.** The Yul object tree survives the import (`ImportedObject`
 carries its sub-objects and data segments), and objects are emitted leaf-first
@@ -139,16 +143,21 @@ python3 libsolidity/codegen/mlir/test/corpus_coverage.py \
 
 Current status:
 
-- **12/12 differential match** on the hand-written corpus, which covers the
+- **15/15 differential match** on the hand-written corpus, which covers the
   §5 landmines (div/mod by zero, `SDIV(MIN,-1)`, shifts >= 256, addmod/mulmod
   wide intermediates, `EXP`, `BYTE`, `SIGNEXTEND`), comparisons, if/switch/
   nested loops with break and continue, multi-return functions with `leave`,
-  memory and storage, and revert paths.
-- **21 contracts deploy and agree** end to end (`deploy_differential.py`):
+  memory and storage, revert paths, and direct and mutual recursion with locals
+  live across the recursive call.
+- **24 contracts deploy and agree** end to end (`deploy_differential.py`):
   creation code compiled through the ladder deploys, installs runtime code, and
   answers every selector in the ABI exactly as the `solc --via-ir` build does -
   up to 200 selectors per contract, with zero semantic divergences. The four
   that fail all emit creation code too large for the chain to accept.
-- **Coverage on solar's `tests/ui/codegen`**: 246 objects, **227 (92.3%) reach
-  bytecode**. What remains is three uses of the `clz` builtin the `yul` dialect
-  lacks, seven recursive functions, and the objects that nest them.
+- **Coverage on solar's `tests/ui/codegen`**: 358 Yul objects, **all of them
+  reach bytecode**.
+
+The remaining gap is size, not correctness: the memory-resident value model
+emits roughly 4-6x the reference, and on the largest contracts that is enough
+for the chain to refuse the creation code. That is what the stack scheduler
+fixes.

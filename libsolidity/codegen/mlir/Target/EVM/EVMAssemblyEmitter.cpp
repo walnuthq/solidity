@@ -65,6 +65,10 @@ struct EmitError
 /// The EVM word slot size, in bytes.
 constexpr uint64_t kWord = 32;
 
+/// Largest frame this backend will save with an unrolled copy when the target
+/// EVM version has no MCOPY.
+constexpr uint64_t kMaxUnrolledFrameWords = 64;
+
 u256 toU256(llvm::APInt const& _value)
 {
 	llvm::APInt widened = _value.zextOrTrunc(256);
@@ -97,7 +101,7 @@ public:
 	{
 		registerSegments();
 		collectFunctions(_module);
-		rejectRecursion();
+		findRecursion();
 		layoutFrames();
 
 		// Tags have to exist before any call or branch can reference them.
@@ -106,6 +110,14 @@ public:
 			m_functionTags.emplace(func.getName().str(), m_assembly->newTag());
 			for (mlir::Block& block: func.getBody())
 				m_blockTags.emplace(&block, m_assembly->newTag());
+		}
+
+		// Emitted at offset zero, ahead of the entry tag, so it runs once on
+		// every entry into the object and falls straight through.
+		if (!m_recursive.empty())
+		{
+			push(u256(m_saveBase));
+			storeToAddress(m_savePointer);
 		}
 
 		// The object entry has to sit at offset zero; everything else follows.
@@ -153,9 +165,10 @@ private:
 			fail("module contains no functions");
 	}
 
-	/// Frames are addressed absolutely, so two live activations of the same
-	/// function would share slots. Reject rather than miscompile.
-	void rejectRecursion()
+	/// Frames are addressed absolutely, so two live activations of one function
+	/// would share slots. Find the functions that can re-enter themselves; a
+	/// call into one of those has its frame saved and restored around the call.
+	void findRecursion()
 	{
 		std::map<std::string, std::vector<std::string>> callees;
 		for (mlir::func::FuncOp func: m_functions)
@@ -164,40 +177,27 @@ private:
 			func.walk([&](mlir::func::CallOp _call) { out.push_back(_call.getCallee().str()); });
 		}
 
-		std::set<std::string> done;
-		std::set<std::string> onPath;
-		std::vector<std::string> cycle;
-
-		std::function<bool(std::string const&)> visit = [&](std::string const& _name) -> bool
-		{
-			if (onPath.count(_name))
-			{
-				cycle.push_back(_name);
-				return true;
-			}
-			if (done.count(_name))
-				return false;
-			onPath.insert(_name);
-			for (std::string const& callee: callees[_name])
-				if (m_byName.count(callee) && visit(callee))
-				{
-					cycle.push_back(_name);
-					return true;
-				}
-			onPath.erase(_name);
-			done.insert(_name);
-			return false;
-		};
-
+		// A function needs saving exactly when it can reach itself.
 		for (mlir::func::FuncOp func: m_functions)
-			if (visit(func.getName().str()))
+		{
+			std::string const start = func.getName().str();
+			std::set<std::string> seen;
+			std::vector<std::string> worklist = callees[start];
+			while (!worklist.empty())
 			{
-				std::reverse(cycle.begin(), cycle.end());
-				std::string path;
-				for (std::string const& name: cycle)
-					path += (path.empty() ? "" : " -> ") + name;
-				fail("recursion is not supported by the memory-frame calling convention: " + path);
+				std::string const current = worklist.back();
+				worklist.pop_back();
+				if (current == start)
+				{
+					m_recursive.insert(start);
+					break;
+				}
+				if (!m_byName.count(current) || !seen.insert(current).second)
+					continue;
+				for (std::string const& next: callees[current])
+					worklist.push_back(next);
 			}
+		}
 	}
 
 	void layoutFrames()
@@ -237,6 +237,11 @@ private:
 			next += slot * kWord;
 			m_frames[func.getName().str()] = std::move(frame);
 		}
+
+		// Saved frames of recursive activations grow upwards from just past the
+		// static frames, addressed through one pointer word.
+		m_savePointer = next;
+		m_saveBase = next + kWord;
 	}
 
 	Frame const& frameOf(mlir::func::FuncOp _func) const { return m_frames.at(_func.getName().str()); }
@@ -297,6 +302,70 @@ private:
 	{
 		for (int i = static_cast<int>(_op.getNumOperands()) - 1; i >= 0; --i)
 			pushValue(_op.getOperand(static_cast<unsigned>(i)));
+	}
+
+	/// Copies @a _words words between a static frame address and the save
+	/// region the pointer word currently points at.
+	void copyFrame(uint64_t _frameAddress, uint64_t _words, bool _toSaveArea)
+	{
+		uint64_t const bytes = _words * kWord;
+		if (m_options.evmVersion.hasMcopy())
+		{
+			push(u256(bytes));                      // length
+			if (_toSaveArea)
+			{
+				push(u256(_frameAddress));          // source
+				push(u256(m_savePointer));
+				op(Instruction::MLOAD);             // destination
+			}
+			else
+			{
+				push(u256(m_savePointer));
+				op(Instruction::MLOAD);             // source
+				push(u256(_frameAddress));          // destination
+			}
+			op(Instruction::MCOPY);
+			return;
+		}
+
+		// Without MCOPY the copy is unrolled, which is only reasonable for the
+		// small frames recursive helpers tend to have.
+		if (_words > kMaxUnrolledFrameWords)
+			fail(
+				"recursive function needs a " + std::to_string(_words)
+				+ "-word frame copy, which requires an EVM version with MCOPY");
+		for (uint64_t index = 0; index < _words; ++index)
+		{
+			uint64_t const offset = index * kWord;
+			if (_toSaveArea)
+			{
+				push(u256(_frameAddress + offset));
+				op(Instruction::MLOAD); // value
+				push(u256(offset));
+				push(u256(m_savePointer));
+				op(Instruction::MLOAD);
+				op(Instruction::ADD); // destination
+			}
+			else
+			{
+				push(u256(offset));
+				push(u256(m_savePointer));
+				op(Instruction::MLOAD);
+				op(Instruction::ADD);
+				op(Instruction::MLOAD);            // value
+				push(u256(_frameAddress + offset)); // destination
+			}
+			op(Instruction::MSTORE);
+		}
+	}
+
+	void adjustSavePointer(uint64_t _bytes, bool _grow)
+	{
+		push(u256(_bytes));
+		push(u256(m_savePointer));
+		op(Instruction::MLOAD);
+		op(_grow ? Instruction::ADD : Instruction::SUB);
+		storeToAddress(m_savePointer);
 	}
 
 	void emitFunction(mlir::func::FuncOp _func)
@@ -417,12 +486,54 @@ private:
 		return attr.getValue().str();
 	}
 
+	/// A path naming an object inside one of our own sub-objects. Sub-assembly
+	/// ids are handed out in registration order, so the position of each name
+	/// in its parent's list is its id, and the chain encodes to a single id.
+	void emitNestedSegmentQuery(
+		mlir::Operation& _op, std::string const& _child, std::string const& _rest, bool _wantSize)
+	{
+		if (_rest.find('.') != std::string::npos)
+			fail("segment path '" + _child + "." + _rest + "' nests deeper than this target resolves");
+
+		std::vector<SubAssemblyID> path;
+		for (size_t index = 0; index < m_options.subObjects.size(); ++index)
+			if (m_options.subObjects[index].name == _child)
+			{
+				path.emplace_back(static_cast<SubAssemblyID::ValueType>(index));
+				std::vector<std::string> const& grandchildren = m_options.subObjects[index].children;
+				for (size_t inner = 0; inner < grandchildren.size(); ++inner)
+					if (grandchildren[inner] == _rest)
+					{
+						path.emplace_back(static_cast<SubAssemblyID::ValueType>(inner));
+						break;
+					}
+				break;
+			}
+		if (path.size() != 2)
+			fail("object references unknown segment '" + _child + "." + _rest + "'");
+
+		SubAssemblyID const encoded = m_assembly->encodeSubPath(path);
+		if (_wantSize)
+			m_assembly->pushSubroutineSize(encoded);
+		else
+			m_assembly->pushSubroutineOffset(encoded);
+		storeResult(_op.getResult(0));
+	}
+
 	/// `dataoffset`/`datasize` of a nested object or data segment. Offsets and
 	/// sizes are only known once the whole assembly is laid out, so both become
 	/// relocations rather than computed constants.
 	void emitSegmentQuery(mlir::Operation& _op, bool _wantSize)
 	{
-		std::string const segment = stringAttr(_op, "segment");
+		std::string segment = stringAttr(_op, "segment");
+
+		// Segment names are paths relative to the enclosing object, so they may
+		// be qualified with the name of the object doing the referring.
+		std::string const ownPrefix = m_options.name + ".";
+		if (segment.rfind(ownPrefix, 0) == 0)
+			segment = segment.substr(ownPrefix.size());
+		if (size_t const dot = segment.find('.'); dot != std::string::npos)
+			return emitNestedSegmentQuery(_op, segment.substr(0, dot), segment.substr(dot + 1), _wantSize);
 
 		if (auto sub = m_subObjects.find(segment); sub != m_subObjects.end())
 		{
@@ -461,6 +572,12 @@ private:
 
 		if (mnemonic == "dataoffset" || mnemonic == "datasize")
 			return emitSegmentQuery(_op, mnemonic == "datasize");
+		if (mnemonic == "linkersymbol")
+		{
+			m_assembly->appendLibraryAddress(stringAttr(_op, "symbol"));
+			storeResult(_op.getResult(0));
+			return;
+		}
 		if (mnemonic == "loadimmutable")
 		{
 			m_assembly->appendImmutable(stringAttr(_op, "immutable_name"));
@@ -553,11 +670,21 @@ private:
 		if (_call.getNumOperands() != calleeFrame.argSlots.size())
 			fail("argument count mismatch calling '" + callee + "'");
 
-		for (unsigned i = 0; i < _call.getNumOperands(); ++i)
+		// A function that can re-enter itself would overwrite the live frame of
+		// the activation below it, so the caller banks it first.
+		bool const savesFrame = m_recursive.count(callee) != 0 && calleeFrame.size > 0;
+		if (savesFrame)
 		{
-			pushValue(_call.getOperand(i));
-			storeToAddress(calleeFrame.base + calleeFrame.argSlots[i] * kWord);
+			copyFrame(calleeFrame.base, calleeFrame.size, /*toSaveArea=*/true);
+			adjustSavePointer(calleeFrame.size * kWord, /*grow=*/true);
 		}
+
+		// In a self-call the argument slots being written belong to the frame
+		// the arguments are read from, so read every one before writing any.
+		for (unsigned i = 0; i < _call.getNumOperands(); ++i)
+			pushValue(_call.getOperand(i));
+		for (unsigned i = _call.getNumOperands(); i > 0; --i)
+			storeToAddress(calleeFrame.base + calleeFrame.argSlots[i - 1] * kWord);
 
 		AssemblyItem returnTag = m_assembly->newTag();
 		m_assembly->append(returnTag.pushTag());
@@ -565,12 +692,24 @@ private:
 		m_assembly->append(returnTag);
 		anchorStackHeight(); // the callee consumed the return address
 
+		// Results are read out of the callee's frame before the restore puts it
+		// back, but they are parked on the stack rather than in a slot: in a
+		// self-call the destination slot lives in the frame being restored and
+		// would be overwritten again.
 		for (unsigned i = 0; i < _call.getNumResults(); ++i)
 		{
 			push(u256(calleeFrame.base + calleeFrame.resultSlots[i] * kWord));
 			op(Instruction::MLOAD);
-			storeResult(_call.getResult(i));
 		}
+
+		if (savesFrame)
+		{
+			adjustSavePointer(calleeFrame.size * kWord, /*grow=*/false);
+			copyFrame(calleeFrame.base, calleeFrame.size, /*toSaveArea=*/false);
+		}
+
+		for (unsigned i = _call.getNumResults(); i > 0; --i)
+			storeResult(_call.getResult(i - 1));
 	}
 
 	void emitReturn(mlir::func::ReturnOp _return)
@@ -599,6 +738,9 @@ private:
 	std::map<mlir::Block*, AssemblyItem> m_blockTags;
 	std::map<std::string, SubAssemblyID> m_subObjects;
 	std::map<std::string, AssemblyItem> m_dataSegments;
+	std::set<std::string> m_recursive;
+	uint64_t m_savePointer = 0;
+	uint64_t m_saveBase = 0;
 
 	Frame const* m_frame = nullptr;
 	mlir::func::FuncOp m_currentFunc;

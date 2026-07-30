@@ -148,7 +148,12 @@ int main(int argc, char** argv)
 				// the deployed artifact that code returns.
 				options.creation = (current == 0);
 				for (size_t child: object.subObjects)
-					options.subObjects.push_back({objects[child].name, emitted[child]});
+				{
+					std::vector<std::string> grandchildren;
+					for (size_t inner: objects[child].subObjects)
+						grandchildren.push_back(objects[inner].name);
+					options.subObjects.push_back({objects[child].name, emitted[child], grandchildren});
+				}
 				for (auto const& segment: object.dataSegments)
 					options.dataSegments.push_back({segment.name, segment.data});
 

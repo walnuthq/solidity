@@ -388,6 +388,11 @@ private:
 			m_map[dataSize.getResult()] = createAttrOp("evm.datasize", "segment", dataSize.getSegment());
 			return false;
 		}
+		if (auto linkerSymbol = llvm::dyn_cast<mlir::yul::LinkerSymbolOp>(&_op))
+		{
+			m_map[linkerSymbol.getResult()] = createAttrOp("evm.linkersymbol", "symbol", linkerSymbol.getSymbol());
+			return false;
+		}
 		if (auto loadImmutable = llvm::dyn_cast<mlir::yul::LoadImmutableOp>(&_op))
 		{
 			m_map[loadImmutable.getResult()] =

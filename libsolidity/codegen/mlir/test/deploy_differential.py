@@ -78,12 +78,18 @@ def mlir_creation(solc, yul2evm, path):
     compiled = run([solc, "--ir-optimized", "--optimize", str(path)])
     if compiled.returncode != 0:
         return None, "solc rejected the source"
+    # Take the first contract's object tree only. solc emits one per contract;
+    # an unindented `object` starts the next one, and concatenating them is not
+    # valid Yul.
     lines = compiled.stdout.splitlines()
     start = next((i for i, line in enumerate(lines) if line.startswith("object ")), None)
     if start is None:
         return None, "no Yul object"
+    end = next(
+        (i + 1 for i in range(start + 1, len(lines)) if lines[i].rstrip() == "}"), len(lines)
+    )
     with tempfile.NamedTemporaryFile("w", suffix=".yul", delete=False) as handle:
-        handle.write("\n".join(lines[start:]))
+        handle.write("\n".join(lines[start:end]))
         yul_path = handle.name
     try:
         driver = run([yul2evm, yul_path, "--hex"])
