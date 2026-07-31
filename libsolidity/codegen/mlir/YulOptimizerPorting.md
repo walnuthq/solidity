@@ -104,6 +104,22 @@ defines halts execution rather than returning, so both `handleTerminator` hooks
 are empty — the base class declares them unreachable, which is what any function
 containing a `revert` tripped over.
 
+**The algebraic identities are in, and they buy nothing here yet.** The
+single-operand rules from `libevmasm/RuleList.h` — `div(x,1)`, `exp(x,0)`,
+`shl(0,x)`, `mulmod(x,0,m)` and the rest — are folds on the `evm` ops, since
+`OpFoldResult` carries a value and not only an attribute. A test built entirely
+of them compiles to 135 bytes against the reference's 128, so they fire and they
+are right.
+
+Over the semantic suite they save **four bytes in four million**. That is not a
+disappointment, it is the measurement telling us where they belong: the input
+has already been through solc's `ExpressionSimplifier`, which applies these same
+rules, so there is nothing left to find. They exist for the direct `sol` ->
+`yul` path, where no Yul optimizer will have run — which is the whole reason
+this document exists. What is *not* done is the pattern-matching half of the
+table: combining two shifts, narrowing a mask through a shift, and the rest of
+the multi-op rewrites, which need real rewrite patterns rather than folds.
+
 **Memory effects are in.** EVM state spaces cannot alias, so storage, transient
 storage and memory are three distinct side-effect resources (`EVMDialect.h`),
 and the fourteen state ops declare which one they read or write. Eighteen
@@ -123,8 +139,8 @@ symbols are relocations and can be far larger than a reload. Net over the suite:
 
 | Pass | Lines | Note |
 |---|---|---|
-| `SimplificationRules` | 279 | The algebraic identity table. Mostly declarative, so it maps well onto MLIR's rewrite-rule generators rather than hand-written C++ |
-| `ExpressionSimplifier` | 93 | The driver for the above |
+| `SimplificationRules` | 279 | The algebraic identity subset is done — see below. The pattern-matching rules (shift combining, mask narrowing) are not |
+| `ExpressionSimplifier` | 93 | Upstream `-canonicalize` is the driver |
 | `LoadResolver` | 160 | Storage/memory load forwarding |
 | `UnusedStoreEliminator` | 438 | Dead store elimination under EVM's side-effect rules |
 | `EqualStoreEliminator` | 69 | |

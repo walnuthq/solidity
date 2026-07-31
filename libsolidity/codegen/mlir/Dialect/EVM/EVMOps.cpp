@@ -67,10 +67,23 @@ OpFoldResult wordResult(Type _type, llvm::APInt const& _value)
 
 OpFoldResult zero(Type _type) { return wordResult(_type, llvm::APInt(256, 0)); }
 
+OpFoldResult one(Type _type) { return wordResult(_type, llvm::APInt(256, 1)); }
+
+/// Whether a folded operand is exactly @a _literal.
+bool isLiteral(Attribute _attribute, uint64_t _literal)
+{
+	std::optional<llvm::APInt> const value = word(_attribute);
+	return value && *value == _literal;
+}
+
 } // anonymous namespace
 
 OpFoldResult DivOp::fold(FoldAdaptor _adaptor)
 {
+	if (isLiteral(_adaptor.getRhs(), 1))
+		return getLhs();
+	if (isLiteral(_adaptor.getLhs(), 0))
+		return zero(getType());
 	std::optional<llvm::APInt> const divisor = word(_adaptor.getRhs());
 	if (!divisor)
 		return {};
@@ -82,6 +95,10 @@ OpFoldResult DivOp::fold(FoldAdaptor _adaptor)
 
 OpFoldResult SDivOp::fold(FoldAdaptor _adaptor)
 {
+	if (isLiteral(_adaptor.getRhs(), 1))
+		return getLhs();
+	if (isLiteral(_adaptor.getLhs(), 0))
+		return zero(getType());
 	std::optional<llvm::APInt> const divisor = word(_adaptor.getRhs());
 	if (!divisor)
 		return {};
@@ -98,6 +115,8 @@ OpFoldResult SDivOp::fold(FoldAdaptor _adaptor)
 
 OpFoldResult ModOp::fold(FoldAdaptor _adaptor)
 {
+	if (isLiteral(_adaptor.getRhs(), 1) || isLiteral(_adaptor.getLhs(), 0))
+		return zero(getType());
 	std::optional<llvm::APInt> const modulus = word(_adaptor.getRhs());
 	if (!modulus)
 		return {};
@@ -109,6 +128,8 @@ OpFoldResult ModOp::fold(FoldAdaptor _adaptor)
 
 OpFoldResult SModOp::fold(FoldAdaptor _adaptor)
 {
+	if (isLiteral(_adaptor.getRhs(), 1) || isLiteral(_adaptor.getLhs(), 0))
+		return zero(getType());
 	std::optional<llvm::APInt> const modulus = word(_adaptor.getRhs());
 	if (!modulus)
 		return {};
@@ -125,6 +146,8 @@ OpFoldResult SModOp::fold(FoldAdaptor _adaptor)
 
 OpFoldResult AddModOp::fold(FoldAdaptor _adaptor)
 {
+	if (isLiteral(_adaptor.getC(), 1))
+		return zero(getType());
 	std::optional<llvm::APInt> const modulus = word(_adaptor.getC());
 	if (!modulus)
 		return {};
@@ -142,6 +165,8 @@ OpFoldResult AddModOp::fold(FoldAdaptor _adaptor)
 
 OpFoldResult MulModOp::fold(FoldAdaptor _adaptor)
 {
+	if (isLiteral(_adaptor.getC(), 1) || isLiteral(_adaptor.getA(), 0) || isLiteral(_adaptor.getB(), 0))
+		return zero(getType());
 	std::optional<llvm::APInt> const modulus = word(_adaptor.getC());
 	if (!modulus)
 		return {};
@@ -158,6 +183,12 @@ OpFoldResult MulModOp::fold(FoldAdaptor _adaptor)
 
 OpFoldResult ExpOp::fold(FoldAdaptor _adaptor)
 {
+	// x^1 is x, and both x^0 and 1^x are 1 - including 0^0, which the EVM
+	// defines as 1.
+	if (isLiteral(_adaptor.getRhs(), 1))
+		return getLhs();
+	if (isLiteral(_adaptor.getRhs(), 0) || isLiteral(_adaptor.getLhs(), 1))
+		return one(getType());
 	std::optional<llvm::APInt> const base = word(_adaptor.getLhs());
 	std::optional<llvm::APInt> const exponent = word(_adaptor.getRhs());
 	if (!base || !exponent)
@@ -188,6 +219,10 @@ bool shiftedOut(llvm::APInt const& _amount) { return _amount.uge(256); }
 
 OpFoldResult ShlOp::fold(FoldAdaptor _adaptor)
 {
+	if (isLiteral(_adaptor.getLhs(), 0))
+		return getRhs(); // shifting by nothing
+	if (isLiteral(_adaptor.getRhs(), 0))
+		return zero(getType());
 	std::optional<llvm::APInt> const amount = word(_adaptor.getLhs());
 	if (!amount)
 		return {};
@@ -199,6 +234,10 @@ OpFoldResult ShlOp::fold(FoldAdaptor _adaptor)
 
 OpFoldResult ShrOp::fold(FoldAdaptor _adaptor)
 {
+	if (isLiteral(_adaptor.getLhs(), 0))
+		return getRhs(); // shifting by nothing
+	if (isLiteral(_adaptor.getRhs(), 0))
+		return zero(getType());
 	std::optional<llvm::APInt> const amount = word(_adaptor.getLhs());
 	if (!amount)
 		return {};
@@ -210,6 +249,10 @@ OpFoldResult ShrOp::fold(FoldAdaptor _adaptor)
 
 OpFoldResult SarOp::fold(FoldAdaptor _adaptor)
 {
+	if (isLiteral(_adaptor.getLhs(), 0))
+		return getRhs();
+	if (isLiteral(_adaptor.getRhs(), 0))
+		return zero(getType()); // the sign of zero is zero
 	std::optional<llvm::APInt> const amount = word(_adaptor.getLhs());
 	std::optional<llvm::APInt> const value = word(_adaptor.getRhs());
 	if (!amount || !value)
@@ -222,6 +265,8 @@ OpFoldResult SarOp::fold(FoldAdaptor _adaptor)
 
 OpFoldResult ByteOp::fold(FoldAdaptor _adaptor)
 {
+	if (isLiteral(_adaptor.getRhs(), 0))
+		return zero(getType());
 	std::optional<llvm::APInt> const index = word(_adaptor.getLhs());
 	if (!index)
 		return {};
@@ -237,6 +282,8 @@ OpFoldResult ByteOp::fold(FoldAdaptor _adaptor)
 
 OpFoldResult SignExtendOp::fold(FoldAdaptor _adaptor)
 {
+	if (isLiteral(_adaptor.getRhs(), 0))
+		return zero(getType());
 	std::optional<llvm::APInt> const index = word(_adaptor.getLhs());
 	std::optional<llvm::APInt> const value = word(_adaptor.getRhs());
 	if (!index || !value)

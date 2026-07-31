@@ -1,0 +1,27 @@
+{
+    // Operands come from calldata so nothing folds to a constant; the
+    // identities have to fire on non-constant values or not at all.
+    let x := calldataload(0)
+    let n := calldataload(32)
+    sstore(0, div(x, 1))
+    sstore(1, sdiv(x, 1))
+    sstore(2, mod(x, 1))
+    sstore(3, smod(x, 1))
+    sstore(4, exp(x, 1))
+    sstore(5, exp(x, 0))
+    sstore(6, exp(1, x))
+    sstore(7, shl(0, x))
+    sstore(8, shr(0, x))
+    sstore(9, sar(0, x))
+    sstore(10, shl(n, 0))
+    sstore(11, sar(n, 0))
+    sstore(12, addmod(x, n, 1))
+    sstore(13, mulmod(x, n, 1))
+    sstore(14, mulmod(x, 0, n))
+    sstore(15, byte(n, 0))
+    sstore(16, signextend(n, 0))
+    sstore(17, div(0, x))
+    sstore(18, mod(0, x))
+    mstore(0, exp(x, 1))
+    return(0, 32)
+}
