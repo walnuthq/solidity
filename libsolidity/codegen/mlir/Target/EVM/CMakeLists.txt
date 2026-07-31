@@ -3,6 +3,7 @@
 if(MLIR_FOUND)
     add_library(EVMAsmTarget STATIC
         EVMAssemblyEmitter.cpp
+        EVMPipeline.cpp
     )
 
     target_include_directories(EVMAsmTarget PUBLIC
@@ -11,6 +12,8 @@ if(MLIR_FOUND)
     )
 
     target_link_libraries(EVMAsmTarget PUBLIC
+        YulASTImport
+        YulToEVMConversion
         EVMMLIRDialect
         MLIRArithDialect
         MLIRControlFlowDialect
@@ -22,6 +25,7 @@ if(MLIR_FOUND)
 
     set_source_files_properties(
         EVMAssemblyEmitter.cpp
+        EVMPipeline.cpp
         PROPERTIES COMPILE_FLAGS "-Wno-error -w"
     )
 endif()

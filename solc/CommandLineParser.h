@@ -81,6 +81,7 @@ struct CompilerOutputs
 			{"ir-ast-json", &CompilerOutputs::irAstJson},
 			{"ir-optimized", &CompilerOutputs::irOptimized},
 			{"ir-optimized-ast-json", &CompilerOutputs::irOptimizedAstJson},
+			{"mlir-bin", &CompilerOutputs::mlirBinary},
 			{"hashes", &CompilerOutputs::signatureHashes},
 			{"userdoc", &CompilerOutputs::natspecUser},
 			{"devdoc", &CompilerOutputs::natspecDev},
@@ -108,6 +109,7 @@ struct CompilerOutputs
 	bool yulCFGJson = false;
 	bool irOptimized = false;
 	bool irOptimizedAstJson = false;
+	bool mlirBinary = false;
 	bool signatureHashes = false;
 	bool natspecUser = false;
 	bool natspecDev = false;

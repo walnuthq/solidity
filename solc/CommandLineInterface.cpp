@@ -44,6 +44,10 @@
 #include <libevmasm/Ethdebug.h>
 #include <libevmasm/Disassemble.h>
 
+#ifdef SOLIDITY_HAS_MLIR
+#include <libsolidity/codegen/mlir/Target/EVM/EVMPipeline.h>
+#endif
+
 #include <liblangutil/Exceptions.h>
 #include <liblangutil/SourceReferenceFormatter.h>
 
@@ -320,6 +324,36 @@ void CommandLineInterface::handleYulCFGExport(std::string const& _contractName)
 			m_options.formatting.json
 		) << std::endl;
 	}
+}
+
+void CommandLineInterface::handleMLIRBinary([[maybe_unused]] std::string const& _contractName)
+{
+	solAssert(CompilerInputModes.count(m_options.input.mode) == 1);
+
+	if (!m_options.compiler.outputs.mlirBinary)
+		return;
+
+#ifdef SOLIDITY_HAS_MLIR
+	std::optional<std::string> const& ir = m_compiler->yulIROptimized(_contractName);
+	if (!ir || ir->empty())
+		solThrow(CommandLineExecutionError, "--mlir-bin requires --via-ir, which produces the Yul the ladder consumes.");
+
+	bytes bytecode;
+	std::string error;
+	if (!mlirgen::compileYulToEVMBytecode(_contractName, *ir, m_options.output.evmVersion, bytecode, error))
+		solThrow(CommandLineExecutionError, "MLIR pipeline failed for " + _contractName + ": " + error);
+
+	std::string const hex = util::toHex(bytecode);
+	if (!m_options.output.dir.empty())
+		createFile(m_compiler->filesystemFriendlyName(_contractName) + "_mlir.bin", hex);
+	else
+	{
+		sout() << "Binary (MLIR pipeline):" << std::endl;
+		sout() << hex << std::endl;
+	}
+#else
+	solThrow(CommandLineExecutionError, "This binary was built without MLIR support, so --mlir-bin is unavailable.");
+#endif
 }
 
 void CommandLineInterface::handleIROptimized(std::string const& _contractName)
@@ -948,7 +982,9 @@ void CommandLineInterface::compile()
 		pipelineConfig.irOptimization =
 			m_options.compiler.outputs.irOptimized ||
 			m_options.compiler.outputs.irOptimizedAstJson ||
-			m_options.compiler.outputs.yulCFGJson;
+			m_options.compiler.outputs.yulCFGJson ||
+			// The MLIR ladder consumes the optimized IR as its input.
+			m_options.compiler.outputs.mlirBinary;
 		pipelineConfig.irCodegen =
 			pipelineConfig.irOptimization ||
 			m_options.compiler.outputs.ir ||
@@ -1465,6 +1501,7 @@ void CommandLineInterface::outputCompilationResults()
 			handleIRAst(contract);
 			handleIROptimized(contract);
 			handleIROptimizedAst(contract);
+			handleMLIRBinary(contract);
 			handleYulCFGExport(contract);
 			handleSignatureHashes(contract);
 			handleMetadata(contract);

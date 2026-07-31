@@ -173,10 +173,12 @@ set(sources
 add_library(solidity ${sources})
 target_link_libraries(solidity PUBLIC yul evmasm langutil smtutil solutil Boost::boost fmt::fmt-header-only Threads::Threads)
 
-# MLIR dialect ladder (sol -> yul -> evm -> RISC-V); standalone libraries,
-# only built when MLIR is available (see root CMakeLists).
+# MLIR dialect ladder (sol -> yul -> evm -> RISC-V/EVM); only built when MLIR is
+# available (see root CMakeLists). The EVM side is linked into the library so
+# solc itself can offer it as a backend; the RISC-V side stays standalone.
 if(MLIR_FOUND)
     add_subdirectory(codegen/mlir)
+    target_link_libraries(solidity PUBLIC EVMAsmTarget YulToEVMConversion YulASTImport)
 endif()
 if (EMSCRIPTEN)
     if(NOT ${Z3_FOUND})

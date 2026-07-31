@@ -56,56 +56,91 @@ class Rpc:
         return body.get("result"), body.get("error")
 
 
-def reference_creation(solc, path):
-    result = run([solc, "--via-ir", "--optimize", "--bin", str(path)])
+def reference_contracts(solc, path):
+    """Returns {contract name: (creation hex, [selectors])} from the reference build.
+
+    solc emits one section per contract; pairing them by name matters, because
+    a multi-contract file lists them in an order that need not match the IR
+    output, and comparing one contract's code against another's selectors is
+    what makes an unrelated contract look like a miscompile.
+    """
+    result = run([solc, "--via-ir", "--optimize", "--bin", "--hashes", str(path)])
     if result.returncode != 0:
-        return None
-    lines = result.stdout.splitlines()
-    for index, line in enumerate(lines):
-        if line.startswith("Binary:") and index + 1 < len(lines):
-            code = lines[index + 1].strip()
-            if code and all(c in "0123456789abcdef" for c in code):
-                return code
-    return None
+        return {}
+
+    contracts = {}
+    name = None
+    expecting_binary = False
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("======="):
+            name = stripped.strip("= ").split(":")[-1]
+            contracts.setdefault(name, ["", []])
+            expecting_binary = False
+        elif name is None:
+            continue
+        elif stripped == "Binary:":
+            expecting_binary = True
+        elif expecting_binary:
+            if stripped and all(c in "0123456789abcdef" for c in stripped):
+                contracts[name][0] = stripped
+            expecting_binary = False
+        else:
+            match = re.match(r"^([0-9a-f]{8}):", stripped)
+            if match:
+                contracts[name][1].append(match.group(1))
+
+    # A contract needing a library cannot be deployed as emitted, so there is
+    # nothing meaningful to compare it against.
+    return {
+        contract: (code, selectors)
+        for contract, (code, selectors) in contracts.items()
+        if code and "__$" not in code
+    }
 
 
-def selectors(solc, path):
-    result = run([solc, "--via-ir", "--hashes", str(path)])
-    return sorted(set(re.findall(r"^([0-9a-f]{8}):", result.stdout, re.MULTILINE)))
-
-
-def mlir_creation(solc, yul2evm, path):
+def mlir_contracts(solc, yul2evm, path):
+    """Returns {contract name: creation hex} for the same file via the ladder."""
     compiled = run([solc, "--ir-optimized", "--optimize", str(path)])
     if compiled.returncode != 0:
-        return None, "solc rejected the source"
-    # Take the first contract's object tree only. solc emits one per contract;
-    # an unindented `object` starts the next one, and concatenating them is not
-    # valid Yul.
-    lines = compiled.stdout.splitlines()
-    start = next((i for i, line in enumerate(lines) if line.startswith("object ")), None)
-    if start is None:
-        return None, "no Yul object"
-    end = next(
-        (i + 1 for i in range(start + 1, len(lines)) if lines[i].rstrip() == "}"), len(lines)
-    )
-    with tempfile.NamedTemporaryFile("w", suffix=".yul", delete=False) as handle:
-        handle.write("\n".join(lines[start:end]))
-        yul_path = handle.name
-    try:
-        driver = run([yul2evm, yul_path, "--hex"])
-    finally:
-        pathlib.Path(yul_path).unlink(missing_ok=True)
+        return {}, "solc rejected the source"
 
-    # The first HEX line is the root object, i.e. the creation code.
-    for line in driver.stdout.splitlines():
-        if line.startswith("HEX "):
-            return line.rsplit(" ", 1)[1], None
-    reason = "did not reach bytecode"
-    for line in driver.stdout.splitlines():
-        if line.startswith("RESULT ") and 'detail="' in line:
-            reason = line.split('detail="', 1)[1].rstrip('"')
-            break
-    return None, reason
+    # One object tree per contract; an unindented `object` starts a tree and an
+    # unindented brace closes it.
+    trees, current = [], None
+    for line in compiled.stdout.splitlines():
+        if current is None:
+            if line.startswith("object "):
+                current = [line]
+            continue
+        current.append(line)
+        if line.rstrip() == "}":
+            trees.append("\n".join(current))
+            current = None
+
+    results, reason = {}, "did not reach bytecode"
+    for tree in trees:
+        with tempfile.NamedTemporaryFile("w", suffix=".yul", delete=False) as handle:
+            handle.write(tree)
+            yul_path = handle.name
+        try:
+            driver = run([yul2evm, yul_path, "--hex"])
+        finally:
+            pathlib.Path(yul_path).unlink(missing_ok=True)
+
+        for line in driver.stdout.splitlines():
+            if line.startswith("HEX "):
+                # object="Name_42" -> Name; the driver quotes names doubly.
+                label = re.search(r'object="+([^"]+)"+', line)
+                if label:
+                    results[label.group(1).rsplit("_", 1)[0]] = line.rsplit(" ", 1)[1]
+                break
+        else:
+            for line in driver.stdout.splitlines():
+                if line.startswith("RESULT ") and 'detail="' in line:
+                    reason = line.split('detail="', 1)[1].rstrip('"')
+                    break
+    return results, reason
 
 
 def deploy(code, rpc):
@@ -147,55 +182,55 @@ def main():
     rpc = Rpc(args.rpc)
     passed = failed = skipped = 0
     for source in inputs:
-        reference = reference_creation(args.solc, source)
-        if reference is None:
+        reference = reference_contracts(args.solc, source)
+        if not reference:
             skipped += 1
             continue
-        mine, reason = mlir_creation(args.solc, args.yul2evm, source)
-        if mine is None:
-            print(f"UNSUP {source.name}: {reason}")
-            skipped += 1
-            continue
+        mine, reason = mlir_contracts(args.solc, args.yul2evm, source)
 
-        mine_address = deploy(mine, rpc)
-        reference_address = deploy(reference, rpc)
-        if not reference_address:
-            # The anchor could not be deployed either, so there is nothing to
-            # compare against - not evidence about this backend.
-            print(f"SKIP  {source.name}: reference creation code does not deploy here")
-            skipped += 1
-            continue
-        if not mine_address:
-            # Almost always the size of what this backend emits rather than a
-            # semantic fault; say so instead of implying a miscompile.
-            print(f"FAIL  {source.name}: creation code does not deploy "
-                  f"({len(mine)//2}B creation vs {len(reference)//2}B reference)")
-            failed += 1
-            continue
+        for name, (reference_code, selectors) in sorted(reference.items()):
+            label = f"{source.name}:{name}"
+            if name not in mine:
+                print(f"UNSUP {label}: {reason}")
+                skipped += 1
+                continue
 
-        mine_code, _ = rpc.call("eth_getCode", [mine_address, "latest"])
-        if not mine_code or len(mine_code) <= 2:
-            print(f"FAIL  {source.name}: deployed empty runtime code")
-            failed += 1
-            continue
+            mine_address = deploy(mine[name], rpc)
+            reference_address = deploy(reference_code, rpc)
+            if not reference_address:
+                print(f"SKIP  {label}: reference creation code does not deploy here")
+                skipped += 1
+                continue
+            if not mine_address:
+                # Almost always the size of what this backend emits rather than
+                # a semantic fault; say so instead of implying a miscompile.
+                print(f"FAIL  {label}: creation code does not deploy "
+                      f"({len(mine[name])//2}B creation vs {len(reference_code)//2}B reference)")
+                failed += 1
+                continue
 
-        divergent = []
-        for selector in selectors(args.solc, source):
-            a = probe(mine_address, selector, rpc)
-            b = probe(reference_address, selector, rpc)
-            if a != b:
-                divergent.append((selector, a, b))
+            mine_code, _ = rpc.call("eth_getCode", [mine_address, "latest"])
+            if not mine_code or len(mine_code) <= 2:
+                print(f"FAIL  {label}: deployed empty runtime code")
+                failed += 1
+                continue
 
-        if divergent:
-            print(f"FAIL  {source.name}: {len(divergent)} selector(s) diverge")
-            for selector, a, b in divergent[:4]:
-                print(f"        {selector}: mlir={a[:40]} reference={b[:40]}")
-            failed += 1
-        else:
-            probed = len(selectors(args.solc, source))
-            print(f"PASS  {source.name}: deployed, {probed} selector(s) agree "
-                  f"({(len(mine_code)-2)//2}B vs runtime reference)")
-            passed += 1
+            divergent = []
+            for selector in selectors:
+                a = probe(mine_address, selector, rpc)
+                b = probe(reference_address, selector, rpc)
+                if a != b:
+                    divergent.append((selector, a, b))
+
+            if divergent:
+                print(f"FAIL  {label}: {len(divergent)} of {len(selectors)} selector(s) diverge")
+                for selector, a, b in divergent[:4]:
+                    print(f"        {selector}: mlir={a[:50]} reference={b[:50]}")
+                failed += 1
+            else:
+                print(f"PASS  {label}: deployed, {len(selectors)} selector(s) agree "
+                      f"({(len(mine_code)-2)//2}B runtime)")
+                passed += 1
 
     print(f"\n{passed} contracts deploy and agree, {failed} diverge, {skipped} not compiled")
     return 1 if failed else 0

@@ -133,7 +133,7 @@ BOOST_AUTO_TEST_CASE(cli_mode_options)
 				"dir1/file1.sol:L=0x1234567890123456789012345678901234567890,"
 				"dir2/file2.sol:L=0x1111122222333334444455555666667777788888",
 			"--ast-compact-json", "--asm", "--asm-json", "--opcodes", "--bin", "--bin-runtime", "--abi",
-			"--ir", "--ir-ast-json", "--ir-optimized", "--ir-optimized-ast-json", "--hashes", "--userdoc", "--devdoc", "--metadata",
+			"--ir", "--ir-ast-json", "--ir-optimized", "--ir-optimized-ast-json", "--mlir-bin", "--hashes", "--userdoc", "--devdoc", "--metadata",
 			"--yul-cfg-json",
 			"--storage-layout", "--transient-storage-layout",
 			"--gas",
@@ -200,7 +200,7 @@ BOOST_AUTO_TEST_CASE(cli_mode_options)
 			true, true, true, true, true,
 			true, true, true, true, true,
 			true, true, true, true, true,
-			true, true, true,
+			true, true, true, true,
 		};
 		expectedOptions.compiler.estimateGas = true;
 		expectedOptions.compiler.combinedJsonRequests = {
