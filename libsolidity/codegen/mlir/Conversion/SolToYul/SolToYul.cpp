@@ -452,8 +452,21 @@ private:
 			mlir::OpBuilder::InsertionGuard inner(m_builder);
 			m_builder.setInsertionPointToStart(&ifOp.getThenRegion().emplaceBlock());
 
+			// Calldata short of the declared arguments has to revert. Reading
+			// past the end yields zeros rather than faulting, so without this
+			// the call quietly succeeds on arguments nobody supplied - which is
+			// what the differential against solc caught.
+			size_t const argumentCount = func.getArgumentTypes().size();
+			if (argumentCount > 0)
+			{
+				mlir::Value size = m_builder.create<mlir::yul::CallDataSizeOp>(loc());
+				mlir::Value tooShort = m_builder.create<mlir::yul::LtOp>(
+					loc(), size, wordConstant(uint64_t(4 + 32 * argumentCount)));
+				emitRevertIf(tooShort);
+			}
+
 			llvm::SmallVector<mlir::Value, 4> arguments;
-			for (unsigned i = 0; i < func.getArgumentTypes().size(); ++i)
+			for (unsigned i = 0; i < argumentCount; ++i)
 				arguments.push_back(
 					m_builder.create<mlir::yul::CallDataLoadOp>(loc(), wordConstant(uint64_t(4 + 32 * i))));
 

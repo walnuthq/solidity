@@ -241,6 +241,14 @@ bytes of unreachable function bodies to 204 bytes that deploy and answer -
 `number()` returns 0, then 41 after `setNumber(41)`, then 42 after
 `increment()`.
 
+`test/sol_differential.py` checks this rung the way `deploy_differential.py`
+checks the other: both runtime objects installed at an address, every ABI
+selector called on each. Over the first 60 sources of solar's
+`tests/ui/codegen`, **21 contracts agree and 1 diverges**. It found a real
+defect on its first run - the dispatcher decoded arguments without checking
+that calldata was long enough, so a short call read zeros and answered instead
+of reverting the way solc does. That was 8 of the 9 divergences it reported.
+
 Only single-word arguments and results are dispatched, because that is exactly
 the set needing no memory encoding. A function outside it is left undispatched
 rather than dispatched wrongly - unreachable, but never answering to a selector
