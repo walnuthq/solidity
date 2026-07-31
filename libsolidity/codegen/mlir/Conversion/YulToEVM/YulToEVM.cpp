@@ -372,7 +372,12 @@ private:
 		// memoryguard(size) is semantically its argument.
 		if (auto memoryGuard = llvm::dyn_cast<mlir::yul::MemoryGuardOp>(&_op))
 		{
-			m_map[memoryGuard.getResult()] = wordConstant(memoryGuard.getSize());
+			// Kept as an op: the value is the start of the contract's heap, and
+			// a backend placing memory of its own below it has to move the
+			// boundary up. Folding it to a literal loses that meaning.
+			m_dstModule->setAttr("evm.memory_guard", memoryGuard.getSizeAttr());
+			m_map[memoryGuard.getResult()]
+				= m_builder.create<mlir::evm::MemoryGuardOp>(loc(), memoryGuard.getSizeAttr());
 			return false;
 		}
 

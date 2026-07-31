@@ -133,11 +133,23 @@ names itself - `datacopy` is a `CODECOPY`, and immutables map to
 `appendImmutable`/`appendImmutableAssignment`. Creation objects therefore
 compile and deploy.
 
-**Known divergences.** `MSIZE` observes the frame region, and the frame base is
-fixed rather than negotiated with `memoryguard`. Because every value round-trips
-through a frame, memory grows with the number of live functions, so very large
-contracts emit creation code the chain will not accept - a size problem the
-stack scheduler removes, not a semantic one.
+**Memory layout.** `memoryguard(x)` is the start of the contract's heap:
+memory below it is reserved, memory above it is allocated from. The frames go
+at `x` and the guard is rewritten to `x + frame size`, moving the heap above
+them — which is why `evm.memoryguard` stays an op rather than being folded to
+its literal. Placing the frames *at* the guard does not work: that is where the
+heap begins and they collide. An object with no guard that provably never
+touches memory gets the frames at `0x80`; anything else keeps a fixed high base,
+as do objects with recursion, whose saved frames grow without a static bound so
+nothing can sit above them.
+
+This matters beyond code size: a fallback reached by a plain `send` has 2300 gas,
+which is not enough to expand memory out to a fixed high address before doing
+anything else.
+
+**Known divergences.** `MSIZE` observes the frame region. `semanticTests/various/
+code_access_content.sol` hashes its own runtime code and so cannot match a
+different backend by construction.
 
 ### Validation
 
@@ -170,22 +182,8 @@ Current status:
   live across the recursive call.
 - **solc's own semantic test suite compiles**: 1661 sources, **4128 Yul objects,
   all of them reach bytecode**.
-- **569 contracts from that suite deploy and agree** per selector with the
-  `solc --via-ir` build, against 1 divergence — see below.
-
-### The one known divergence
-
-`semanticTests/functionCall/send_zero_ether.sol` returns `false` where the
-reference returns `true`. It is not a miscompile: `send` forwards a 2300 gas
-stipend, and because the frames sit at a fixed high address every value touch
-first pays to expand memory out to it, which alone exceeds the stipend. An empty
-`receive()` therefore runs out of gas.
-
-The fix is the one solx uses: rewrite `memoryguard(x)` to `x + frame size` so
-the frames are carved out below the contract's heap instead of above it, at an
-address low enough to cost nothing to reach. Note that placing the frames *at*
-the guard does not work — that is where the contract's own heap begins, and they
-collide.
+- **622 contracts from that suite deploy and agree** per selector with the
+  `solc --via-ir` build, with one divergence that is by construction (above).
 
 ### Running it
 

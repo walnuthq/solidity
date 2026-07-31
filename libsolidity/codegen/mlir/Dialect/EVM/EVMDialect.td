@@ -67,6 +67,10 @@ def EVM_Dialect : Dialect {
 // The EVM word.
 def EVM_Word : I<256>;
 
+// 256-bit signless integer attribute for literals.
+def EVM_WordAttr : SignlessIntegerAttrBase<I<256>,
+    "256-bit signless integer attribute">;
+
 //===----------------------------------------------------------------------===//
 // Base op classes (mirroring the yul dialect's builder conventions)
 //===----------------------------------------------------------------------===//
@@ -358,6 +362,24 @@ def EVM_DataSizeOp : EVM_Op<"datasize", [Pure]> {
 def EVM_DataCopyOp : EVM_TernaryStmtOp<"datacopy"> {
   let summary = "Copy an object/data segment to memory (dst, src, length)";
 }
+def EVM_MemoryGuardOp : EVM_Op<"memoryguard", [Pure]> {
+  let summary = "Start of the contract's heap; memory below it is reserved";
+  let description = [{
+    Kept as an op rather than folded to its literal because a backend that
+    wants memory of its own has to place it below this boundary and move the
+    boundary up, which means rewriting the value the contract allocates from.
+  }];
+  let arguments = (ins EVM_WordAttr:$size);
+  let results = (outs EVM_Word:$result);
+  let assemblyFormat = "$size attr-dict";
+  let builders = [
+    OpBuilder<(ins "::mlir::IntegerAttr":$sizeAttr), [{
+      $_state.getOrAddProperties<Properties>().size = sizeAttr;
+      $_state.addTypes(sizeAttr.getType());
+    }]>
+  ];
+}
+
 def EVM_LinkerSymbolOp : EVM_Op<"linkersymbol", [Pure]> {
   let summary = "Address of a named library, resolved at link time";
   let arguments = (ins StrAttr:$symbol);

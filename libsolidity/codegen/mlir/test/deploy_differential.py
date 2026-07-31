@@ -25,8 +25,12 @@ import tempfile
 import time
 import urllib.request
 
-# anvil's first unlocked account.
+# anvil's first unlocked account, which deploys.
 SENDER = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+# A second account does the calling. The deployer's balance differs between the
+# two builds by whatever gas each deployment cost, so a contract reading
+# `msg.sender.balance` would diverge for that reason alone.
+CALLER = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 
 
 def run(cmd, **kwargs):
@@ -161,7 +165,7 @@ def deploy(code, rpc):
 
 def probe(address, selector, rpc):
     result, error = rpc.call(
-        "eth_call", [{"from": SENDER, "to": address, "data": "0x" + selector}, "latest"]
+        "eth_call", [{"from": CALLER, "to": address, "data": "0x" + selector}, "latest"]
     )
     return "revert" if error else "ok:" + (result or "")
 

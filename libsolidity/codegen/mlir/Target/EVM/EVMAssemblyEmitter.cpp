@@ -69,6 +69,10 @@ constexpr uint64_t kWord = 32;
 /// EVM version has no MCOPY.
 constexpr uint64_t kMaxUnrolledFrameWords = 64;
 
+/// Where solc's free memory area begins; below it is scratch and the free
+/// memory pointer.
+constexpr uint64_t kFreeMemoryStart = 0x80;
+
 /// How many slots the stack cache may hold. Past DUP16 a value is out of reach
 /// anyway, and the operands of the instruction being built need room above it.
 constexpr size_t kMaxCachedStack = 8;
@@ -103,6 +107,7 @@ public:
 
 	std::shared_ptr<Assembly> run(mlir::ModuleOp _module)
 	{
+		m_module = _module;
 		registerSegments();
 		collectFunctions(_module);
 		findRecursion();
@@ -204,9 +209,71 @@ private:
 		}
 	}
 
+	/// Decides where the frames live.
+	///
+	/// `memoryguard(x)` is the start of the contract's heap: memory below it is
+	/// reserved, memory above it is allocated from. Frames belong in reserved
+	/// space, so they go at x and the guard is rewritten to x + their size,
+	/// which moves the heap above them. Putting them *at* the heap start
+	/// instead - or leaving them at a fixed high address - is what makes every
+	/// value touch pay to expand memory out to them, enough to exceed the 2300
+	/// gas a plain `send` forwards.
+	///
+	/// Saved frames of a recursive call chain grow without a static bound, so
+	/// nothing can be placed above them; those objects keep the fixed base.
+	/// True when nothing in the object can occupy or observe memory, so the
+	/// frames may sit wherever is cheapest. A read of a statically empty range
+	/// touches nothing and does not count; anything else is assumed to.
+	bool objectIgnoresMemory() const
+	{
+		static std::set<std::string> const touchesMemory = {
+			"mload", "mstore", "mstore8", "mcopy", "msize", "calldatacopy", "codecopy",
+			"returndatacopy", "extcodecopy", "datacopy", "keccak256", "log0", "log1", "log2",
+			"log3", "log4", "create", "create2", "call", "callcode", "delegatecall", "staticcall"};
+
+		bool clean = true;
+		for (mlir::func::FuncOp func: m_functions)
+			func.walk([&](mlir::Operation* op) {
+				if (!op->getDialect() || op->getDialect()->getNamespace() != "evm")
+					return;
+				std::string const mnemonic = op->getName().stripDialect().str();
+				if (touchesMemory.count(mnemonic))
+					clean = false;
+				else if (mnemonic == "return" || mnemonic == "revert")
+				{
+					// return(p, 0) and revert(p, 0) read nothing.
+					std::optional<llvm::APInt> const length = constantOf(op->getOperand(1));
+					if (!length || !length->isZero())
+						clean = false;
+				}
+			});
+		return clean;
+	}
+
+	void chooseFrameBase()
+	{
+		if (!m_recursive.empty())
+		{
+			m_frameBase = m_options.frameBase;
+			return;
+		}
+		if (auto guard = m_module->getAttrOfType<mlir::IntegerAttr>("evm.memory_guard"))
+		{
+			m_frameBase = guard.getValue().getLimitedValue();
+			m_relocatedFrames = true;
+			return;
+		}
+		// No declared heap. If the object cannot tell where memory is used, the
+		// frames still have to go somewhere cheap: a fallback that only has to
+		// answer within the 2300 gas a `send` forwards cannot afford to expand
+		// memory out to a fixed high address first.
+		m_frameBase = objectIgnoresMemory() ? kFreeMemoryStart : m_options.frameBase;
+	}
+
 	void layoutFrames()
 	{
-		uint64_t next = m_options.frameBase;
+		chooseFrameBase();
+		uint64_t next = m_frameBase;
 		for (mlir::func::FuncOp func: m_functions)
 		{
 			Frame frame;
@@ -246,6 +313,9 @@ private:
 		// static frames, addressed through one pointer word.
 		m_savePointer = next;
 		m_saveBase = next + kWord;
+		// Everything this backend owns ends here, so this is where the
+		// contract's own heap may start.
+		m_heapBase = m_saveBase;
 	}
 
 	Frame const& frameOf(mlir::func::FuncOp _func) const { return m_frames.at(_func.getName().str()); }
@@ -777,6 +847,17 @@ private:
 
 		if (mnemonic == "dataoffset" || mnemonic == "datasize")
 			return emitSegmentQuery(_op, mnemonic == "datasize");
+		if (mnemonic == "memoryguard")
+		{
+			// Hand the contract a heap that starts above our frames, or the
+			// boundary unchanged when we did not move in below it.
+			auto size = _op.getAttrOfType<mlir::IntegerAttr>("size");
+			if (!size)
+				fail("evm.memoryguard is missing its size attribute");
+			push(m_relocatedFrames ? u256(m_heapBase) : toU256(size.getValue()));
+			finishResult(_op);
+			return;
+		}
 		if (mnemonic == "linkersymbol")
 		{
 			m_assembly->appendLibraryAddress(stringAttr(_op, "symbol"));
@@ -961,6 +1042,11 @@ private:
 	uint64_t m_savePointer = 0;
 	uint64_t m_saveBase = 0;
 
+	mlir::ModuleOp m_module;
+	/// Where the frames live, and where the contract's heap may start above them.
+	uint64_t m_frameBase = 0;
+	uint64_t m_heapBase = 0;
+	bool m_relocatedFrames = false;
 	/// Physical slots this block pushed above its baseline; back() is the top.
 	std::vector<mlir::Value> m_stack;
 	/// Result of the previous instruction, left on the stack for the next one.
