@@ -195,8 +195,21 @@ def main():
                 skipped += 1
                 continue
 
-            mine_address = deploy(mine[name], rpc)
+            # Both builds must land at the same address: a contract that
+            # returns `this`, or anything derived from it, would otherwise
+            # differ for no reason but deployment order. Deploying each from
+            # the same snapshot gives them the same sender nonce, hence the
+            # same CREATE address, and isolates their storage from each other.
+            snapshot, _ = rpc.call("evm_snapshot", [])
             reference_address = deploy(reference_code, rpc)
+            reference_results = (
+                [probe(reference_address, selector, rpc) for selector in selectors]
+                if reference_address
+                else None
+            )
+            rpc.call("evm_revert", [snapshot])
+
+            mine_address = deploy(mine[name], rpc)
             if not reference_address:
                 print(f"SKIP  {label}: reference creation code does not deploy here")
                 skipped += 1
@@ -208,6 +221,10 @@ def main():
                       f"({len(mine[name])//2}B creation vs {len(reference_code)//2}B reference)")
                 failed += 1
                 continue
+            if mine_address != reference_address:
+                print(f"SKIP  {label}: builds landed at different addresses, not comparable")
+                skipped += 1
+                continue
 
             mine_code, _ = rpc.call("eth_getCode", [mine_address, "latest"])
             if not mine_code or len(mine_code) <= 2:
@@ -216,9 +233,9 @@ def main():
                 continue
 
             divergent = []
-            for selector in selectors:
+            for index, selector in enumerate(selectors):
                 a = probe(mine_address, selector, rpc)
-                b = probe(reference_address, selector, rpc)
+                b = reference_results[index]
                 if a != b:
                     divergent.append((selector, a, b))
 

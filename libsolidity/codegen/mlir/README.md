@@ -161,13 +161,45 @@ Current status:
   nested loops with break and continue, multi-return functions with `leave`,
   memory and storage, revert paths, and direct and mutual recursion with locals
   live across the recursive call.
-- **24 contracts deploy and agree** end to end (`deploy_differential.py`):
-  creation code compiled through the ladder deploys, installs runtime code, and
-  answers every selector in the ABI exactly as the `solc --via-ir` build does —
-  up to 200 selectors per contract, with zero semantic divergences.
-- **Coverage on solar's `tests/ui/codegen`**: 542 Yul objects, **all of them
-  reach bytecode**.
+- **solc's own semantic test suite compiles**: 1661 sources, **4128 Yul objects,
+  all of them reach bytecode**.
+- **569 contracts from that suite deploy and agree** per selector with the
+  `solc --via-ir` build, against 1 divergence — see below.
 
-The remaining gap is size, not correctness. Four contracts in the deployment
-suite emit creation code the chain will not accept, and all four are the value
-model rather than a miscompile.
+### The one known divergence
+
+`semanticTests/functionCall/send_zero_ether.sol` returns `false` where the
+reference returns `true`. It is not a miscompile: `send` forwards a 2300 gas
+stipend, and because the frames sit at a fixed high address every value touch
+first pays to expand memory out to it, which alone exceeds the stipend. An empty
+`receive()` therefore runs out of gas.
+
+The fix is the one solx uses: rewrite `memoryguard(x)` to `x + frame size` so
+the frames are carved out below the contract's heap instead of above it, at an
+address low enough to cost nothing to reach. Note that placing the frames *at*
+the guard does not work — that is where the contract's own heap begins, and they
+collide.
+
+### Running it
+
+```sh
+anvil --silent --port 8546 --code-size-limit 200000000 --disable-block-gas-limit &
+
+python3 libsolidity/codegen/mlir/test/evm_differential.py \
+    --corpus libsolidity/codegen/mlir/test/corpus \
+    --solc build/solc/solc --yul2evm build/libsolidity/codegen/mlir/tools/yul2evm
+
+python3 libsolidity/codegen/mlir/test/deploy_differential.py \
+    --solc build/solc/solc --yul2evm build/libsolidity/codegen/mlir/tools/yul2evm \
+    --corpus test/libsolidity/semanticTests/functionCall
+
+python3 libsolidity/codegen/mlir/test/corpus_coverage.py \
+    --solc build/solc/solc --yul2evm build/libsolidity/codegen/mlir/tools/yul2evm \
+    --corpus test/libsolidity/semanticTests
+```
+
+Or from solc itself, on an MLIR-enabled build:
+
+```sh
+solc --via-ir --optimize --mlir-bin Contract.sol
+```
