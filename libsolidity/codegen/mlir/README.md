@@ -92,22 +92,29 @@ back, while constants are rematerialised as pushes. Memory is therefore always
 authoritative, which makes stack-too-deep unreachable and means no scheduling is
 needed for correctness — scheduling only removes traffic.
 
-The first stage of that scheduling is in place: a result whose single use is the
-very next instruction stays on the stack instead of being written to its slot
-and read straight back. Operands are pushed back to front, so a value already on
-the stack sits underneath everything pushed after it and can only serve as the
-deepest operand, or as the lower of a pair, which one `SWAP1` corrects. That
-covers the expression-tree edges Yul emits in quantity. Results nothing reads
-are popped rather than stored.
+**The stack model.** `m_stack` mirrors the physical slots a block has pushed
+above its own baseline, each holding the value it carries or null for a machine
+word with no SSA identity. A value is materialised as a literal, as a `DUP` of a
+slot the stack already holds, or failing both by reloading it — and because
+every value is also in its frame slot, a lookup that misses or lands past
+`DUP16` costs correctness nothing. A result with a later use in the same block
+is kept with one `DUP1` before its store; results nothing reads are popped
+rather than stored.
 
-What it does not yet do is keep a value on the stack across several
-instructions, which is where the rest of the gap lives: emitted code is still
-4-6x the reference. That needs a real stack model — solar's
-`backend/evm/stack/mod.rs` is the design document, and its `StackModel`
-(`SmallVec<[Option<ValueId>]>`, index 0 = top, `None` for an anonymous machine
-word) plus the tiered operand planner are the pieces to port. Because memory
-stays authoritative, such a model can abandon the cache at any point and fall
-back to a reload, so it can be added incrementally behind this same interface.
+Two cases sit on top of it. A result whose single use is the very next
+instruction skips its slot entirely: operands are pushed back to front, so it
+can serve as the deepest operand for free or as the lower of a pair for one
+`SWAP1`. And the cache is dropped — `flushStack` — before every call and every
+non-halting branch, because a callee runs with our stack beneath it and `JUMPI`
+consumes only its condition, so anything cached underneath would survive into a
+successor that expects a bare stack.
+
+That last point is also why the win is bounded. Yul from solc branches and calls
+often, so straight-line runs are short and the cache rarely lives long enough to
+repay itself; emitted code is still 3-4x the reference. Going further means not
+storing a value at all when every use can be proven reachable on the stack, and
+carrying a layout across block boundaries — solar's stack-phi planner in
+`backend/evm/stack/mod.rs` is the design document for that.
 
 **Calling convention.** Arguments and results live in the callee's frame; only
 the return address travels on the stack. Frames are addressed absolutely, so a

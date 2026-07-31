@@ -69,6 +69,10 @@ constexpr uint64_t kWord = 32;
 /// EVM version has no MCOPY.
 constexpr uint64_t kMaxUnrolledFrameWords = 64;
 
+/// How many slots the stack cache may hold. Past DUP16 a value is out of reach
+/// anyway, and the operands of the instruction being built need room above it.
+constexpr size_t kMaxCachedStack = 8;
+
 u256 toU256(llvm::APInt const& _value)
 {
 	llvm::APInt widened = _value.zextOrTrunc(256);
@@ -265,8 +269,77 @@ private:
 		return attr.getValue();
 	}
 
-	void push(u256 const& _value) { m_assembly->append(AssemblyItem(_value)); }
-	void op(Instruction _instruction) { m_assembly->append(_instruction); }
+	//===------------------------------------------------------------------===//
+	// The stack model
+	//
+	// m_stack mirrors the physical slots this block has pushed above its own
+	// baseline, back() being the top; a slot holds the value it carries, or
+	// null when it is a machine word with no SSA identity. Because every value
+	// is also written to its frame slot, the model is only ever a cache: a
+	// lookup that misses, or lands out of DUP reach, falls back to a reload and
+	// nothing depends on the model being complete.
+	//===------------------------------------------------------------------===//
+
+	void modelPush(mlir::Value _value = {}) { m_stack.push_back(_value); }
+
+	void modelPop(unsigned _count)
+	{
+		if (_count > m_stack.size())
+			fail("stack model underflow");
+		m_stack.resize(m_stack.size() - _count);
+	}
+
+	void push(u256 const& _value)
+	{
+		m_assembly->append(AssemblyItem(_value));
+		modelPush();
+	}
+
+	void op(Instruction _instruction)
+	{
+		m_assembly->append(_instruction);
+		InstructionInfo const info = instructionInfo(_instruction, m_options.evmVersion);
+		modelPop(static_cast<unsigned>(info.args));
+		for (int i = 0; i < info.ret; ++i)
+			modelPush();
+	}
+
+	/// DUP and SWAP move identities around rather than producing new ones, so
+	/// they are modelled by hand instead of through the generic effect.
+	void emitDup(unsigned _depth)
+	{
+		solAssert(_depth >= 1 && _depth <= 16);
+		m_assembly->append(dupInstruction(_depth));
+		modelPush(m_stack[m_stack.size() - _depth]);
+	}
+
+	void emitSwap(unsigned _depth)
+	{
+		solAssert(_depth >= 1 && _depth <= 16);
+		m_assembly->append(swapInstruction(_depth));
+		std::swap(m_stack.back(), m_stack[m_stack.size() - 1 - _depth]);
+	}
+
+	/// Depth of the shallowest live copy of @a _value, if one is in DUP reach.
+	std::optional<unsigned> residentDepth(mlir::Value _value) const
+	{
+		for (size_t i = m_stack.size(); i > 0; --i)
+			if (m_stack[i - 1] == _value)
+			{
+				unsigned const depth = static_cast<unsigned>(m_stack.size() - i) + 1;
+				return depth <= 16 ? std::optional<unsigned>(depth) : std::nullopt;
+			}
+		return std::nullopt;
+	}
+
+	/// Returns the stack to the block's baseline. Anything cached on it is also
+	/// in its frame slot, so dropping the cache loses nothing; what it protects
+	/// is the contract that a jump, and a callee, see the stack they expect.
+	void flushStack()
+	{
+		while (!m_stack.empty())
+			op(Instruction::POP);
+	}
 
 	/// Assembly tracks one net stack height across the whole item stream, which
 	/// only describes straight-line code: a function's return JUMP consumes an
@@ -276,7 +349,8 @@ private:
 	/// says the stack is back at rest.
 	void anchorStackHeight() { m_assembly->setDeposit(1); }
 
-	/// Leaves @a _value on the stack.
+	/// Leaves @a _value on the stack: as a literal, as a copy of a slot the
+	/// stack already holds, or failing both by reloading it from its frame.
 	void pushValue(mlir::Value _value)
 	{
 		if (std::optional<llvm::APInt> constant = constantOf(_value))
@@ -284,8 +358,14 @@ private:
 			push(toU256(*constant));
 			return;
 		}
+		if (std::optional<unsigned> const depth = residentDepth(_value))
+		{
+			emitDup(*depth);
+			return;
+		}
 		push(u256(addressOf(_value)));
 		op(Instruction::MLOAD);
+		m_stack.back() = _value;
 	}
 
 	/// Consumes the stack top, writing it to @a _address.
@@ -346,6 +426,17 @@ private:
 		return *index + 1 == count || (count == 2 && *index == 0);
 	}
 
+	/// Whether caching @a _value would pay off: only instructions that take
+	/// their operands the ordinary way can read it off the stack, and the cache
+	/// is dropped before every call and every branch anyway.
+	static bool hasCacheableUseInBlock(mlir::Value _value, mlir::Block* _block)
+	{
+		for (mlir::Operation* user: _value.getUsers())
+			if (user->getBlock() == _block && takesPlainOperands(*user))
+				return true;
+		return false;
+	}
+
 	/// EVM pops the first operand first, so operands are pushed back to front.
 	void pushOperands(mlir::Operation& _op)
 	{
@@ -367,7 +458,7 @@ private:
 			if (count == 2 && _op.getOperand(0) == resident)
 			{
 				pushValue(_op.getOperand(1));
-				op(Instruction::SWAP1);
+				emitSwap(1);
 				return;
 			}
 			fail("a stack-resident value was not consumed by the next instruction");
@@ -383,11 +474,26 @@ private:
 	{
 		mlir::Value const result = _op.getResult(0);
 		if (result.use_empty())
+		{
 			op(Instruction::POP); // nothing reads it, so it needs no slot
-		else if (canStayOnStack(result, _op))
+			return;
+		}
+
+		m_stack.back() = result;
+		if (canStayOnStack(result, _op))
+		{
+			// Consumed by the very next instruction, so it never needs a slot.
 			m_stackResident = result;
-		else
-			storeResult(result);
+			return;
+		}
+
+		// Keeping a copy costs one DUP now and one POP at the flush, and saves
+		// a reload at every later use in this block.
+		bool const keepCached = hasCacheableUseInBlock(result, _op.getBlock())
+			&& m_stack.size() < kMaxCachedStack;
+		if (keepCached)
+			emitDup(1);
+		storeResult(result);
 	}
 
 	/// Copies @a _words words between a static frame address and the save
@@ -479,6 +585,7 @@ private:
 	void emitBlock(mlir::Block& _block)
 	{
 		m_stackResident = nullptr;
+		m_stack.clear();
 		for (mlir::Operation& op: _block.getOperations())
 			emitOp(op);
 		// Nothing may outlive the block: a value is only kept on the stack when
@@ -607,6 +714,7 @@ private:
 			m_assembly->pushSubroutineSize(encoded);
 		else
 			m_assembly->pushSubroutineOffset(encoded);
+		modelPush();
 		finishResult(_op);
 	}
 
@@ -631,6 +739,7 @@ private:
 				m_assembly->pushSubroutineSize(sub->second);
 			else
 				m_assembly->pushSubroutineOffset(sub->second);
+			modelPush();
 		}
 		else if (auto data = m_dataSegments.find(segment); data != m_dataSegments.end())
 		{
@@ -639,14 +748,20 @@ private:
 			if (_wantSize)
 				push(u256(m_assembly->data(solidity::util::h256(data->second.data())).size()));
 			else
+			{
 				m_assembly->append(data->second);
+				modelPush();
+			}
 		}
 		else if (segment == m_options.name)
 		{
 			// An object may name itself: its offset is the origin it is already
 			// addressed from, and its size is the whole assembly's.
 			if (_wantSize)
+			{
 				m_assembly->appendProgramSize();
+				modelPush();
+			}
 			else
 				push(u256(0));
 		}
@@ -665,12 +780,14 @@ private:
 		if (mnemonic == "linkersymbol")
 		{
 			m_assembly->appendLibraryAddress(stringAttr(_op, "symbol"));
+			modelPush();
 			finishResult(_op);
 			return;
 		}
 		if (mnemonic == "loadimmutable")
 		{
 			m_assembly->appendImmutable(stringAttr(_op, "immutable_name"));
+			modelPush();
 			finishResult(_op);
 			return;
 		}
@@ -681,6 +798,7 @@ private:
 			// order AssignImmutable consumes them in.
 			pushOperands(_op);
 			m_assembly->appendImmutableAssignment(stringAttr(_op, "immutable_name"));
+			modelPop(2); // consumes the offset and the value
 			return;
 		}
 		if (mnemonic == "program")
@@ -724,6 +842,7 @@ private:
 
 	void emitBranch(mlir::cf::BranchOp _branch)
 	{
+		flushStack();
 		passBlockArguments({{_branch.getDest(), _branch.getDestOperands()}});
 		if (_branch.getDest() == m_next)
 			return; // falls through into the next block
@@ -738,12 +857,17 @@ private:
 			&& _branch.getTrueDestOperands() != _branch.getFalseDestOperands())
 			fail("conditional branch with a shared destination and differing arguments");
 
+		// JUMPI consumes only the condition, so anything cached underneath it
+		// would survive into the successor, which expects a bare stack.
+		flushStack();
+
 		passBlockArguments(
 			{{_branch.getTrueDest(), _branch.getTrueDestOperands()},
 			 {_branch.getFalseDest(), _branch.getFalseDestOperands()}});
 
 		pushValue(_branch.getCondition());
 		m_assembly->appendJumpI(m_blockTags.at(_branch.getTrueDest()));
+		modelPop(1); // JUMPI consumed the condition
 		if (_branch.getFalseDest() == m_next)
 			return;
 		m_assembly->appendJump(m_blockTags.at(_branch.getFalseDest()));
@@ -751,6 +875,11 @@ private:
 
 	void emitCall(mlir::func::CallOp _call)
 	{
+		// The callee runs with our stack underneath it and cannot be asked to
+		// preserve a cache it knows nothing about; dropping it here also keeps
+		// the depth of a call chain independent of what each frame had cached.
+		flushStack();
+
 		std::string callee = _call.getCallee().str();
 		auto target = m_byName.find(callee);
 		if (target == m_byName.end())
@@ -804,6 +933,7 @@ private:
 
 	void emitReturn(mlir::func::ReturnOp _return)
 	{
+		flushStack();
 		for (unsigned i = 0; i < _return.getNumOperands(); ++i)
 		{
 			pushValue(_return.getOperand(i));
@@ -812,10 +942,9 @@ private:
 
 		// The object entry is not called, so there is no return address to
 		// jump back to - falling off the end of the object code halts.
-		if (isEntry(m_currentFunc))
-			op(Instruction::STOP);
-		else
-			op(Instruction::JUMP);
+		// The return address was pushed by the caller, below this frame's
+		// baseline, so the jump consuming it is invisible to the model.
+		m_assembly->append(isEntry(m_currentFunc) ? Instruction::STOP : Instruction::JUMP);
 	}
 
 	solidity::mlirgen::EVMAssemblyOptions m_options;
@@ -832,6 +961,8 @@ private:
 	uint64_t m_savePointer = 0;
 	uint64_t m_saveBase = 0;
 
+	/// Physical slots this block pushed above its baseline; back() is the top.
+	std::vector<mlir::Value> m_stack;
 	/// Result of the previous instruction, left on the stack for the next one.
 	mlir::Value m_stackResident;
 	Frame const* m_frame = nullptr;
