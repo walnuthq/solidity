@@ -1595,6 +1595,15 @@ public:
 			{
 				if (memberName == "length")
 				{
+					// The Solidity type says array, but a dropped sub-expression
+					// leaves a plain word in its place. Building the op anyway
+					// produces IR the verifier rejects, which loses the whole
+					// contract instead of just the feature that was dropped.
+					if (!mlir::isa<mlir::solidity::ArrayType>(base.getType()))
+						return emitUnsupported(
+							loc,
+							translateSolidityType(*_expr.annotation().type),
+							"length of an unsupported array expression");
 					return m_builder->create<mlir::solidity::ArrayLengthOp>(
 						loc, mlir::solidity::UIntType::get(m_context.get(), 256), base);
 				}

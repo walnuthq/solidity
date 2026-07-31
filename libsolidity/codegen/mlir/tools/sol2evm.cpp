@@ -44,6 +44,10 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wsign-conversion"
 #pragma GCC diagnostic ignored "-Wconversion"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Parser/Parser.h"
 #pragma GCC diagnostic pop
@@ -97,7 +101,13 @@ int main(int argc, char** argv)
 
 	mlir::MLIRContext context;
 	context.disableMultithreading();
+	// The generator emits structured control flow and arithmetic alongside the
+	// sol dialect, so reading its output back needs all of them loaded.
 	context.getOrLoadDialect<mlir::solidity::SolidityDialect>();
+	context.getOrLoadDialect<mlir::arith::ArithDialect>();
+	context.getOrLoadDialect<mlir::scf::SCFDialect>();
+	context.getOrLoadDialect<mlir::cf::ControlFlowDialect>();
+	context.getOrLoadDialect<mlir::func::FuncDialect>();
 
 	for (std::string const& name: stack.contractNames())
 	{
@@ -117,7 +127,9 @@ int main(int argc, char** argv)
 			mlir::OwningOpRef<mlir::ModuleOp> solModule
 				= mlir::parseSourceString<mlir::ModuleOp>(text, &context);
 			if (!solModule)
-				detail = "the generated sol dialect does not parse";
+				// The parser verifies as it goes, so this is as often a
+				// generator emitting ill-typed IR as it is bad syntax.
+				detail = "the generated sol dialect does not parse or verify";
 			else
 			{
 				std::string error;

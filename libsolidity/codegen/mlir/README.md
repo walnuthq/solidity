@@ -227,10 +227,10 @@ Over 195 contracts from solar's `tests/ui/codegen`:
 
 | Stage reached | Contracts |
 |---|---|
-| `bytecode` | 51 |
+| `bytecode` | 52 |
 | `evm` | 2 |
 | `yul` | 12 |
-| `sol` (i.e. `SolToYul` refused) | 130 |
+| `sol` | 129 |
 
 **Reaching `bytecode` here does not yet mean a working contract.** `SolToYul`
 generates no external dispatcher, no ABI encoding and no constructor, so
@@ -242,7 +242,7 @@ What stops the other 144, most frequent first:
 | Blocker | Contracts |
 |---|---|
 | `solidity.function_call` | 34 |
-| generated `sol` dialect does not parse back | 31 |
+| generated `sol` dialect does not parse or verify | 20 |
 | `solidity.inline_assembly` | 11 |
 | `solidity.member_access` | 8 |
 | `solidity.mapping_access` | 8 |
@@ -252,8 +252,15 @@ What stops the other 144, most frequent first:
 | `solidity.emit` | 3 |
 | `struct_create`, `mapping_store`, `external_call`, `array_store`, `addmod`, `abi_encode`, `abi_encode_packed` | 2 each |
 
-Two of these are worth separating from the rest. `function_call` is internal
-calls, and `yul.func_call` already exists, so it is likely the cheapest large
-win. The 31 parse failures are a round-trip bug rather than a missing feature:
-the generator emits `sol` dialect text that the dialect will not read back, so
-they are a defect in what exists rather than an absence.
+`function_call` is internal calls, and `yul.func_call` already exists, so it is
+likely the cheapest large win.
+
+The round-trip failures started at 31 and are down to 20. They are a defect in
+what exists rather than an absence, and they had two causes. Ten were the
+driver's own fault - it registered only the `sol` dialect, while the generator
+also emits `scf` and `arith`. The rest are the generator building ill-typed IR
+after it drops a feature: the Solidity type still says array, but the dropped
+sub-expression left a plain word behind, so `solidity.array_length` fails to
+verify and the whole contract is lost rather than the one feature. Guarding that
+site fixed the largest group; the same shape remains in the boolean ops, the
+multi-value returns, and a few printed attributes.

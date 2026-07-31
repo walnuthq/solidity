@@ -152,6 +152,10 @@ if(MLIR_FOUND)
 
     target_link_libraries(sol2evm PRIVATE
         solidity
+        MLIRSCFDialect
+        MLIRArithDialect
+        MLIRControlFlowDialect
+        MLIRFuncDialect
         EVMAsmTarget
         SolToYulConversion
         YulToEVMConversion
