@@ -86,16 +86,28 @@ Yul text -> yul dialect -> evm dialect -> libevmasm Assembly -> bytecode
 No stage leaves MLIR until the final instruction stream, so the EVM backend is
 now reachable without the `Target/YulText` detour through libyul.
 
-**Value placement (v0).** Every non-constant SSA value gets a fixed 32-byte
-slot in a per-function frame; operands are materialised at each use and results
-written back, while constants are rematerialised as pushes. Outside a single
-instruction's emission the EVM stack therefore holds nothing but pending return
-addresses, which makes stack-too-deep unreachable and means no stack scheduler
-is needed for correctness. The cost is gas and code size — roughly 4x the
-reference backend. Replacing this with a real stack scheduler (solar's
-`backend/evm/stack`, LLVM's `EVMStackSolver`) is the next step and fits behind
-the same interface, since the operand order each opcode expects is already
-explicit.
+**Value placement.** Every non-constant SSA value gets a fixed 32-byte slot in
+a per-function frame; operands are materialised at each use and results written
+back, while constants are rematerialised as pushes. Memory is therefore always
+authoritative, which makes stack-too-deep unreachable and means no scheduling is
+needed for correctness — scheduling only removes traffic.
+
+The first stage of that scheduling is in place: a result whose single use is the
+very next instruction stays on the stack instead of being written to its slot
+and read straight back. Operands are pushed back to front, so a value already on
+the stack sits underneath everything pushed after it and can only serve as the
+deepest operand, or as the lower of a pair, which one `SWAP1` corrects. That
+covers the expression-tree edges Yul emits in quantity. Results nothing reads
+are popped rather than stored.
+
+What it does not yet do is keep a value on the stack across several
+instructions, which is where the rest of the gap lives: emitted code is still
+4-6x the reference. That needs a real stack model — solar's
+`backend/evm/stack/mod.rs` is the design document, and its `StackModel`
+(`SmallVec<[Option<ValueId>]>`, index 0 = top, `None` for an anonymous machine
+word) plus the tiered operand planner are the pieces to port. Because memory
+stays authoritative, such a model can abandon the cache at any point and fall
+back to a reload, so it can be added incrementally behind this same interface.
 
 **Calling convention.** Arguments and results live in the callee's frame; only
 the return address travels on the stack. Frames are addressed absolutely, so a
@@ -151,13 +163,11 @@ Current status:
   live across the recursive call.
 - **24 contracts deploy and agree** end to end (`deploy_differential.py`):
   creation code compiled through the ladder deploys, installs runtime code, and
-  answers every selector in the ABI exactly as the `solc --via-ir` build does -
-  up to 200 selectors per contract, with zero semantic divergences. The four
-  that fail all emit creation code too large for the chain to accept.
-- **Coverage on solar's `tests/ui/codegen`**: 358 Yul objects, **all of them
+  answers every selector in the ABI exactly as the `solc --via-ir` build does —
+  up to 200 selectors per contract, with zero semantic divergences.
+- **Coverage on solar's `tests/ui/codegen`**: 542 Yul objects, **all of them
   reach bytecode**.
 
-The remaining gap is size, not correctness: the memory-resident value model
-emits roughly 4-6x the reference, and on the largest contracts that is enough
-for the chain to refuse the creation code. That is what the stack scheduler
-fixes.
+The remaining gap is size, not correctness. Four contracts in the deployment
+suite emit creation code the chain will not accept, and all four are the value
+model rather than a miscompile.

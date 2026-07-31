@@ -297,11 +297,97 @@ private:
 
 	void storeResult(mlir::Value _value) { storeToAddress(addressOf(_value)); }
 
+	/// True for ops whose operands this backend materialises with pushOperands,
+	/// i.e. the ones a stack-resident value can be handed to directly. Calls,
+	/// branches and returns arrange the stack themselves.
+	static bool takesPlainOperands(mlir::Operation& _op)
+	{
+		if (llvm::isa<mlir::cf::BranchOp, mlir::cf::CondBranchOp, mlir::func::CallOp, mlir::func::ReturnOp>(&_op))
+			return false;
+		if (llvm::isa<mlir::arith::CmpIOp, mlir::arith::ExtUIOp, mlir::arith::ExtSIOp, mlir::arith::TruncIOp>(&_op))
+			return true;
+		if (arithInstruction(_op))
+			return true;
+		if (!_op.getDialect() || _op.getDialect()->getNamespace() != "evm")
+			return false;
+		// The ops that are not a single opcode build their own operand order.
+		std::string const mnemonic = _op.getName().stripDialect().str();
+		return mnemonic != "dataoffset" && mnemonic != "datasize" && mnemonic != "loadimmutable"
+			&& mnemonic != "linkersymbol" && mnemonic != "program";
+	}
+
+	/// Where a value sits among an op's operands, or none if it is not one.
+	static std::optional<unsigned> operandIndex(mlir::Operation& _op, mlir::Value _value)
+	{
+		for (unsigned i = 0; i < _op.getNumOperands(); ++i)
+			if (_op.getOperand(i) == _value)
+				return i;
+		return std::nullopt;
+	}
+
+	/// Whether a freshly computed result can be left on the stack for the very
+	/// next instruction rather than written to its slot and read straight back.
+	///
+	/// Operands are pushed back to front, so a value already on the stack ends
+	/// up underneath everything pushed after it: it can only serve as the
+	/// deepest operand, or as the lower of a pair, which one SWAP1 corrects.
+	/// That covers the expression-tree edges Yul emits in quantity.
+	bool canStayOnStack(mlir::Value _result, mlir::Operation& _definition) const
+	{
+		if (!_result.hasOneUse())
+			return false;
+		mlir::Operation* user = *_result.getUsers().begin();
+		if (user != _definition.getNextNode() || !takesPlainOperands(*user))
+			return false;
+		std::optional<unsigned> const index = operandIndex(*user, _result);
+		if (!index)
+			return false;
+		unsigned const count = user->getNumOperands();
+		return *index + 1 == count || (count == 2 && *index == 0);
+	}
+
 	/// EVM pops the first operand first, so operands are pushed back to front.
 	void pushOperands(mlir::Operation& _op)
 	{
-		for (int i = static_cast<int>(_op.getNumOperands()) - 1; i >= 0; --i)
+		int const count = static_cast<int>(_op.getNumOperands());
+
+		// The previous instruction may have left its result on the stack; by
+		// construction it is one of this op's operands and in a position that
+		// costs at most one swap to reach.
+		if (m_stackResident && count > 0)
+		{
+			mlir::Value const resident = m_stackResident;
+			m_stackResident = nullptr;
+			if (_op.getOperand(static_cast<unsigned>(count) - 1) == resident)
+			{
+				for (int i = count - 2; i >= 0; --i)
+					pushValue(_op.getOperand(static_cast<unsigned>(i)));
+				return;
+			}
+			if (count == 2 && _op.getOperand(0) == resident)
+			{
+				pushValue(_op.getOperand(1));
+				op(Instruction::SWAP1);
+				return;
+			}
+			fail("a stack-resident value was not consumed by the next instruction");
+		}
+
+		for (int i = count - 1; i >= 0; --i)
 			pushValue(_op.getOperand(static_cast<unsigned>(i)));
+	}
+
+	/// Commits the single result now on the stack: either kept there for the
+	/// next instruction, or written to its frame slot.
+	void finishResult(mlir::Operation& _op)
+	{
+		mlir::Value const result = _op.getResult(0);
+		if (result.use_empty())
+			op(Instruction::POP); // nothing reads it, so it needs no slot
+		else if (canStayOnStack(result, _op))
+			m_stackResident = result;
+		else
+			storeResult(result);
 	}
 
 	/// Copies @a _words words between a static frame address and the save
@@ -392,8 +478,13 @@ private:
 
 	void emitBlock(mlir::Block& _block)
 	{
+		m_stackResident = nullptr;
 		for (mlir::Operation& op: _block.getOperations())
 			emitOp(op);
+		// Nothing may outlive the block: a value is only kept on the stack when
+		// the very next instruction consumes it.
+		if (m_stackResident)
+			fail("a stack-resident value survived to the end of its block");
 	}
 
 	void emitOp(mlir::Operation& _op)
@@ -416,7 +507,7 @@ private:
 		{
 			pushOperands(_op);
 			op(*instruction);
-			storeResult(_op.getResult(0));
+			finishResult(_op);
 			return;
 		}
 
@@ -424,8 +515,8 @@ private:
 		// are representation-free: the EVM comparison already yields 0 or 1.
 		if (llvm::isa<mlir::arith::ExtUIOp, mlir::arith::ExtSIOp, mlir::arith::TruncIOp>(&_op))
 		{
-			pushValue(_op.getOperand(0));
-			storeResult(_op.getResult(0));
+			pushOperands(_op);
+			finishResult(_op);
 			return;
 		}
 
@@ -469,12 +560,11 @@ private:
 		case mlir::arith::CmpIPredicate::sle: instruction = Instruction::SGT; negate = true; break;
 		case mlir::arith::CmpIPredicate::sge: instruction = Instruction::SLT; negate = true; break;
 		}
-		pushValue(_cmp.getRhs());
-		pushValue(_cmp.getLhs());
+		pushOperands(*_cmp.getOperation());
 		op(instruction);
 		if (negate)
 			op(Instruction::ISZERO);
-		storeResult(_cmp.getResult());
+		finishResult(*_cmp.getOperation());
 	}
 
 	static std::string stringAttr(mlir::Operation& _op, char const* _name)
@@ -517,7 +607,7 @@ private:
 			m_assembly->pushSubroutineSize(encoded);
 		else
 			m_assembly->pushSubroutineOffset(encoded);
-		storeResult(_op.getResult(0));
+		finishResult(_op);
 	}
 
 	/// `dataoffset`/`datasize` of a nested object or data segment. Offsets and
@@ -563,7 +653,7 @@ private:
 		else
 			fail("object references unknown segment '" + segment + "'");
 
-		storeResult(_op.getResult(0));
+		finishResult(_op);
 	}
 
 	void emitEvmOp(mlir::Operation& _op)
@@ -575,13 +665,13 @@ private:
 		if (mnemonic == "linkersymbol")
 		{
 			m_assembly->appendLibraryAddress(stringAttr(_op, "symbol"));
-			storeResult(_op.getResult(0));
+			finishResult(_op);
 			return;
 		}
 		if (mnemonic == "loadimmutable")
 		{
 			m_assembly->appendImmutable(stringAttr(_op, "immutable_name"));
-			storeResult(_op.getResult(0));
+			finishResult(_op);
 			return;
 		}
 		if (mnemonic == "setimmutable")
@@ -608,7 +698,7 @@ private:
 		op(it->second);
 
 		if (_op.getNumResults() == 1)
-			storeResult(_op.getResult(0));
+			finishResult(_op);
 		else if (_op.getNumResults() > 1)
 			fail("op 'evm." + mnemonic + "' has more than one result");
 	}
@@ -742,6 +832,8 @@ private:
 	uint64_t m_savePointer = 0;
 	uint64_t m_saveBase = 0;
 
+	/// Result of the previous instruction, left on the stack for the next one.
+	mlir::Value m_stackResident;
 	Frame const* m_frame = nullptr;
 	mlir::func::FuncOp m_currentFunc;
 	mlir::Block* m_next = nullptr;
