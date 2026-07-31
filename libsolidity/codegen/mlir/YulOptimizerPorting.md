@@ -87,10 +87,20 @@ and the arguments themselves are the choice. `-remove-dead-values` is left out �
 it fails on 41 objects of the suite, and canonicalization already removes dead
 pure ops.
 
-**Still absent: memory effects.** No `evm` op declares whether it reads or
-writes state, so LICM and dead-store reasoning have nothing to ask, and CSE
-cannot tell an `sload` from an `mload`. That is the next item, and it is the
-same interface `LoadResolver` and the store eliminators need.
+**Memory effects are in.** EVM state spaces cannot alias, so storage, transient
+storage and memory are three distinct side-effect resources (`EVMDialect.h`),
+and the fourteen state ops declare which one they read or write. Eighteen
+environment ops that are fixed for the whole call frame are `Pure`. This is the
+interface `LoadResolver` and the store eliminators will ask, so it is done once
+for both columns.
+
+It also taught us something about this backend. Marking the environment ops
+`Pure` let CSE merge them and made the output *larger*: a value held in a frame
+slot costs a store and a reload, eight bytes, where re-emitting `CALLER` costs
+one. They are now rematerialised at each use like constants — restricted to ops
+that really are a single opcode, since `dataoffset`, immutables and linker
+symbols are relocations and can be far larger than a reload. Net over the suite:
+4227297 bytes down to 4177690.
 
 ## Must port — EVM knowledge lives here
 

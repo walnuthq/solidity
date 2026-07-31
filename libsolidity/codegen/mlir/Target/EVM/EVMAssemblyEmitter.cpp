@@ -299,6 +299,8 @@ private:
 				{
 					if (llvm::isa<mlir::arith::ConstantOp>(&op))
 						continue; // rematerialised at each use
+					if (op.getNumResults() == 1 && isRematerializable(op.getResult(0)))
+						continue; // likewise
 					for (mlir::Value result: op.getResults())
 						frame.valueSlots[result] = slot++;
 				}
@@ -357,6 +359,27 @@ private:
 		if (_count > m_stack.size())
 			fail("stack model underflow");
 		m_stack.resize(m_stack.size() - _count);
+	}
+
+	/// True for a value produced by a single-byte opcode that takes nothing and
+	/// reads nothing - `caller`, `calldatasize`, the block fields. Giving one a
+	/// frame slot costs a store and a reload, eight bytes, to avoid re-emitting
+	/// one. They are rematerialised at each use, like constants.
+	static bool isRematerializable(mlir::Value _value)
+	{
+		mlir::Operation* definition = _value.getDefiningOp();
+		if (!definition || definition->getNumOperands() != 0 || definition->getNumResults() != 1)
+			return false;
+		if (!definition->getDialect() || definition->getDialect()->getNamespace() != "evm")
+			return false;
+		if (!mlir::isMemoryEffectFree(definition))
+			return false;
+		// Only the ones that really are one opcode: dataoffset, immutables and
+		// linker symbols are relocations and can be far larger than a reload.
+		std::string name = definition->getName().stripDialect().str();
+		for (char& c: name)
+			c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+		return c_instructions.count(name) != 0;
 	}
 
 	void push(u256 const& _value)
@@ -431,6 +454,15 @@ private:
 		if (std::optional<unsigned> const depth = residentDepth(_value))
 		{
 			emitDup(*depth);
+			return;
+		}
+		if (isRematerializable(_value))
+		{
+			std::string name = _value.getDefiningOp()->getName().stripDialect().str();
+			for (char& c: name)
+				c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+			op(c_instructions.find(name)->second);
+			m_stack.back() = _value;
 			return;
 		}
 		push(u256(addressOf(_value)));
@@ -668,6 +700,8 @@ private:
 	{
 		if (llvm::isa<mlir::arith::ConstantOp>(&_op))
 			return; // rematerialised at each use
+		if (_op.getNumResults() == 1 && isRematerializable(_op.getResult(0)))
+			return; // likewise
 
 		if (auto branch = llvm::dyn_cast<mlir::cf::BranchOp>(&_op))
 			return emitBranch(branch);

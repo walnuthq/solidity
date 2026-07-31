@@ -67,6 +67,12 @@ def EVM_Dialect : Dialect {
 // The EVM word.
 def EVM_Word : I<256>;
 
+// EVM state spaces as distinct side-effect resources (see EVMDialect.h), so a
+// pass can tell that storage, transient storage and memory do not alias.
+def EVM_StorageResource : Resource<"::mlir::evm::StorageResource">;
+def EVM_TransientResource : Resource<"::mlir::evm::TransientStorageResource">;
+def EVM_MemoryResource : Resource<"::mlir::evm::MemoryResource">;
+
 // 256-bit signless integer attribute for literals.
 def EVM_WordAttr : SignlessIntegerAttrBase<I<256>,
     "256-bit signless integer attribute">;
@@ -197,24 +203,24 @@ def EVM_ClzOp : EVM_UnaryOp<"clz", [Pure]> {
 // Keccak and memory (byte-addressed, big-endian, zero-initialized)
 //===----------------------------------------------------------------------===//
 
-def EVM_Keccak256Op : EVM_BinaryOp<"keccak256"> {
+def EVM_Keccak256Op : EVM_BinaryOp<"keccak256", [MemoryEffects<[MemRead<EVM_MemoryResource>]>]> {
   let summary = "keccak256 over memory range (offset, length)";
 }
-def EVM_MLoadOp : EVM_UnaryOp<"mload"> {
+def EVM_MLoadOp : EVM_UnaryOp<"mload", [MemoryEffects<[MemRead<EVM_MemoryResource>]>]> {
   let summary = "Load a word from memory (big-endian byte order)";
 }
-def EVM_MStoreOp : EVM_Op<"mstore"> {
+def EVM_MStoreOp : EVM_Op<"mstore", [MemoryEffects<[MemWrite<EVM_MemoryResource>]>]> {
   let arguments = (ins EVM_Word:$offset, EVM_Word:$value);
   let assemblyFormat = "$offset `,` $value attr-dict";
 }
-def EVM_MStore8Op : EVM_Op<"mstore8"> {
+def EVM_MStore8Op : EVM_Op<"mstore8", [MemoryEffects<[MemWrite<EVM_MemoryResource>]>]> {
   let arguments = (ins EVM_Word:$offset, EVM_Word:$value);
   let assemblyFormat = "$offset `,` $value attr-dict";
 }
-def EVM_MCopyOp : EVM_TernaryStmtOp<"mcopy"> {
+def EVM_MCopyOp : EVM_TernaryStmtOp<"mcopy", [MemoryEffects<[MemRead<EVM_MemoryResource>, MemWrite<EVM_MemoryResource>]>]> {
   let summary = "Memory copy (dst, src, length)";
 }
-def EVM_MSizeOp : EVM_NullaryOp<"msize"> {
+def EVM_MSizeOp : EVM_NullaryOp<"msize", [MemoryEffects<[MemRead<EVM_MemoryResource>]>]> {
   let summary = "Highest accessed memory index rounded to words (observable)";
 }
 
@@ -222,13 +228,13 @@ def EVM_MSizeOp : EVM_NullaryOp<"msize"> {
 // Storage / transient storage (ERHI host state)
 //===----------------------------------------------------------------------===//
 
-def EVM_SLoadOp : EVM_UnaryOp<"sload">;
-def EVM_SStoreOp : EVM_Op<"sstore"> {
+def EVM_SLoadOp : EVM_UnaryOp<"sload", [MemoryEffects<[MemRead<EVM_StorageResource>]>]>;
+def EVM_SStoreOp : EVM_Op<"sstore", [MemoryEffects<[MemWrite<EVM_StorageResource>]>]> {
   let arguments = (ins EVM_Word:$slot, EVM_Word:$value);
   let assemblyFormat = "$slot `,` $value attr-dict";
 }
-def EVM_TLoadOp : EVM_UnaryOp<"tload">;
-def EVM_TStoreOp : EVM_Op<"tstore"> {
+def EVM_TLoadOp : EVM_UnaryOp<"tload", [MemoryEffects<[MemRead<EVM_TransientResource>]>]>;
+def EVM_TStoreOp : EVM_Op<"tstore", [MemoryEffects<[MemWrite<EVM_TransientResource>]>]> {
   let arguments = (ins EVM_Word:$slot, EVM_Word:$value);
   let assemblyFormat = "$slot `,` $value attr-dict";
 }
@@ -237,17 +243,17 @@ def EVM_TStoreOp : EVM_Op<"tstore"> {
 // Calldata / code / returndata
 //===----------------------------------------------------------------------===//
 
-def EVM_CallDataLoadOp : EVM_UnaryOp<"calldataload"> {
+def EVM_CallDataLoadOp : EVM_UnaryOp<"calldataload", [Pure]> {
   let summary = "Load a word from calldata; out-of-range bytes are zero";
 }
-def EVM_CallDataSizeOp : EVM_NullaryOp<"calldatasize">;
-def EVM_CallDataCopyOp : EVM_TernaryStmtOp<"calldatacopy"> {
+def EVM_CallDataSizeOp : EVM_NullaryOp<"calldatasize", [Pure]>;
+def EVM_CallDataCopyOp : EVM_TernaryStmtOp<"calldatacopy", [MemoryEffects<[MemWrite<EVM_MemoryResource>]>]> {
   let summary = "Copy calldata to memory (dst, src, length); zero-padded";
 }
-def EVM_CodeSizeOp : EVM_NullaryOp<"codesize">;
-def EVM_CodeCopyOp : EVM_TernaryStmtOp<"codecopy">;
+def EVM_CodeSizeOp : EVM_NullaryOp<"codesize", [Pure]>;
+def EVM_CodeCopyOp : EVM_TernaryStmtOp<"codecopy", [MemoryEffects<[MemWrite<EVM_MemoryResource>]>]>;
 def EVM_ReturnDataSizeOp : EVM_NullaryOp<"returndatasize">;
-def EVM_ReturnDataCopyOp : EVM_TernaryStmtOp<"returndatacopy"> {
+def EVM_ReturnDataCopyOp : EVM_TernaryStmtOp<"returndatacopy", [MemoryEffects<[MemWrite<EVM_MemoryResource>]>]> {
   let summary = "Copy returndata to memory; out-of-range REVERTS (landmine #10)";
 }
 def EVM_ExtCodeSizeOp : EVM_UnaryOp<"extcodesize">;
@@ -263,26 +269,26 @@ def EVM_ExtCodeCopyOp : EVM_Op<"extcodecopy"> {
 // reads become syscalls)
 //===----------------------------------------------------------------------===//
 
-def EVM_AddressOp : EVM_NullaryOp<"address">;
-def EVM_CallerOp : EVM_NullaryOp<"caller">;
-def EVM_CallValueOp : EVM_NullaryOp<"callvalue">;
-def EVM_OriginOp : EVM_NullaryOp<"origin">;
-def EVM_GasPriceOp : EVM_NullaryOp<"gasprice">;
-def EVM_CoinbaseOp : EVM_NullaryOp<"coinbase">;
-def EVM_TimestampOp : EVM_NullaryOp<"timestamp">;
-def EVM_NumberOp : EVM_NullaryOp<"number">;
-def EVM_PrevRandaoOp : EVM_NullaryOp<"prevrandao">;
-def EVM_GasLimitOp : EVM_NullaryOp<"gaslimit">;
-def EVM_ChainIdOp : EVM_NullaryOp<"chainid">;
+def EVM_AddressOp : EVM_NullaryOp<"address", [Pure]>;
+def EVM_CallerOp : EVM_NullaryOp<"caller", [Pure]>;
+def EVM_CallValueOp : EVM_NullaryOp<"callvalue", [Pure]>;
+def EVM_OriginOp : EVM_NullaryOp<"origin", [Pure]>;
+def EVM_GasPriceOp : EVM_NullaryOp<"gasprice", [Pure]>;
+def EVM_CoinbaseOp : EVM_NullaryOp<"coinbase", [Pure]>;
+def EVM_TimestampOp : EVM_NullaryOp<"timestamp", [Pure]>;
+def EVM_NumberOp : EVM_NullaryOp<"number", [Pure]>;
+def EVM_PrevRandaoOp : EVM_NullaryOp<"prevrandao", [Pure]>;
+def EVM_GasLimitOp : EVM_NullaryOp<"gaslimit", [Pure]>;
+def EVM_ChainIdOp : EVM_NullaryOp<"chainid", [Pure]>;
 def EVM_SelfBalanceOp : EVM_NullaryOp<"selfbalance">;
-def EVM_BaseFeeOp : EVM_NullaryOp<"basefee">;
-def EVM_BlobBaseFeeOp : EVM_NullaryOp<"blobbasefee">;
+def EVM_BaseFeeOp : EVM_NullaryOp<"basefee", [Pure]>;
+def EVM_BlobBaseFeeOp : EVM_NullaryOp<"blobbasefee", [Pure]>;
 def EVM_GasOp : EVM_NullaryOp<"gas"> {
   let summary = "Remaining gas (gas-mode dependent, see proposal)";
 }
 def EVM_BalanceOp : EVM_UnaryOp<"balance">;
-def EVM_BlockHashOp : EVM_UnaryOp<"blockhash">;
-def EVM_BlobHashOp : EVM_UnaryOp<"blobhash">;
+def EVM_BlockHashOp : EVM_UnaryOp<"blockhash", [Pure]>;
+def EVM_BlobHashOp : EVM_UnaryOp<"blobhash", [Pure]>;
 
 //===----------------------------------------------------------------------===//
 // Logs
@@ -372,7 +378,7 @@ def EVM_DataSizeOp : EVM_Op<"datasize", [Pure]> {
   let results = (outs EVM_Word:$result);
   let assemblyFormat = "$segment attr-dict";
 }
-def EVM_DataCopyOp : EVM_TernaryStmtOp<"datacopy"> {
+def EVM_DataCopyOp : EVM_TernaryStmtOp<"datacopy", [MemoryEffects<[MemWrite<EVM_MemoryResource>]>]> {
   let summary = "Copy an object/data segment to memory (dst, src, length)";
 }
 def EVM_MemoryGuardOp : EVM_Op<"memoryguard", [Pure]> {
