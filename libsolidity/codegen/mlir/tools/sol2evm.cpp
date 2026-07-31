@@ -51,6 +51,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Parser/Parser.h"
+#include "llvm/Support/raw_ostream.h"
 #pragma GCC diagnostic pop
 
 #include <fstream>
@@ -77,13 +78,17 @@ std::string quoted(std::string const& _text)
 int main(int argc, char** argv)
 {
 	std::string path;
+	std::string emit;   // sol | yul | evm: print that rung's IR and stop
 	bool printHex = false;
 	for (int i = 1; i < argc; ++i)
 	{
-		if (std::string(argv[i]) == "--hex")
+		std::string const argument = argv[i];
+		if (argument == "--hex")
 			printHex = true;
+		else if (argument.rfind("--emit=", 0) == 0)
+			emit = argument.substr(7);
 		else if (path.empty())
-			path = argv[i];
+			path = argument;
 	}
 	if (path.empty())
 	{
@@ -129,6 +134,11 @@ int main(int argc, char** argv)
 		MLIRGenerator generator(stack, langutil::EVMVersion{}, OptimiserSettings::minimal());
 
 		std::string const text = generator.generate(contract);
+		if (emit == "sol")
+		{
+			std::cout << text << std::endl;
+			continue;
+		}
 		if (text.empty())
 			detail = "the generator produced nothing";
 		else
@@ -147,6 +157,11 @@ int main(int argc, char** argv)
 					= mlirgen::convertSolToYul(*solModule, error);
 				if (!yulModule)
 					detail = error;
+				else if (emit == "yul")
+				{
+					yulModule->print(llvm::outs());
+					continue;
+				}
 				else
 				{
 					stage = "yul";
@@ -154,6 +169,11 @@ int main(int argc, char** argv)
 						= mlirgen::convertYulToEVM(*yulModule, error);
 					if (!evmModule)
 						detail = error;
+					else if (emit == "evm")
+					{
+						evmModule->print(llvm::outs());
+						continue;
+					}
 					else
 					{
 						stage = "evm";
