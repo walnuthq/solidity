@@ -58,7 +58,12 @@
 #include "mlir/IR/Verifier.h"
 #pragma GCC diagnostic pop
 
+#include <libsolutil/FunctionSelector.h>
+
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 using mlir::failed;
 using mlir::succeeded;
@@ -167,6 +172,8 @@ private:
 			}
 			fail("unsupported op in contract body: " + op.getName().getStringRef().str());
 		}
+
+		emitDispatcher(_contract, _dst);
 	}
 
 	void convertFunction(mlir::solidity::FunctionOp _func)
@@ -362,6 +369,113 @@ private:
 				loc(), wordConstant(uint64_t(0)), wordConstant(uint64_t(64)));
 		}
 		return slot;
+	}
+
+	/// The ABI name of a type, or nothing when it is one this dispatcher cannot
+	/// describe. Only elementary types are handled: anything living in memory
+	/// needs encoding that does not exist yet, and guessing at its name would
+	/// produce a selector that silently answers the wrong call.
+	static std::optional<std::string> abiTypeName(mlir::Type _type)
+	{
+		if (auto uintType = llvm::dyn_cast<mlir::solidity::UIntType>(_type))
+			return "uint" + std::to_string(uintType.getBitWidth());
+		if (auto intType = llvm::dyn_cast<mlir::solidity::IntType>(_type))
+			return "int" + std::to_string(intType.getBitWidth());
+		if (llvm::isa<mlir::solidity::AddressType>(_type))
+			return std::string("address");
+		if (llvm::isa<mlir::solidity::BoolType>(_type))
+			return std::string("bool");
+		if (auto bytesType = llvm::dyn_cast<mlir::solidity::BytesType>(_type))
+			return "bytes" + std::to_string(bytesType.getSize());
+		return std::nullopt;
+	}
+
+	/// The canonical ABI signature, when every type in it can be named.
+	static std::optional<std::string> abiSignature(mlir::solidity::FunctionOp _func)
+	{
+		std::string signature = _func.getSymName().str() + "(";
+		bool first = true;
+		for (mlir::Type type: _func.getArgumentTypes())
+		{
+			std::optional<std::string> const name = abiTypeName(type);
+			if (!name)
+				return std::nullopt;
+			signature += (first ? "" : ",") + *name;
+			first = false;
+		}
+		return signature + ")";
+	}
+
+	/// Emits the external entry point at module scope, which YulToEVM turns
+	/// into the object's `@__entry`: read the selector, and for each public
+	/// function whose signature can be spelled, decode its arguments straight
+	/// out of calldata, call it and return the result. Anything unmatched
+	/// reverts, as a contract without a fallback does.
+	///
+	/// Only single-word arguments and results are dispatched, because that is
+	/// exactly the set needing no memory encoding. Functions outside it are
+	/// left undispatched rather than dispatched wrongly - unreachable, but not
+	/// answering to a selector that means something else.
+	void emitDispatcher(mlir::solidity::ContractOp _contract, mlir::ModuleOp _dst)
+	{
+		std::vector<std::pair<uint32_t, mlir::solidity::FunctionOp>> entries;
+		for (mlir::Operation& op: _contract.getBody().front().getOperations())
+		{
+			auto func = llvm::dyn_cast<mlir::solidity::FunctionOp>(&op);
+			if (!func)
+				continue;
+			if (func.getVisibility() && *func.getVisibility() != "public" && *func.getVisibility() != "external")
+				continue;
+			if (func.getResultTypes().size() > 1)
+				continue; // multiple results need tuple encoding
+			bool describable = true;
+			for (mlir::Type type: func.getResultTypes())
+				describable = describable && abiTypeName(type).has_value();
+			if (!describable)
+				continue;
+			if (std::optional<std::string> const signature = abiSignature(func))
+				entries.emplace_back(solidity::util::selectorFromSignatureU32(*signature), func);
+		}
+		if (entries.empty())
+			return;
+
+		mlir::OpBuilder::InsertionGuard guard(m_builder);
+		m_builder.setInsertionPointToEnd(_dst.getBody());
+
+		mlir::Value word = m_builder.create<mlir::yul::CallDataLoadOp>(loc(), wordConstant(uint64_t(0)));
+		mlir::Value selector = m_builder.create<mlir::yul::ShrOp>(loc(), wordConstant(uint64_t(224)), word);
+
+		for (auto& [value, func]: entries)
+		{
+			mlir::Value matches = m_builder.create<mlir::yul::EqOp>(loc(), selector, wordConstant(value));
+			auto ifOp = m_builder.create<mlir::yul::IfOp>(loc(), matches);
+			mlir::OpBuilder::InsertionGuard inner(m_builder);
+			m_builder.setInsertionPointToStart(&ifOp.getThenRegion().emplaceBlock());
+
+			llvm::SmallVector<mlir::Value, 4> arguments;
+			for (unsigned i = 0; i < func.getArgumentTypes().size(); ++i)
+				arguments.push_back(
+					m_builder.create<mlir::yul::CallDataLoadOp>(loc(), wordConstant(uint64_t(4 + 32 * i))));
+
+			llvm::SmallVector<mlir::Type, 1> resultTypes(func.getResultTypes().size(), wordType());
+			auto called = m_builder.create<mlir::yul::FuncCallOp>(
+				loc(),
+				resultTypes,
+				mlir::FlatSymbolRefAttr::get(m_builder.getContext(), func.getSymName()),
+				arguments);
+
+			mlir::Value zero = wordConstant(uint64_t(0));
+			if (called->getNumResults() == 1)
+			{
+				m_builder.create<mlir::yul::MStoreOp>(loc(), zero, called->getResult(0));
+				m_builder.create<mlir::yul::ReturnOp>(loc(), zero, wordConstant(uint64_t(32)));
+			}
+			else
+				m_builder.create<mlir::yul::ReturnOp>(loc(), zero, zero);
+		}
+
+		mlir::Value zero = wordConstant(uint64_t(0));
+		m_builder.create<mlir::yul::RevertOp>(loc(), zero, zero);
 	}
 
 	uint64_t storageSlot(llvm::StringRef _name)

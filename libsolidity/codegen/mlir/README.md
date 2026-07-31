@@ -232,10 +232,20 @@ Over 195 contracts from solar's `tests/ui/codegen`:
 | `yul` | 21 |
 | `sol` | 99 |
 
-**Reaching `bytecode` here does not yet mean a working contract.** `SolToYul`
-generates no external dispatcher, no ABI encoding and no constructor, so
-`Counter.sol` compiles to 33 bytes - the function bodies with nothing to call
-them. That is a larger gap than the op list below and is not measured by it.
+**A contract built this way now runs.** `SolToYul` emits an external
+dispatcher at module scope, which `YulToEVM` turns into the object's `@__entry`:
+the selector is read from calldata, matched against each public function whose
+ABI signature can be spelled, arguments are decoded straight out of calldata and
+the result returned; anything unmatched reverts. `Counter.sol` goes from 33
+bytes of unreachable function bodies to 204 bytes that deploy and answer -
+`number()` returns 0, then 41 after `setNumber(41)`, then 42 after
+`increment()`.
+
+Only single-word arguments and results are dispatched, because that is exactly
+the set needing no memory encoding. A function outside it is left undispatched
+rather than dispatched wrongly - unreachable, but never answering to a selector
+that means something else. There is still no constructor, so state variables
+start at zero and immutables do not work.
 
 What stops the other 144, most frequent first:
 

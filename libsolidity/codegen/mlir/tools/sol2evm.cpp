@@ -38,6 +38,7 @@
 #include <libsolidity/interface/CompilerStack.h>
 #include <libsolidity/interface/OptimiserSettings.h>
 #include <liblangutil/EVMVersion.h>
+#include <libsolutil/CommonData.h>
 #include <libsolutil/CommonIO.h>
 
 // Disable warnings for LLVM/MLIR headers
@@ -75,23 +76,32 @@ std::string quoted(std::string const& _text)
 
 int main(int argc, char** argv)
 {
-	if (argc != 2)
+	std::string path;
+	bool printHex = false;
+	for (int i = 1; i < argc; ++i)
 	{
-		std::cerr << "usage: sol2evm <file.sol>" << std::endl;
+		if (std::string(argv[i]) == "--hex")
+			printHex = true;
+		else if (path.empty())
+			path = argv[i];
+	}
+	if (path.empty())
+	{
+		std::cerr << "usage: sol2evm <file.sol> [--hex]" << std::endl;
 		return 2;
 	}
 
-	std::ifstream file(argv[1]);
+	std::ifstream file(path);
 	if (!file)
 	{
-		std::cout << "PARSE-ERROR detail=\"cannot open " << quoted(argv[1]) << "\"" << std::endl;
+		std::cout << "PARSE-ERROR detail=\"cannot open " << quoted(path) << "\"" << std::endl;
 		return 1;
 	}
 	std::stringstream buffer;
 	buffer << file.rdbuf();
 
 	CompilerStack stack;
-	stack.setSources({{argv[1], buffer.str()}});
+	stack.setSources({{path, buffer.str()}});
 	stack.setOptimiserSettings(OptimiserSettings::minimal());
 	if (!stack.parseAndAnalyze())
 	{
@@ -158,9 +168,13 @@ int main(int argc, char** argv)
 							stage = "asm";
 							try
 							{
-								byteCount = assembly->assemble().bytecode.size();
+								solidity::evmasm::LinkerObject const& linked = assembly->assemble();
+								byteCount = linked.bytecode.size();
 								stage = "bytecode";
 								detail = std::to_string(byteCount) + " bytes";
+								if (printHex)
+									std::cout << "HEX contract=\"" << quoted(name) << "\" "
+											  << solidity::util::toHex(linked.bytecode) << std::endl;
 							}
 							catch (std::exception const& _exception)
 							{

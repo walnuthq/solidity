@@ -13,6 +13,7 @@ if(MLIR_FOUND)
     target_link_libraries(SolToYulConversion PUBLIC
         SolidityDialect
         YulMLIRDialect
+        solutil
     )
 
     set_source_files_properties(
