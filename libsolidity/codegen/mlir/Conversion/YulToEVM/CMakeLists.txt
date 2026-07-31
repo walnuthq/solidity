@@ -17,6 +17,7 @@ if(MLIR_FOUND)
         MLIRControlFlowDialect
         MLIRFuncDialect
         MLIRPass
+        MLIRFuncInlinerExtension
         MLIRTransforms
     )
 

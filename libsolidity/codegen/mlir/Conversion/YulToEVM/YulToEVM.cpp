@@ -52,12 +52,14 @@
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/Func/Extensions/InlinerExtension.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
+#include "mlir/Transforms/Inliner.h"
 #pragma GCC diagnostic pop
 
 #include <string>
@@ -649,6 +651,13 @@ mlir::OwningOpRef<mlir::ModuleOp> solidity::mlirgen::convertYulToEVM(mlir::Modul
 	ctx.getOrLoadDialect<mlir::cf::ControlFlowDialect>();
 	ctx.getOrLoadDialect<mlir::func::FuncDialect>();
 
+	// The func dialect's inliner interface is an opt-in extension; without it
+	// the inliner cannot see through a func.call at all and silently does
+	// nothing.
+	mlir::DialectRegistry registry;
+	mlir::func::registerInlinerExtension(registry);
+	ctx.appendDialectRegistry(registry);
+
 	mlir::OwningOpRef<mlir::ModuleOp> converted = Converter(ctx).run(_module, _error);
 	if (!converted)
 		return converted;
@@ -659,6 +668,12 @@ mlir::OwningOpRef<mlir::ModuleOp> solidity::mlirgen::convertYulToEVM(mlir::Modul
 	// arriving from solc is already optimized, so this is about what the
 	// conversion itself introduced rather than a replacement for that.
 	mlir::PassManager manager(&ctx);
+	// Inlining is available - the evm dialect declares the interface and the
+	// func extension is registered above - but deliberately not run. A call is
+	// expensive here, yet the input has already been through solc's inliner,
+	// and inlining again on upstream's default threshold grew the semantic
+	// suite by a quarter, from 4177690 bytes to 5202861. Enabling it needs a
+	// cost model of this backend's own, not just the pass.
 	manager.addPass(mlir::createCanonicalizerPass());
 	manager.addPass(mlir::createCSEPass());
 	if (mlir::failed(manager.run(*converted)))

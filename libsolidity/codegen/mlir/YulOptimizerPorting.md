@@ -69,7 +69,7 @@ dialects.
 | `ControlFlowSimplifier` | 228 | `-canonicalize` on `cf` | — |
 | `LoopInvariantCodeMotion` | 121 | `-loop-invariant-code-motion` | Memory effects |
 | `Rematerialiser` | 105 | canonicalization + folders | Folders |
-| `FullInliner` / `ExpressionInliner` | 456 | `-inline` | `DialectInlinerInterface` |
+| `FullInliner` / `ExpressionInliner` | 456 | `-inline` | `DialectInlinerInterface` — declared, not enabled |
 
 **Started here. `-canonicalize` and `-cse` now run** on the converted module,
 and the 13 landmine ops have folders with EVM-exact edge behaviour (division by
@@ -86,6 +86,23 @@ into one block with differing arguments, where there is no branch left to take
 and the arguments themselves are the choice. `-remove-dead-values` is left out —
 it fails on 41 objects of the suite, and canonicalization already removes dead
 pure ops.
+
+**The inliner interface is in, and deliberately not switched on.** The `evm`
+dialect declares `DialectInlinerInterface` and the `func` extension is
+registered, so `-inline` works — `functions.yul` in the differential corpus goes
+from 369 bytes to 34, a third of what the reference backend emits. Over the
+whole semantic suite it is a loss: 4177690 bytes becomes 5202861, a quarter
+more, because the input has already been through solc's inliner and upstream's
+default threshold only duplicates from there. Turning it on needs a cost model
+of this backend's own — a call here costs a stack flush, an argument write and
+a result read — which is a separate piece of work from having the interface.
+
+Two things had to be right before it would run at all. The `func` dialect's
+inliner interface is an opt-in extension; without registering it the pass
+silently does nothing and reports success. And every terminator this dialect
+defines halts execution rather than returning, so both `handleTerminator` hooks
+are empty — the base class declares them unreachable, which is what any function
+containing a `revert` tripped over.
 
 **Memory effects are in.** EVM state spaces cannot alias, so storage, transient
 storage and memory are three distinct side-effect resources (`EVMDialect.h`),
