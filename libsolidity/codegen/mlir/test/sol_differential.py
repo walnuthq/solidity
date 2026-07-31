@@ -15,6 +15,23 @@ import subprocess, sys, re, pathlib
 sys.path.insert(0, 'libsolidity/codegen/mlir/test')
 import deploy_differential as D
 SOLC='./build/solc/solc'; S2E='./build/libsolidity/codegen/mlir/tools/sol2evm'
+def rpc_reachable(url):
+    """CTest convention: 77 means skip. A missing node is not a failure."""
+    import urllib.request, json as _json
+    try:
+        request = urllib.request.Request(
+            url,
+            data=_json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(request, timeout=5).read()
+        return True
+    except Exception:
+        return False
+
+if not rpc_reachable('http://127.0.0.1:8546'):
+    print('no JSON-RPC node at http://127.0.0.1:8546 - skipping'); sys.exit(77)
+
 rpc = D.Rpc('http://127.0.0.1:8546')
 addr_n = 0x700000
 ok = bad = skip = 0

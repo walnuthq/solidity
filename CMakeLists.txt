@@ -81,6 +81,11 @@ if(MLIR_FOUND)
     # Include MLIR CMake utilities
     list(APPEND CMAKE_MODULE_PATH "${MLIR_DIR}")
     include(AddMLIR)
+
+    # The MLIR ladder registers its tests with CTest (see
+    # libsolidity/codegen/mlir/test); nothing else in this project does, so
+    # testing is enabled here rather than at the top level.
+    enable_testing()
 else()
     message(STATUS "MLIR support disabled (MLIR not found)")
 endif()
