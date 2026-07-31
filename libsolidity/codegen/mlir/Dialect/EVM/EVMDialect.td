@@ -142,42 +142,55 @@ class EVM_TernaryStmtOp<string mnemonic, list<Trait> traits = []> :
 
 def EVM_DivOp : EVM_BinaryOp<"div", [Pure]> {
   let summary = "Unsigned division; x / 0 yields 0";
+  let hasFolder = 1;
 }
 def EVM_SDivOp : EVM_BinaryOp<"sdiv", [Pure]> {
   let summary = "Signed division; x / 0 yields 0, MIN / -1 yields MIN";
+  let hasFolder = 1;
 }
 def EVM_ModOp : EVM_BinaryOp<"mod", [Pure]> {
   let summary = "Unsigned modulo; x mod 0 yields 0";
+  let hasFolder = 1;
 }
 def EVM_SModOp : EVM_BinaryOp<"smod", [Pure]> {
   let summary = "Signed modulo; x smod 0 yields 0";
+  let hasFolder = 1;
 }
 def EVM_AddModOp : EVM_TernaryOp<"addmod", [Pure]> {
   let summary = "(a + b) mod c with 257-bit intermediate; c == 0 yields 0";
+  let hasFolder = 1;
 }
 def EVM_MulModOp : EVM_TernaryOp<"mulmod", [Pure]> {
   let summary = "(a * b) mod c with 512-bit intermediate; c == 0 yields 0";
+  let hasFolder = 1;
 }
 def EVM_ExpOp : EVM_BinaryOp<"exp", [Pure]> {
   let summary = "Wrapping exponentiation";
+  let hasFolder = 1;
 }
 def EVM_ShlOp : EVM_BinaryOp<"shl", [Pure]> {
   let summary = "Shift left; shift >= 256 yields 0 (upstream shift would be poison)";
+  let hasFolder = 1;
 }
 def EVM_ShrOp : EVM_BinaryOp<"shr", [Pure]> {
   let summary = "Logical shift right; shift >= 256 yields 0";
+  let hasFolder = 1;
 }
 def EVM_SarOp : EVM_BinaryOp<"sar", [Pure]> {
   let summary = "Arithmetic shift right; shift >= 256 yields 0 or -1";
+  let hasFolder = 1;
 }
 def EVM_ByteOp : EVM_BinaryOp<"byte", [Pure]> {
   let summary = "Nth byte of a word, big-endian indexing";
+  let hasFolder = 1;
 }
 def EVM_SignExtendOp : EVM_BinaryOp<"signextend", [Pure]> {
   let summary = "Sign-extend from byte index";
+  let hasFolder = 1;
 }
 def EVM_ClzOp : EVM_UnaryOp<"clz", [Pure]> {
   let summary = "Count of leading zero bits; clz(0) is 256";
+  let hasFolder = 1;
 }
 
 //===----------------------------------------------------------------------===//

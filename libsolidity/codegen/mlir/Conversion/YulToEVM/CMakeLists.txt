@@ -16,6 +16,8 @@ if(MLIR_FOUND)
         MLIRArithDialect
         MLIRControlFlowDialect
         MLIRFuncDialect
+        MLIRPass
+        MLIRTransforms
     )
 
     set_source_files_properties(

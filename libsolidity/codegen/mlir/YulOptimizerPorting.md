@@ -71,12 +71,26 @@ dialects.
 | `Rematerialiser` | 105 | canonicalization + folders | Folders |
 | `FullInliner` / `ExpressionInliner` | 456 | `-inline` | `DialectInlinerInterface` |
 
-**This is where to start.** 18 of the 72 `evm` ops already carry `Pure`, so
-`-cse` would partly work today. What is entirely absent is folders — zero — and
-memory effects — zero — despite ADR-003 promising the `evm` rung is where MLIR's
-canonicalization infrastructure earns its keep. Canonicalization has nothing to
-fold with, and every pass that must know whether an op reads or writes state has
-nothing to ask.
+**Started here. `-canonicalize` and `-cse` now run** on the converted module,
+and the 13 landmine ops have folders with EVM-exact edge behaviour (division by
+zero, `SDIV(MIN,-1)`, shifts >= 256, wide addmod/mulmod, `BYTE`, `SIGNEXTEND`,
+`CLZ`). Emitted bytes over the semantic suite fell from 5325389 to 4227297, a
+fifth, with all 4128 objects still reaching bytecode and 636 contracts still
+agreeing per selector.
+
+Two things had to be taught to the emitter first, because canonicalization
+produces IR the conversion never did: `arith.select`, which the EVM has no
+opcode for but an `i1` condition makes branch-free as
+`b xor ((a xor b) * c)`; and a conditional branch whose arms have been merged
+into one block with differing arguments, where there is no branch left to take
+and the arguments themselves are the choice. `-remove-dead-values` is left out —
+it fails on 41 objects of the suite, and canonicalization already removes dead
+pure ops.
+
+**Still absent: memory effects.** No `evm` op declares whether it reads or
+writes state, so LICM and dead-store reasoning have nothing to ask, and CSE
+cannot tell an `sload` from an `mload`. That is the next item, and it is the
+same interface `LoadResolver` and the store eliminators need.
 
 ## Must port — EVM knowledge lives here
 

@@ -56,6 +56,8 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Verifier.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Transforms/Passes.h"
 #pragma GCC diagnostic pop
 
 #include <string>
@@ -646,5 +648,23 @@ mlir::OwningOpRef<mlir::ModuleOp> solidity::mlirgen::convertYulToEVM(mlir::Modul
 	ctx.getOrLoadDialect<mlir::arith::ArithDialect>();
 	ctx.getOrLoadDialect<mlir::cf::ControlFlowDialect>();
 	ctx.getOrLoadDialect<mlir::func::FuncDialect>();
-	return Converter(ctx).run(_module, _error);
+
+	mlir::OwningOpRef<mlir::ModuleOp> converted = Converter(ctx).run(_module, _error);
+	if (!converted)
+		return converted;
+
+	// The evm rung is where upstream canonicalization is meant to pay off
+	// (ADR-003): the landmine ops fold with EVM-exact edge behaviour, and the
+	// pure ones let CSE and dead-value removal work on what is left. Yul
+	// arriving from solc is already optimized, so this is about what the
+	// conversion itself introduced rather than a replacement for that.
+	mlir::PassManager manager(&ctx);
+	manager.addPass(mlir::createCanonicalizerPass());
+	manager.addPass(mlir::createCSEPass());
+	if (mlir::failed(manager.run(*converted)))
+	{
+		_error = "optimization of the converted module failed";
+		return nullptr;
+	}
+	return converted;
 }

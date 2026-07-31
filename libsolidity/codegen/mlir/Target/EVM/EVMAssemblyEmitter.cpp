@@ -679,6 +679,8 @@ private:
 			return emitReturn(ret);
 		if (auto cmp = llvm::dyn_cast<mlir::arith::CmpIOp>(&_op))
 			return emitCompare(cmp);
+		if (auto select = llvm::dyn_cast<mlir::arith::SelectOp>(&_op))
+			return emitSelect(select);
 
 		if (std::optional<Instruction> instruction = arithInstruction(_op))
 		{
@@ -841,6 +843,24 @@ private:
 		finishResult(_op);
 	}
 
+	/// The EVM has no select, but the condition is an i1 - so it is 0 or 1, and
+	/// `b xor ((a xor b) * c)` picks between the arms without branching.
+	/// Canonicalization produces these when it turns a diamond into a value.
+	void emitSelect(mlir::arith::SelectOp _select)
+	{
+		if (!_select.getCondition().getType().isInteger(1))
+			fail("arith.select with a non-i1 condition");
+
+		pushValue(_select.getFalseValue());
+		pushValue(_select.getTrueValue());
+		op(Instruction::XOR);
+		pushValue(_select.getCondition());
+		op(Instruction::MUL);
+		pushValue(_select.getFalseValue());
+		op(Instruction::XOR);
+		finishResult(*_select.getOperation());
+	}
+
 	void emitEvmOp(mlir::Operation& _op)
 	{
 		std::string mnemonic = _op.getName().stripDialect().str();
@@ -932,15 +952,18 @@ private:
 
 	void emitCondBranch(mlir::cf::CondBranchOp _branch)
 	{
-		// Both edges write their target's argument slots unconditionally, which
-		// is only sound while the targets are distinct.
-		if (_branch.getTrueDest() == _branch.getFalseDest()
-			&& _branch.getTrueDestOperands() != _branch.getFalseDestOperands())
-			fail("conditional branch with a shared destination and differing arguments");
-
 		// JUMPI consumes only the condition, so anything cached underneath it
 		// would survive into the successor, which expects a bare stack.
 		flushStack();
+
+		// Canonicalization merges the arms of a diamond, which can leave both
+		// edges pointing at one block with different arguments. There is no
+		// branch left to take then - the arguments themselves are the choice.
+		if (_branch.getTrueDest() == _branch.getFalseDest())
+		{
+			emitMergedBranch(_branch);
+			return;
+		}
 
 		passBlockArguments(
 			{{_branch.getTrueDest(), _branch.getTrueDestOperands()},
@@ -952,6 +975,38 @@ private:
 		if (_branch.getFalseDest() == m_next)
 			return;
 		m_assembly->appendJump(m_blockTags.at(_branch.getFalseDest()));
+	}
+
+	/// A conditional branch whose arms are the same block: pick each argument
+	/// with the branch-free select and then jump unconditionally.
+	void emitMergedBranch(mlir::cf::CondBranchOp _branch)
+	{
+		mlir::Block* target = _branch.getTrueDest();
+		mlir::ValueRange const onTrue = _branch.getTrueDestOperands();
+		mlir::ValueRange const onFalse = _branch.getFalseDestOperands();
+
+		std::vector<uint64_t> destinations;
+		for (unsigned i = 0; i < onTrue.size(); ++i)
+		{
+			if (onTrue[i] == onFalse[i])
+				pushValue(onTrue[i]);
+			else
+			{
+				pushValue(onFalse[i]);
+				pushValue(onTrue[i]);
+				op(Instruction::XOR);
+				pushValue(_branch.getCondition());
+				op(Instruction::MUL);
+				pushValue(onFalse[i]);
+				op(Instruction::XOR);
+			}
+			destinations.push_back(addressOf(target->getArgument(i)));
+		}
+		for (size_t i = destinations.size(); i > 0; --i)
+			storeToAddress(destinations[i - 1]);
+
+		if (target != m_next)
+			m_assembly->appendJump(m_blockTags.at(target));
 	}
 
 	void emitCall(mlir::func::CallOp _call)
