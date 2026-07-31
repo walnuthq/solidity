@@ -253,6 +253,26 @@ private:
 			convertFor(forOp);
 			return false;
 		}
+		if (auto call = llvm::dyn_cast<mlir::solidity::FunctionCallOp>(&_op))
+		{
+			// Internal calls map straight onto yul.func_call; only the callee
+			// attribute differs, a plain string here and a symbol reference
+			// there. Everything is a word at the yul rung, so the result types
+			// come from the arity rather than from the Solidity types.
+			llvm::SmallVector<mlir::Value, 4> arguments;
+			for (mlir::Value argument: call.getArgs())
+				arguments.push_back(mapped(argument));
+
+			llvm::SmallVector<mlir::Type, 2> resultTypes(call.getNumResults(), wordType());
+			auto lowered = m_builder.create<mlir::yul::FuncCallOp>(
+				loc(),
+				resultTypes,
+				mlir::FlatSymbolRefAttr::get(m_builder.getContext(), call.getCallee()),
+				arguments);
+			for (unsigned i = 0; i < call.getNumResults(); ++i)
+				m_map[call.getResult(i)] = lowered.getResult(i);
+			return false;
+		}
 		if (auto ret = llvm::dyn_cast<mlir::solidity::ReturnOp>(&_op))
 		{
 			llvm::SmallVector<mlir::Value, 2> results;

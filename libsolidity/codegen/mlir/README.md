@@ -227,10 +227,10 @@ Over 195 contracts from solar's `tests/ui/codegen`:
 
 | Stage reached | Contracts |
 |---|---|
-| `bytecode` | 52 |
+| `bytecode` | 73 |
 | `evm` | 2 |
-| `yul` | 12 |
-| `sol` | 129 |
+| `yul` | 21 |
+| `sol` | 99 |
 
 **Reaching `bytecode` here does not yet mean a working contract.** `SolToYul`
 generates no external dispatcher, no ABI encoding and no constructor, so
@@ -241,7 +241,6 @@ What stops the other 144, most frequent first:
 
 | Blocker | Contracts |
 |---|---|
-| `solidity.function_call` | 34 |
 | generated `sol` dialect does not parse or verify | 20 |
 | `solidity.inline_assembly` | 11 |
 | `solidity.member_access` | 8 |
@@ -252,8 +251,9 @@ What stops the other 144, most frequent first:
 | `solidity.emit` | 3 |
 | `struct_create`, `mapping_store`, `external_call`, `array_store`, `addmod`, `abi_encode`, `abi_encode_packed` | 2 each |
 
-`function_call` is internal calls, and `yul.func_call` already exists, so it is
-likely the cheapest large win.
+`solidity.function_call` is done: the two ops differ only in how the callee is
+spelled, a plain string against a symbol reference, and everything is a word at
+the `yul` rung, so the result types come from the arity. It moved 18 contracts.
 
 The round-trip failures started at 31 and are down to 20. They are a defect in
 what exists rather than an absence, and they had two causes. Ten were the

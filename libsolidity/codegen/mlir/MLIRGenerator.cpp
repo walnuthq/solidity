@@ -2721,15 +2721,30 @@ public:
 		}
 		else if (auto* ret = dynamic_cast<Return const*>(&_stmt))
 		{
+			llvm::SmallVector<mlir::Value, 4> values;
 			if (ret->expression())
+				if (mlir::Value value = generateSolidityExpression(*ret->expression()))
+					values.push_back(value);
+
+			// The verifier checks this against the enclosing function's arity,
+			// and two shapes come up short: `return;` in a function with named
+			// results, and a tuple the expression generator produced a single
+			// value for. Emitting the op anyway loses the whole contract, so
+			// make up the difference with the placeholder the generator uses
+			// everywhere else - which warns and counts as a drop rather than
+			// quietly returning something wrong.
+			mlir::Operation* parent = m_builder->getInsertionBlock()->getParentOp();
+			while (parent && !mlir::isa<mlir::solidity::FunctionOp>(parent))
+				parent = parent->getParentOp();
+			if (auto enclosing = mlir::dyn_cast_or_null<mlir::solidity::FunctionOp>(parent))
 			{
-				auto value = generateSolidityExpression(*ret->expression());
-				m_builder->create<mlir::solidity::ReturnOp>(loc, mlir::ValueRange{value});
+				mlir::ArrayRef<mlir::Type> const results = enclosing.getResultTypes();
+				for (size_t i = values.size(); i < results.size(); ++i)
+					values.push_back(emitUnsupported(loc, results[i], "return value not generated"));
+				values.resize(std::min(values.size(), results.size()));
 			}
-			else
-			{
-				m_builder->create<mlir::solidity::ReturnOp>(loc, mlir::ValueRange{});
-			}
+
+			m_builder->create<mlir::solidity::ReturnOp>(loc, mlir::ValueRange{values});
 		}
 		else if (auto* breakStmt = dynamic_cast<Break const*>(&_stmt))
 		{
