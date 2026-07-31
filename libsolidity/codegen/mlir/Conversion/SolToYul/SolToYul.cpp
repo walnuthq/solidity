@@ -52,6 +52,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Verifier.h"
@@ -110,6 +111,7 @@ private:
 	mlir::OpBuilder m_builder;
 	llvm::DenseMap<mlir::Value, mlir::Value> m_map;
 	llvm::StringMap<uint64_t> m_storageSlots;
+	llvm::StringSet<> m_declaredFunctions;
 
 	[[noreturn]] static void fail(std::string _message) { throw ConversionError{std::move(_message)}; }
 
@@ -144,6 +146,14 @@ private:
 		for (mlir::Operation& op: _contract.getBody().front().getOperations())
 			if (auto stateVar = llvm::dyn_cast<mlir::solidity::StateVarOp>(&op))
 				m_storageSlots[stateVar.getName()] = nextSlot++;
+
+		// A call can name a function this contract does not contain - one that
+		// is inherited but never emitted here, or reached through `super`.
+		// Knowing the set up front is what lets the call lowering refuse
+		// instead of building a reference that nothing resolves.
+		for (mlir::Operation& op: _contract.getBody().front().getOperations())
+			if (auto func = llvm::dyn_cast<mlir::solidity::FunctionOp>(&op))
+				m_declaredFunctions.insert(func.getSymName().str());
 
 		for (mlir::Operation& op: _contract.getBody().front().getOperations())
 		{
@@ -259,6 +269,9 @@ private:
 			// attribute differs, a plain string here and a symbol reference
 			// there. Everything is a word at the yul rung, so the result types
 			// come from the arity rather than from the Solidity types.
+			if (!m_declaredFunctions.contains(call.getCallee()))
+				fail("call to a function this contract does not define: " + call.getCallee().str());
+
 			llvm::SmallVector<mlir::Value, 4> arguments;
 			for (mlir::Value argument: call.getArgs())
 				arguments.push_back(mapped(argument));
