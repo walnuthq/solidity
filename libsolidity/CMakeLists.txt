@@ -170,6 +170,15 @@ set(sources
 	parsing/Token.h
 )
 
+# The Solidity-AST to sol-dialect generator needs the AST, so it lives in this
+# library rather than under codegen/mlir with the dialects it produces.
+if(MLIR_FOUND)
+    list(APPEND sources
+        codegen/mlir/MLIRGenerator.cpp
+        codegen/mlir/MLIRGenerator.h
+    )
+endif()
+
 add_library(solidity ${sources})
 target_link_libraries(solidity PUBLIC yul evmasm langutil smtutil solutil Boost::boost fmt::fmt-header-only Threads::Threads)
 
@@ -178,7 +187,13 @@ target_link_libraries(solidity PUBLIC yul evmasm langutil smtutil solutil Boost:
 # solc itself can offer it as a backend; the RISC-V side stays standalone.
 if(MLIR_FOUND)
     add_subdirectory(codegen/mlir)
-    target_link_libraries(solidity PUBLIC EVMAsmTarget YulToEVMConversion YulASTImport)
+    target_link_libraries(solidity PUBLIC EVMAsmTarget YulToEVMConversion YulASTImport SolidityDialect)
+    target_include_directories(solidity PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/codegen/mlir)
+    # LLVM and MLIR headers do not satisfy this project's warning settings.
+    set_source_files_properties(
+        codegen/mlir/MLIRGenerator.cpp
+        PROPERTIES COMPILE_FLAGS "-Wno-error -w"
+    )
 endif()
 if (EMSCRIPTEN)
     if(NOT ${Z3_FOUND})

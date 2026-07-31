@@ -148,6 +148,28 @@ if(MLIR_FOUND)
         PROPERTIES COMPILE_FLAGS "-Wno-error -w"
     )
 
+    add_executable(sol2evm sol2evm.cpp)
+
+    target_link_libraries(sol2evm PRIVATE
+        solidity
+        EVMAsmTarget
+        SolToYulConversion
+        YulToEVMConversion
+        SolidityDialect
+        YulMLIRDialect
+        EVMMLIRDialect
+        yul
+        evmasm
+        langutil
+        solutil
+        MLIRParser
+    )
+
+    set_source_files_properties(
+        sol2evm.cpp
+        PROPERTIES COMPILE_FLAGS "-Wno-error -w"
+    )
+
     add_executable(yul2evm yul2evm.cpp)
 
     target_link_libraries(yul2evm PRIVATE

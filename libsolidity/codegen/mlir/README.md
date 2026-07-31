@@ -208,3 +208,52 @@ Or from solc itself, on an MLIR-enabled build:
 ```sh
 solc --via-ir --optimize --mlir-bin Contract.sol
 ```
+
+## The `sol` rung: a producer, and a measured gap
+
+`MLIRGenerator` (Solidity AST -> `sol` dialect) is ported onto this branch, so
+the first rung has a producer for the first time. It lives in `libsolidity`
+rather than under `codegen/mlir` because it needs the AST. Its Yul-text
+lowering was left behind deliberately: `Conversion/SolToYul` supersedes it, and
+porting a rival lowering would defeat the point.
+
+`tools/sol2evm` drives the whole ladder with no solc Yul pipeline anywhere:
+
+```
+Solidity AST -> sol dialect -> yul dialect -> evm dialect -> EVM assembly
+```
+
+Over 195 contracts from solar's `tests/ui/codegen`:
+
+| Stage reached | Contracts |
+|---|---|
+| `bytecode` | 51 |
+| `evm` | 2 |
+| `yul` | 12 |
+| `sol` (i.e. `SolToYul` refused) | 130 |
+
+**Reaching `bytecode` here does not yet mean a working contract.** `SolToYul`
+generates no external dispatcher, no ABI encoding and no constructor, so
+`Counter.sol` compiles to 33 bytes - the function bodies with nothing to call
+them. That is a larger gap than the op list below and is not measured by it.
+
+What stops the other 144, most frequent first:
+
+| Blocker | Contracts |
+|---|---|
+| `solidity.function_call` | 34 |
+| generated `sol` dialect does not parse back | 31 |
+| `solidity.inline_assembly` | 11 |
+| `solidity.member_access` | 8 |
+| `solidity.mapping_access` | 8 |
+| `solidity.string_literal` | 7 |
+| `solidity.abi_decode` | 5 |
+| `solidity.array_access` | 4 |
+| `solidity.emit` | 3 |
+| `struct_create`, `mapping_store`, `external_call`, `array_store`, `addmod`, `abi_encode`, `abi_encode_packed` | 2 each |
+
+Two of these are worth separating from the rest. `function_call` is internal
+calls, and `yul.func_call` already exists, so it is likely the cheapest large
+win. The 31 parse failures are a round-trip bug rather than a missing feature:
+the generator emits `sol` dialect text that the dialect will not read back, so
+they are a defect in what exists rather than an absence.
