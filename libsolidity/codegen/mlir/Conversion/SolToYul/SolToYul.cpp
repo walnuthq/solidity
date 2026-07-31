@@ -263,6 +263,24 @@ private:
 			convertFor(forOp);
 			return false;
 		}
+		if (auto access = llvm::dyn_cast<mlir::solidity::MappingAccessOp>(&_op))
+		{
+			mlir::Value slot = mappingSlot(storageSlot(access.getVarName()), access.getKeys());
+			m_map[access.getResult()] = m_builder.create<mlir::yul::SLoadOp>(loc(), slot);
+			return false;
+		}
+		if (auto store = llvm::dyn_cast<mlir::solidity::MappingStoreOp>(&_op))
+		{
+			// The operands are the keys followed by the value; only the count
+			// of keys says where the split is.
+			unsigned const keyCount = static_cast<unsigned>(store.getNumKeys());
+			if (store.getOperands().size() != keyCount + 1)
+				fail("mapping_store operand count disagrees with its numKeys attribute");
+			mlir::Value slot
+				= mappingSlot(storageSlot(store.getVarName()), store.getOperands().take_front(keyCount));
+			m_builder.create<mlir::yul::SStoreOp>(loc(), slot, mapped(store.getOperands().back()));
+			return false;
+		}
 		if (auto call = llvm::dyn_cast<mlir::solidity::FunctionCallOp>(&_op))
 		{
 			// Internal calls map straight onto yul.func_call; only the callee
@@ -326,6 +344,24 @@ private:
 		m_builder.setInsertionPointToStart(&ifOp.getThenRegion().emplaceBlock());
 		mlir::Value zero = wordConstant(uint64_t(0));
 		m_builder.create<mlir::yul::RevertOp>(loc(), zero, zero);
+	}
+
+	/// Slot of `mapping[key]`, which Solidity defines as
+	/// keccak256(key . slot) over the two words written to scratch memory at
+	/// 0x00 and 0x20 - the region the language reserves for exactly this. A
+	/// nested mapping applies the rule once per key, the result of one round
+	/// becoming the base slot of the next.
+	mlir::Value mappingSlot(uint64_t _baseSlot, mlir::ValueRange _keys)
+	{
+		mlir::Value slot = wordConstant(_baseSlot);
+		for (mlir::Value key: _keys)
+		{
+			m_builder.create<mlir::yul::MStoreOp>(loc(), wordConstant(uint64_t(0)), mapped(key));
+			m_builder.create<mlir::yul::MStoreOp>(loc(), wordConstant(uint64_t(32)), slot);
+			slot = m_builder.create<mlir::yul::Keccak256Op>(
+				loc(), wordConstant(uint64_t(0)), wordConstant(uint64_t(64)));
+		}
+		return slot;
 	}
 
 	uint64_t storageSlot(llvm::StringRef _name)
