@@ -117,6 +117,7 @@ private:
 	llvm::DenseMap<mlir::Value, mlir::Value> m_map;
 	llvm::StringMap<uint64_t> m_storageSlots;
 	llvm::StringSet<> m_declaredFunctions;
+	std::string m_contractName;
 
 	[[noreturn]] static void fail(std::string _message) { throw ConversionError{std::move(_message)}; }
 
@@ -142,8 +143,16 @@ private:
 	// Structure
 	//===------------------------------------------------------------------===//
 
+	/// Yul has one flat namespace, but a file's contracts all land in one
+	/// module and nothing stops two of them defining `value`. Qualifying the
+	/// symbol by its contract is what keeps them apart; the ABI name is taken
+	/// from the unqualified part, so selectors are unaffected.
+	std::string qualified(llvm::StringRef _name) const { return m_contractName + "." + _name.str(); }
+
 	void convertContract(mlir::solidity::ContractOp _contract, mlir::ModuleOp _dst)
 	{
+		m_contractName = _contract.getName().str();
+		m_declaredFunctions.clear();
 		// Storage layout: sequential slots in declaration order (the real
 		// pipeline uses ContractType::linearizedStateVariables(); the
 		// generator emits state_var ops in that order).
@@ -158,7 +167,7 @@ private:
 		// instead of building a reference that nothing resolves.
 		for (mlir::Operation& op: _contract.getBody().front().getOperations())
 			if (auto func = llvm::dyn_cast<mlir::solidity::FunctionOp>(&op))
-				m_declaredFunctions.insert(func.getSymName().str());
+				m_declaredFunctions.insert(qualified(func.getSymName()));
 
 		for (mlir::Operation& op: _contract.getBody().front().getOperations())
 		{
@@ -183,7 +192,8 @@ private:
 		llvm::SmallVector<mlir::Type, 2> resultTypes(solType.getNumResults(), wordType());
 		auto yulType = mlir::FunctionType::get(m_builder.getContext(), paramTypes, resultTypes);
 
-		auto yulFunc = m_builder.create<mlir::yul::FuncOp>(loc(), _func.getSymName(), yulType);
+		auto yulFunc = m_builder.create<mlir::yul::FuncOp>(
+			loc(), m_contractName.empty() ? _func.getSymName().str() : qualified(_func.getSymName()), yulType);
 		mlir::Block* body = &yulFunc.getBody().emplaceBlock();
 
 		mlir::OpBuilder::InsertionGuard guard(m_builder);
@@ -294,7 +304,11 @@ private:
 			// attribute differs, a plain string here and a symbol reference
 			// there. Everything is a word at the yul rung, so the result types
 			// come from the arity rather than from the Solidity types.
-			if (!m_declaredFunctions.contains(call.getCallee()))
+			// A call names a function of the contract being converted; anything
+			// else - inherited but not emitted here, or reached through
+			// `super` - has no symbol to bind to.
+			std::string const callee = qualified(call.getCallee());
+			if (!m_declaredFunctions.contains(callee))
 				fail("call to a function this contract does not define: " + call.getCallee().str());
 
 			llvm::SmallVector<mlir::Value, 4> arguments;
@@ -305,7 +319,7 @@ private:
 			auto lowered = m_builder.create<mlir::yul::FuncCallOp>(
 				loc(),
 				resultTypes,
-				mlir::FlatSymbolRefAttr::get(m_builder.getContext(), call.getCallee()),
+				mlir::FlatSymbolRefAttr::get(m_builder.getContext(), callee),
 				arguments);
 			for (unsigned i = 0; i < call.getNumResults(); ++i)
 				m_map[call.getResult(i)] = lowered.getResult(i);
@@ -474,7 +488,7 @@ private:
 			auto called = m_builder.create<mlir::yul::FuncCallOp>(
 				loc(),
 				resultTypes,
-				mlir::FlatSymbolRefAttr::get(m_builder.getContext(), func.getSymName()),
+				mlir::FlatSymbolRefAttr::get(m_builder.getContext(), qualified(func.getSymName())),
 				arguments);
 
 			mlir::Value zero = wordConstant(uint64_t(0));
