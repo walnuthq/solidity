@@ -959,6 +959,25 @@ public:
 		return keys;
 	}
 
+	/// The callee of an internal call, qualified by the contract that defines
+	/// it. Solidity has already resolved which declaration a call reaches -
+	/// `Base.value(1)` and a virtual `value(1)` inside the override name
+	/// different ones - and dropping that resolution here is what made both
+	/// lower to the same symbol and bind to whichever won.
+	std::string resolvedCalleeName(FunctionCall const& _call, std::string const& _fallback)
+	{
+		Declaration const* declaration = nullptr;
+		if (auto const* ident = dynamic_cast<Identifier const*>(&_call.expression()))
+			declaration = ident->annotation().referencedDeclaration;
+		else if (auto const* member = dynamic_cast<MemberAccess const*>(&_call.expression()))
+			declaration = member->annotation().referencedDeclaration;
+
+		if (auto const* function = dynamic_cast<FunctionDefinition const*>(declaration))
+			if (auto const* contract = dynamic_cast<ContractDefinition const*>(function->scope()))
+				return contract->name() + "." + function->name();
+		return _fallback;
+	}
+
 	mlir::Value generateSolidityExpression(Expression const& _expr)
 	{
 		auto loc = this->loc(_expr);
@@ -2071,12 +2090,12 @@ public:
 						{
 							auto resultType = translateSolidityType(*_expr.annotation().type);
 							return m_builder->create<mlir::solidity::FunctionCallOp>(
-								loc, mlir::TypeRange{resultType}, m_builder->getStringAttr(funcName), args).getResult(0);
+								loc, mlir::TypeRange{resultType}, m_builder->getStringAttr(resolvedCalleeName(*funcCall, funcName)), args).getResult(0);
 						}
 						else
 						{
 							m_builder->create<mlir::solidity::FunctionCallOp>(
-								loc, mlir::TypeRange{}, m_builder->getStringAttr(funcName), args);
+								loc, mlir::TypeRange{}, m_builder->getStringAttr(resolvedCalleeName(*funcCall, funcName)), args);
 							return nullptr;
 						}
 					}
@@ -2100,13 +2119,13 @@ public:
 					{
 						auto resultType = translateSolidityType(*_expr.annotation().type);
 						return m_builder->create<mlir::solidity::FunctionCallOp>(
-							loc, mlir::TypeRange{resultType}, m_builder->getStringAttr(funcName), args).getResult(0);
+							loc, mlir::TypeRange{resultType}, m_builder->getStringAttr(resolvedCalleeName(*funcCall, funcName)), args).getResult(0);
 					}
 					else
 					{
 						// Void function
 						m_builder->create<mlir::solidity::FunctionCallOp>(
-							loc, mlir::TypeRange{}, m_builder->getStringAttr(funcName), args);
+							loc, mlir::TypeRange{}, m_builder->getStringAttr(resolvedCalleeName(*funcCall, funcName)), args);
 						return nullptr;
 					}
 				}

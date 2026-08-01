@@ -86,6 +86,16 @@ public:
 		mlir::OwningOpRef<mlir::ModuleOp> dst = mlir::ModuleOp::create(m_builder.getUnknownLoc());
 		try
 		{
+			// Every contract's functions have to be known before any body is
+			// converted: a call now names the contract that defines it, and
+			// `Base.value` is reachable from `Derived` even though it lives in
+			// a different sol.contract.
+			for (mlir::Operation& op: _src.getBody()->getOperations())
+				if (auto contract = llvm::dyn_cast<mlir::solidity::ContractOp>(&op))
+					for (mlir::Operation& inner: contract.getBody().front().getOperations())
+						if (auto func = llvm::dyn_cast<mlir::solidity::FunctionOp>(&inner))
+							m_declaredFunctions.insert(contract.getName().str() + "." + func.getSymName().str());
+
 			for (mlir::Operation& op: _src.getBody()->getOperations())
 			{
 				if (auto contract = llvm::dyn_cast<mlir::solidity::ContractOp>(&op))
@@ -152,7 +162,6 @@ private:
 	void convertContract(mlir::solidity::ContractOp _contract, mlir::ModuleOp _dst)
 	{
 		m_contractName = _contract.getName().str();
-		m_declaredFunctions.clear();
 		// Storage layout: sequential slots in declaration order (the real
 		// pipeline uses ContractType::linearizedStateVariables(); the
 		// generator emits state_var ops in that order).
@@ -307,7 +316,11 @@ private:
 			// A call names a function of the contract being converted; anything
 			// else - inherited but not emitted here, or reached through
 			// `super` - has no symbol to bind to.
-			std::string const callee = qualified(call.getCallee());
+			// The generator names another contract's function in full; an
+			// unqualified name is one of this contract's own.
+			std::string const callee = call.getCallee().contains('.')
+				? call.getCallee().str()
+				: qualified(call.getCallee());
 			if (!m_declaredFunctions.contains(callee))
 				fail("call to a function this contract does not define: " + call.getCallee().str());
 
