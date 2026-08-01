@@ -94,7 +94,10 @@ public:
 				if (auto contract = llvm::dyn_cast<mlir::solidity::ContractOp>(&op))
 					for (mlir::Operation& inner: contract.getBody().front().getOperations())
 						if (auto func = llvm::dyn_cast<mlir::solidity::FunctionOp>(&inner))
-							m_declaredFunctions.insert(contract.getName().str() + "." + func.getSymName().str());
+							m_declaredFunctions.insert(
+								func.getSymName().contains('.')
+									? func.getSymName().str()
+									: contract.getName().str() + "." + func.getSymName().str());
 
 			for (mlir::Operation& op: _src.getBody()->getOperations())
 			{
@@ -201,8 +204,11 @@ private:
 		llvm::SmallVector<mlir::Type, 2> resultTypes(solType.getNumResults(), wordType());
 		auto yulType = mlir::FunctionType::get(m_builder.getContext(), paramTypes, resultTypes);
 
+		bool const preQualified = _func.getSymName().contains('.');
 		auto yulFunc = m_builder.create<mlir::yul::FuncOp>(
-			loc(), m_contractName.empty() ? _func.getSymName().str() : qualified(_func.getSymName()), yulType);
+			loc(),
+			(preQualified || m_contractName.empty()) ? _func.getSymName().str() : qualified(_func.getSymName()),
+			yulType);
 		mlir::Block* body = &yulFunc.getBody().emplaceBlock();
 
 		mlir::OpBuilder::InsertionGuard guard(m_builder);
@@ -451,6 +457,8 @@ private:
 			auto func = llvm::dyn_cast<mlir::solidity::FunctionOp>(&op);
 			if (!func)
 				continue;
+			if (func.getSymName().contains('.'))
+				continue; // a shadowed base implementation, reachable only by explicit call
 			if (func.getVisibility() && *func.getVisibility() != "public" && *func.getVisibility() != "external")
 				continue;
 			if (func.getResultTypes().size() > 1)

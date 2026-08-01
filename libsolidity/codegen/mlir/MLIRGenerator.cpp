@@ -151,6 +151,7 @@ public:
 
 	std::string generateModule(ContractDefinition const& _contract)
 	{
+		m_mostDerivedContract = &_contract;
 #ifdef SOLIDITY_HAS_MLIR
 		auto loc = this->loc(_contract);
 
@@ -256,6 +257,13 @@ public:
 						generatedFunctions.insert(signature);
 						generateSolidityFunction(*func);
 					}
+					else if (func->isImplemented())
+						// An overridden base implementation is still reachable
+						// by an explicit `Base.f(...)`, so it has to exist -
+						// under the name such a call resolves to, qualified by
+						// its defining contract so it cannot collide with the
+						// override that shadows it.
+						generateSolidityFunction(*func, baseContract->name() + "." + func->name());
 				}
 			}
 		}
@@ -685,7 +693,7 @@ public:
 		m_builder->restoreInsertionPoint(savedIP);
 	}
 
-	void generateSolidityFunction(FunctionDefinition const& _func)
+	void generateSolidityFunction(FunctionDefinition const& _func, std::string const& _nameOverride = {})
 	{
 		auto loc = this->loc(_func);
 
@@ -727,7 +735,7 @@ public:
 
 		// Create Solidity function operation using typed builder
 		auto funcOp = m_builder->create<mlir::solidity::FunctionOp>(
-			loc, _func.name(), funcType, visibility, mutability);
+			loc, _nameOverride.empty() ? _func.name() : _nameOverride, funcType, visibility, mutability);
 
 		// Add kind attribute to distinguish constructors, receive, fallback
 		if (_func.isConstructor())
@@ -972,11 +980,23 @@ public:
 		else if (auto const* member = dynamic_cast<MemberAccess const*>(&_call.expression()))
 			declaration = member->annotation().referencedDeclaration;
 
-		if (auto const* function = dynamic_cast<FunctionDefinition const*>(declaration))
-			if (auto const* contract = dynamic_cast<ContractDefinition const*>(function->scope()))
-				return contract->name() + "." + function->name();
-		return _fallback;
+		auto const* function = dynamic_cast<FunctionDefinition const*>(declaration);
+		if (!function || !dynamic_cast<ContractDefinition const*>(function->scope()))
+			return _fallback;
+
+		// An unqualified call is virtual: `hook()` inside a body Concrete
+		// inherits must reach Concrete's override, not the declaration the
+		// name resolved to in the base. An explicit `Base.f(...)` arrives as
+		// a MemberAccess and stays direct.
+		if (dynamic_cast<Identifier const*>(&_call.expression()) && m_mostDerivedContract
+			&& !function->isConstructor())
+			function = &function->resolveVirtual(*m_mostDerivedContract);
+
+		auto const* contract = dynamic_cast<ContractDefinition const*>(function->scope());
+		return contract ? contract->name() + "." + function->name() : _fallback;
 	}
+
+	ContractDefinition const* m_mostDerivedContract = nullptr;
 
 	mlir::Value generateSolidityExpression(Expression const& _expr)
 	{

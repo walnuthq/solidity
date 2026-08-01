@@ -1,4 +1,4 @@
-1.869011e-02 dispatcher.sol
-1.825786e-02 landmine_folds.yul
-1.853585e-02 mapping_slot.sol
-1.655293e-02 base_call.sol
+1.593375e-02 dispatcher.sol
+1.447201e-02 landmine_folds.yul
+1.520395e-02 mapping_slot.sol
+1.489687e-02 base_call.sol
