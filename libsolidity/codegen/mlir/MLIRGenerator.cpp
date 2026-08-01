@@ -487,9 +487,11 @@ public:
 		// Create Solidity type
 		auto solidityType = translateSolidityType(*_var.type());
 
-		// Compute initial value for constants
+		// The initialiser of an ordinary state variable matters as much as a
+		// constant's: the creation code has to store it, or the variable reads
+		// zero however it was declared.
 		mlir::Attribute initialValue;
-		if (_var.isConstant() && _var.value())
+		if (_var.value())
 		{
 			// Try to extract the literal value from the constant expression
 			if (auto* literal = dynamic_cast<Literal const*>(_var.value().get()))
@@ -993,7 +995,12 @@ public:
 			function = &function->resolveVirtual(*m_mostDerivedContract);
 
 		auto const* contract = dynamic_cast<ContractDefinition const*>(function->scope());
-		return contract ? contract->name() + "." + function->name() : _fallback;
+		if (!contract)
+			return _fallback;
+		// A constructor has no name of its own; the conversion knows it as
+		// `Contract.constructor`, and both sides have to agree or the call
+		// references nothing.
+		return contract->name() + "." + (function->isConstructor() ? "constructor" : function->name());
 	}
 
 	ContractDefinition const* m_mostDerivedContract = nullptr;

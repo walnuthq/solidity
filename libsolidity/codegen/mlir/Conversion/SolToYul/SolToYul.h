@@ -47,7 +47,14 @@ namespace solidity::mlirgen
 
 /// Converts a module of `sol` dialect ops into a fresh module of `yul`
 /// dialect ops. On failure returns null and sets _error.
-mlir::OwningOpRef<mlir::ModuleOp> convertSolToYul(mlir::ModuleOp _module, std::string& _error);
+/// Converts the `sol` dialect to the `yul` dialect.
+///
+/// @param _creation selects which half of the object is produced. The runtime
+/// half is the dispatcher and the functions it reaches; the creation half runs
+/// the state-variable initialisers and the constructor, then copies the runtime
+/// half into place and returns it.
+mlir::OwningOpRef<mlir::ModuleOp>
+convertSolToYul(mlir::ModuleOp _module, std::string& _error, bool _creation = false);
 
 } // namespace solidity::mlirgen
 

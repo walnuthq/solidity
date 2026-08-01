@@ -42,7 +42,7 @@ for src in sorted(pathlib.Path(sys.argv[1]).rglob('*.sol'))[:int(sys.argv[2])]:
         m = re.match(r'HEX contract="([^"]+)" ([0-9a-f]+)', line)
         if m: mine[m.group(1).split(':')[-1]] = m.group(2)
     if not mine: continue
-    ref = subprocess.run([SOLC,'--via-ir','--optimize','--bin-runtime','--hashes',str(src)],
+    ref = subprocess.run([SOLC,'--via-ir','--optimize','--bin','--hashes',str(src)],
                          capture_output=True, text=True)
     # per-contract runtime code + selectors
     cur=None; want=False; refs={}
@@ -50,7 +50,7 @@ for src in sorted(pathlib.Path(sys.argv[1]).rglob('*.sol'))[:int(sys.argv[2])]:
         s=line.strip()
         if s.startswith('======='): cur=s.strip('= ').split(':')[-1]; refs.setdefault(cur,['',[]]); want=False
         elif cur is None: continue
-        elif s.startswith('Binary of the runtime part'): want=True
+        elif s == 'Binary:': want=True
         elif want:
             if s and all(c in '0123456789abcdef' for c in s): refs[cur][0]=s
             want=False
@@ -61,9 +61,17 @@ for src in sorted(pathlib.Path(sys.argv[1]).rglob('*.sol'))[:int(sys.argv[2])]:
         if name not in refs or not refs[name][0] or '__$' in refs[name][0]: skip+=1; continue
         rcode, sels = refs[name]
         if not sels: skip+=1; continue
-        addr_n+=1; a='0x'+format(addr_n,'040x'); addr_n+=1; b='0x'+format(addr_n,'040x')
-        rpc.call('anvil_setCode',[a,'0x'+code]); rpc.call('anvil_setCode',[b,'0x'+rcode])
-        diff=[(s,D.probe(a,s,rpc),D.probe(b,s,rpc)) for s in sels]
+        # Same snapshot for each so both land at the same address and neither
+        # sees the other's storage.
+        snap,_ = rpc.call('evm_snapshot',[])
+        b = D.deploy(rcode, rpc)
+        refres = [D.probe(b,s,rpc) for s in sels] if b else None
+        rpc.call('evm_revert',[snap])
+        a = D.deploy(code, rpc)
+        if not b: skip+=1; continue
+        if not a:
+            print(f'FAIL {src.name}:{name}  creation code does not deploy'); bad+=1; continue
+        diff=[(s,D.probe(a,s,rpc),refres[i]) for i,s in enumerate(sels)]
         diff=[d for d in diff if d[1]!=d[2]]
         if diff:
             print(f'DIFF {src.name}:{name}  {len(diff)}/{len(sels)}')

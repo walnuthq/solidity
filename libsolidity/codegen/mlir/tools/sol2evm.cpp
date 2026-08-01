@@ -186,9 +186,32 @@ int main(int argc, char** argv)
 						else
 						{
 							stage = "asm";
+
+							// The creation half runs the initialisers and the
+							// constructor, then returns the runtime half, so it
+							// has to carry that half as a nested object.
+							std::string creationError;
+							mlir::OwningOpRef<mlir::ModuleOp> creationYul
+								= mlirgen::convertSolToYul(*solModule, creationError, /*creation=*/true);
+							std::shared_ptr<evmasm::Assembly> creation;
+							if (creationYul)
+							{
+								mlir::OwningOpRef<mlir::ModuleOp> creationEvm
+									= mlirgen::convertYulToEVM(*creationYul, creationError);
+								if (creationEvm)
+								{
+									mlirgen::EVMAssemblyOptions creationOptions;
+									creationOptions.name = name + "_creation";
+									creationOptions.creation = true;
+									creationOptions.subObjects.push_back({"runtime", assembly, {}});
+									creation = mlirgen::emitEVMAssembly(*creationEvm, creationOptions, creationError);
+								}
+							}
+
 							try
 							{
-								solidity::evmasm::LinkerObject const& linked = assembly->assemble();
+								solidity::evmasm::LinkerObject const& linked
+									= (creation ? creation : assembly)->assemble();
 								byteCount = linked.bytecode.size();
 								stage = "bytecode";
 								detail = std::to_string(byteCount) + " bytes";

@@ -76,10 +76,14 @@ struct ConversionError
 	std::string message;
 };
 
+/// Name the creation half uses to address the runtime half, and the name
+/// sol2evm registers that half's assembly under.
+constexpr char kRuntimeObjectName[] = "runtime";
+
 class SolToYulConverter
 {
 public:
-	explicit SolToYulConverter(mlir::MLIRContext& _ctx): m_builder(&_ctx) {}
+	SolToYulConverter(mlir::MLIRContext& _ctx, bool _creation): m_builder(&_ctx), m_creation(_creation) {}
 
 	mlir::OwningOpRef<mlir::ModuleOp> run(mlir::ModuleOp _src, std::string& _error)
 	{
@@ -94,10 +98,16 @@ public:
 				if (auto contract = llvm::dyn_cast<mlir::solidity::ContractOp>(&op))
 					for (mlir::Operation& inner: contract.getBody().front().getOperations())
 						if (auto func = llvm::dyn_cast<mlir::solidity::FunctionOp>(&inner))
+						{
+							auto kindAttr = func->getAttrOfType<mlir::StringAttr>("kind");
+							std::string const bare = (kindAttr && kindAttr.getValue() == "constructor")
+								? std::string("constructor")
+								: func.getSymName().str();
 							m_declaredFunctions.insert(
-								func.getSymName().contains('.')
-									? func.getSymName().str()
-									: contract.getName().str() + "." + func.getSymName().str());
+								bare.find('.') != std::string::npos
+									? bare
+									: contract.getName().str() + "." + bare);
+						}
 
 			for (mlir::Operation& op: _src.getBody()->getOperations())
 			{
@@ -131,6 +141,7 @@ private:
 	llvm::StringMap<uint64_t> m_storageSlots;
 	llvm::StringSet<> m_declaredFunctions;
 	std::string m_contractName;
+	bool m_creation = false;
 
 	[[noreturn]] static void fail(std::string _message) { throw ConversionError{std::move(_message)}; }
 
@@ -194,7 +205,52 @@ private:
 			fail("unsupported op in contract body: " + op.getName().getStringRef().str());
 		}
 
-		emitDispatcher(_contract, _dst);
+		if (m_creation)
+			emitCreation(_contract, _dst);
+		else
+			emitDispatcher(_contract, _dst);
+	}
+
+	/// The creation half. State variables with an initialiser are stored to
+	/// their slots, the constructor body runs if there is one, and then the
+	/// runtime half is copied out of the object's data and returned - which is
+	/// what makes it the deployed code.
+	void emitCreation(mlir::solidity::ContractOp _contract, mlir::ModuleOp _dst)
+	{
+		mlir::OpBuilder::InsertionGuard guard(m_builder);
+		m_builder.setInsertionPointToEnd(_dst.getBody());
+
+		for (mlir::Operation& op: _contract.getBody().front().getOperations())
+		{
+			auto stateVar = llvm::dyn_cast<mlir::solidity::StateVarOp>(&op);
+			if (!stateVar || stateVar.getIsConstant() || stateVar.getIsImmutable())
+				continue;
+			// The generator records the initialiser as its decimal value; a
+			// variable without one is already zero and needs no store.
+			auto initial = llvm::dyn_cast_or_null<mlir::StringAttr>(stateVar.getInitialValueAttr());
+			if (!initial || initial.getValue().empty())
+				continue;
+			llvm::APInt value(256, 0);
+			if (initial.getValue().getAsInteger(10, value))
+				continue; // not a plain integer literal; nothing to store yet
+			m_builder.create<mlir::yul::SStoreOp>(
+				loc(), wordConstant(storageSlot(stateVar.getName())), wordConstant(value));
+		}
+
+		// A constructor body was converted as a function; call it.
+		std::string const constructorName = qualified("constructor");
+		if (m_declaredFunctions.contains(constructorName))
+			m_builder.create<mlir::yul::FuncCallOp>(
+				loc(),
+				mlir::TypeRange{},
+				mlir::FlatSymbolRefAttr::get(m_builder.getContext(), constructorName),
+				mlir::ValueRange{});
+
+		mlir::Value size = m_builder.create<mlir::yul::DataSizeOp>(loc(), kRuntimeObjectName);
+		mlir::Value offset = m_builder.create<mlir::yul::DataOffsetOp>(loc(), kRuntimeObjectName);
+		mlir::Value zero = wordConstant(uint64_t(0));
+		m_builder.create<mlir::yul::DataCopyOp>(loc(), zero, offset, size);
+		m_builder.create<mlir::yul::ReturnOp>(loc(), zero, size);
 	}
 
 	void convertFunction(mlir::solidity::FunctionOp _func)
@@ -203,6 +259,34 @@ private:
 		llvm::SmallVector<mlir::Type, 4> paramTypes(solType.getNumInputs(), wordType());
 		llvm::SmallVector<mlir::Type, 2> resultTypes(solType.getNumResults(), wordType());
 		auto yulType = mlir::FunctionType::get(m_builder.getContext(), paramTypes, resultTypes);
+
+		std::string const kind
+			= _func->getAttrOfType<mlir::StringAttr>("kind") ? _func->getAttrOfType<mlir::StringAttr>("kind").str() : "";
+		if (kind == "constructor")
+		{
+			// Constructors reach the module under a name of their own, since
+			// the generator leaves sym_name empty for them.
+			mlir::FunctionType const solType0 = _func.getFunctionType();
+			auto ctorType = mlir::FunctionType::get(
+				m_builder.getContext(),
+				llvm::SmallVector<mlir::Type, 4>(solType0.getNumInputs(), wordType()),
+				llvm::SmallVector<mlir::Type, 2>(solType0.getNumResults(), wordType()));
+			auto ctor = m_builder.create<mlir::yul::FuncOp>(loc(), qualified("constructor"), ctorType);
+			mlir::Block* ctorBody = &ctor.getBody().emplaceBlock();
+			mlir::OpBuilder::InsertionGuard ctorGuard(m_builder);
+			m_builder.setInsertionPointToStart(ctorBody);
+			bool ctorTerminated = false;
+			if (!_func.getBody().empty())
+			{
+				mlir::Block& srcEntry0 = _func.getBody().front();
+				for (unsigned i = 0; i < srcEntry0.getNumArguments(); ++i)
+					m_map[srcEntry0.getArgument(i)] = ctorBody->addArgument(wordType(), loc());
+				ctorTerminated = convertBlockOps(srcEntry0);
+			}
+			if (!ctorTerminated)
+				m_builder.create<mlir::yul::LeaveOp>(loc(), mlir::ValueRange{});
+			return;
+		}
 
 		bool const preQualified = _func.getSymName().contains('.');
 		auto yulFunc = m_builder.create<mlir::yul::FuncOp>(
@@ -459,6 +543,11 @@ private:
 				continue;
 			if (func.getSymName().contains('.'))
 				continue; // a shadowed base implementation, reachable only by explicit call
+			// Constructors, receive and fallback are not reached by a selector.
+			// The constructor in particular has no name, so building an entry
+			// for it yields a call to nothing.
+			if (func->getAttrOfType<mlir::StringAttr>("kind"))
+				continue;
 			if (func.getVisibility() && *func.getVisibility() != "public" && *func.getVisibility() != "external")
 				continue;
 			if (func.getResultTypes().size() > 1)
@@ -742,11 +831,11 @@ private:
 namespace solidity::mlirgen
 {
 
-mlir::OwningOpRef<mlir::ModuleOp> convertSolToYul(mlir::ModuleOp _module, std::string& _error)
+mlir::OwningOpRef<mlir::ModuleOp> convertSolToYul(mlir::ModuleOp _module, std::string& _error, bool _creation)
 {
 	mlir::MLIRContext& ctx = *_module.getContext();
 	ctx.getOrLoadDialect<mlir::yul::YulDialect>();
-	return SolToYulConverter(ctx).run(_module, _error);
+	return SolToYulConverter(ctx, _creation).run(_module, _error);
 }
 
 } // namespace solidity::mlirgen
