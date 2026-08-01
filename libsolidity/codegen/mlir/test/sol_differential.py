@@ -33,6 +33,8 @@ if not rpc_reachable('http://127.0.0.1:8546'):
     print('no JSON-RPC node at http://127.0.0.1:8546 - skipping'); sys.exit(77)
 
 rpc = D.Rpc('http://127.0.0.1:8546')
+if not D.preflight(rpc):
+    sys.exit(77)
 addr_n = 0x700000
 ok = bad = skip = 0
 for src in sorted(pathlib.Path(sys.argv[1]).rglob('*.sol'))[:int(sys.argv[2])]:

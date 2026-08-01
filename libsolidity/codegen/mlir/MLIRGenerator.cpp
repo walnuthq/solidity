@@ -824,6 +824,55 @@ public:
 		m_builder->restoreInsertionPoint(savedIP);
 	}
 
+	// Variables a statement declares. A nested loop's own counter is modified
+	// inside it but does not exist outside it, so it must not be carried by the
+	// enclosing loop.
+	std::set<int64_t> collectDeclaredVariables(Statement const& _stmt)
+	{
+		std::set<int64_t> declared;
+		if (auto* varStmt = dynamic_cast<VariableDeclarationStatement const*>(&_stmt))
+		{
+			for (auto const& var: varStmt->declarations())
+				if (var)
+					declared.insert(var->id());
+		}
+		else if (auto* block = dynamic_cast<Block const*>(&_stmt))
+		{
+			for (auto const& stmt: block->statements())
+				if (stmt)
+				{
+					auto sub = collectDeclaredVariables(*stmt);
+					declared.insert(sub.begin(), sub.end());
+				}
+		}
+		else if (auto* ifStmt = dynamic_cast<IfStatement const*>(&_stmt))
+		{
+			auto sub = collectDeclaredVariables(ifStmt->trueStatement());
+			declared.insert(sub.begin(), sub.end());
+			if (ifStmt->falseStatement())
+			{
+				auto other = collectDeclaredVariables(*ifStmt->falseStatement());
+				declared.insert(other.begin(), other.end());
+			}
+		}
+		else if (auto* forStmt = dynamic_cast<ForStatement const*>(&_stmt))
+		{
+			if (forStmt->initializationExpression())
+			{
+				auto init = collectDeclaredVariables(*forStmt->initializationExpression());
+				declared.insert(init.begin(), init.end());
+			}
+			auto body = collectDeclaredVariables(forStmt->body());
+			declared.insert(body.begin(), body.end());
+		}
+		else if (auto* whileStmt = dynamic_cast<WhileStatement const*>(&_stmt))
+		{
+			auto body = collectDeclaredVariables(whileStmt->body());
+			declared.insert(body.begin(), body.end());
+		}
+		return declared;
+	}
+
 	// Helper function to collect all variables modified in a statement
 	std::set<int64_t> collectModifiedVariables(Statement const& _stmt)
 	{
@@ -878,7 +927,40 @@ public:
 				modifiedVars.insert(falseVars.begin(), falseVars.end());
 			}
 		}
-		// Note: Don't recurse into nested loops
+		else if (dynamic_cast<ForStatement const*>(&_stmt) || dynamic_cast<WhileStatement const*>(&_stmt))
+		{
+			// A variable a nested loop assigns is modified by this loop as
+			// well, so both have to carry it. Not recursing here left the outer
+			// loop yielding fewer values than it needed, and the code after it
+			// naming the inner loop's result - which is out of scope there, so
+			// the whole contract failed to verify.
+			std::set<int64_t> nested;
+			if (auto* forStmt = dynamic_cast<ForStatement const*>(&_stmt))
+			{
+				if (forStmt->initializationExpression())
+				{
+					auto init = collectModifiedVariables(*forStmt->initializationExpression());
+					nested.insert(init.begin(), init.end());
+				}
+				if (forStmt->loopExpression())
+				{
+					auto step = collectModifiedVariables(*forStmt->loopExpression());
+					nested.insert(step.begin(), step.end());
+				}
+				auto body = collectModifiedVariables(forStmt->body());
+				nested.insert(body.begin(), body.end());
+			}
+			else
+			{
+				auto* whileStmt = dynamic_cast<WhileStatement const*>(&_stmt);
+				auto body = collectModifiedVariables(whileStmt->body());
+				nested.insert(body.begin(), body.end());
+			}
+
+			for (int64_t id: collectDeclaredVariables(_stmt))
+				nested.erase(id);
+			modifiedVars.insert(nested.begin(), nested.end());
+		}
 
 		return modifiedVars;
 	}
@@ -995,6 +1077,17 @@ public:
 	/// Makes an argument list agree with the callee's arity. An argument whose
 	/// expression was dropped leaves the list short, and the call the verifier
 	/// then rejects costs the whole contract rather than the one argument.
+	/// A dropped sub-expression comes back as a uint256 placeholder, so an op
+	/// needing a boolean or an array is handed the wrong type and the verifier
+	/// rejects it - costing the whole contract for the one expression. Re-place
+	/// the operand as a placeholder of the type the op declares.
+	mlir::Value typedOperand(mlir::Location _loc, mlir::Value _value, mlir::Type _expected, std::string const& _what)
+	{
+		if (!_value || _value.getType() == _expected)
+			return _value;
+		return emitUnsupported(_loc, _expected, _what);
+	}
+
 	void padCallArguments(FunctionCall const& _call, std::vector<mlir::Value>& _args, mlir::Location _loc)
 	{
 		FunctionDefinition const* callee = resolvedCallee(_call);
@@ -1263,12 +1356,20 @@ public:
 			case langutil::Token::And:
 			{
 				auto boolType = mlir::solidity::BoolType::get(m_context.get());
-				return m_builder->create<mlir::solidity::LogicalAndOp>(loc, boolType, lhs, rhs);
+				return m_builder->create<mlir::solidity::LogicalAndOp>(
+					loc,
+					boolType,
+					typedOperand(loc, lhs, boolType, "left operand of '&&' not generated as a boolean"),
+					typedOperand(loc, rhs, boolType, "right operand of '&&' not generated as a boolean"));
 			}
 			case langutil::Token::Or:
 			{
 				auto boolType = mlir::solidity::BoolType::get(m_context.get());
-				return m_builder->create<mlir::solidity::LogicalOrOp>(loc, boolType, lhs, rhs);
+				return m_builder->create<mlir::solidity::LogicalOrOp>(
+					loc,
+					boolType,
+					typedOperand(loc, lhs, boolType, "left operand of '||' not generated as a boolean"),
+					typedOperand(loc, rhs, boolType, "right operand of '||' not generated as a boolean"));
 			}
 			default:
 				break;
@@ -1389,6 +1490,8 @@ public:
 					auto base = generateSolidityExpression(indexAccess->baseExpression());
 					auto index = generateSolidityExpression(*indexAccess->indexExpression());
 					std::string varName = extractMappingVarName(indexAccess->baseExpression());
+					if (!mlir::isa<mlir::solidity::ArrayType>(base.getType()))
+						return emitUnsupported(loc, value.getType(), "store into an unsupported array expression");
 					auto storeOp = m_builder->create<mlir::solidity::ArrayStoreOp>(loc, base, index, value);
 					if (!varName.empty())
 						storeOp->setAttr("varName", m_builder->getStringAttr(varName));
@@ -1511,8 +1614,9 @@ public:
 			case langutil::Token::Not:
 			{
 				// Logical NOT
+				auto boolTy = mlir::solidity::BoolType::get(m_context.get());
 				return m_builder->create<mlir::solidity::LogicalNotOp>(
-					loc, mlir::solidity::BoolType::get(m_context.get()), operand);
+					loc, boolTy, typedOperand(loc, operand, boolTy, "operand of '!' not generated as a boolean"));
 			}
 			default:
 				break;
@@ -1811,6 +1915,8 @@ public:
 						if (memberName == "push" && !funcCall->arguments().empty())
 						{
 							auto value = generateSolidityExpression(*funcCall->arguments()[0]);
+							if (!mlir::isa<mlir::solidity::ArrayType>(base.getType()))
+								return emitUnsupported(loc, value.getType(), "push onto an unsupported array expression");
 							m_builder->create<mlir::solidity::ArrayPushOp>(loc, base, value);
 							return base;
 						}
@@ -2241,6 +2347,8 @@ public:
 				auto elementType = translateSolidityType(*_expr.annotation().type);
 				if (base && index)
 				{
+					if (!mlir::isa<mlir::solidity::ArrayType>(base.getType()))
+						return emitUnsupported(loc, elementType, "index into an unsupported array expression");
 					auto op = m_builder->create<mlir::solidity::ArrayAccessOp>(loc, elementType, base, index);
 					std::string varName = extractMappingVarName(indexAccess->baseExpression());
 					if (!varName.empty())

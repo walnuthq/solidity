@@ -208,10 +208,14 @@ int main(int argc, char** argv)
 								}
 							}
 
+							if (!creation)
+								// The runtime half alone is not deployable, so
+								// reporting it as bytecode would be a lie.
+								detail = "creation code: " + creationError;
+							else
 							try
 							{
-								solidity::evmasm::LinkerObject const& linked
-									= (creation ? creation : assembly)->assemble();
+								solidity::evmasm::LinkerObject const& linked = creation->assemble();
 								byteCount = linked.bytecode.size();
 								stage = "bytecode";
 								detail = std::to_string(byteCount) + " bytes";

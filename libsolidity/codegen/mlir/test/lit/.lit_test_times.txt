@@ -1,6 +1,7 @@
-1.605892e-02 dispatcher.sol
-1.601291e-02 landmine_folds.yul
-1.549792e-02 mapping_slot.sol
-1.693010e-02 base_call.sol
-2.714896e-02 constructor.sol
-1.471114e-02 dropped_features.sol
+2.049184e-02 dispatcher.sol
+1.690507e-02 landmine_folds.yul
+1.900887e-02 mapping_slot.sol
+2.009082e-02 base_call.sol
+3.458881e-02 constructor.sol
+1.802182e-02 dropped_features.sol
+1.717210e-02 nested_loop_carry.sol

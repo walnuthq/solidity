@@ -147,9 +147,28 @@ def mlir_contracts(solc, yul2evm, path):
     return results, reason
 
 
+def preflight(rpc):
+    """A node whose block gas limit is below the gas we send rejects every
+    deployment, and the harness reports each one as skipped - so a full run
+    says "0 agree, N skipped" and looks like a corpus problem rather than a
+    node one. Say it instead."""
+    block, _ = rpc.call("eth_getBlockByNumber", ["latest", False])
+    limit = int(block.get("gasLimit", "0x0"), 16) if block else 0
+    if limit and limit < DEPLOY_GAS:
+        print(
+            f"node block gas limit {limit} is below the {DEPLOY_GAS} this harness sends, "
+            f"so every deployment would fail - restart with: anvil --port 8546 --gas-limit {DEPLOY_GAS * 3}"
+        )
+        return False
+    return True
+
+
+DEPLOY_GAS = 0x2000000
+
+
 def deploy(code, rpc):
     transaction, error = rpc.call(
-        "eth_sendTransaction", [{"from": SENDER, "data": "0x" + code, "gas": "0x2000000"}]
+        "eth_sendTransaction", [{"from": SENDER, "data": "0x" + code, "gas": hex(DEPLOY_GAS)}]
     )
     if error or not transaction:
         return None

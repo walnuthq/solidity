@@ -140,6 +140,7 @@ private:
 	llvm::DenseMap<mlir::Value, mlir::Value> m_map;
 	llvm::StringMap<uint64_t> m_storageSlots;
 	llvm::StringSet<> m_declaredFunctions;
+	llvm::StringMap<unsigned> m_constructorArity;
 	std::string m_contractName;
 	bool m_creation = false;
 
@@ -238,13 +239,23 @@ private:
 		}
 
 		// A constructor body was converted as a function; call it.
+		//
+		// Only a parameterless one. Constructor arguments arrive appended to
+		// the creation code and need the ABI decoding that does not exist yet,
+		// and calling with the wrong arity builds a call the verifier rejects -
+		// which would cost the whole creation half.
 		std::string const constructorName = qualified("constructor");
+		auto arity = m_constructorArity.find(constructorName);
 		if (m_declaredFunctions.contains(constructorName))
+		{
+			if (arity != m_constructorArity.end() && arity->second > 0)
+				fail("constructor takes arguments, which the creation code cannot decode yet");
 			m_builder.create<mlir::yul::FuncCallOp>(
 				loc(),
 				mlir::TypeRange{},
 				mlir::FlatSymbolRefAttr::get(m_builder.getContext(), constructorName),
 				mlir::ValueRange{});
+		}
 
 		mlir::Value size = m_builder.create<mlir::yul::DataSizeOp>(loc(), kRuntimeObjectName);
 		mlir::Value offset = m_builder.create<mlir::yul::DataOffsetOp>(loc(), kRuntimeObjectName);
@@ -271,6 +282,7 @@ private:
 				m_builder.getContext(),
 				llvm::SmallVector<mlir::Type, 4>(solType0.getNumInputs(), wordType()),
 				llvm::SmallVector<mlir::Type, 2>(solType0.getNumResults(), wordType()));
+			m_constructorArity[qualified("constructor")] = solType0.getNumInputs();
 			auto ctor = m_builder.create<mlir::yul::FuncOp>(loc(), qualified("constructor"), ctorType);
 			mlir::Block* ctorBody = &ctor.getBody().emplaceBlock();
 			mlir::OpBuilder::InsertionGuard ctorGuard(m_builder);
