@@ -690,7 +690,7 @@ public:
 				hasReturn = true;
 		}
 		if (!hasReturn)
-			m_builder->create<mlir::solidity::ReturnOp>(loc, mlir::ValueRange{});
+			emitReturn(loc, {});
 
 		m_builder->restoreInsertionPoint(savedIP);
 	}
@@ -817,7 +817,7 @@ public:
 
 		if (!hasReturn)
 		{
-			m_builder->create<mlir::solidity::ReturnOp>(loc, mlir::ValueRange{});
+			emitReturn(loc, {});
 		}
 
 		// Restore insertion point
@@ -974,6 +974,39 @@ public:
 	/// `Base.value(1)` and a virtual `value(1)` inside the override name
 	/// different ones - and dropping that resolution here is what made both
 	/// lower to the same symbol and bind to whichever won.
+	/// The FunctionDefinition a call reaches, after virtual resolution.
+	FunctionDefinition const* resolvedCallee(FunctionCall const& _call)
+	{
+		Declaration const* declaration = nullptr;
+		if (auto const* ident = dynamic_cast<Identifier const*>(&_call.expression()))
+			declaration = ident->annotation().referencedDeclaration;
+		else if (auto const* member = dynamic_cast<MemberAccess const*>(&_call.expression()))
+			declaration = member->annotation().referencedDeclaration;
+
+		auto const* function = dynamic_cast<FunctionDefinition const*>(declaration);
+		if (!function || !dynamic_cast<ContractDefinition const*>(function->scope()))
+			return nullptr;
+		if (dynamic_cast<Identifier const*>(&_call.expression()) && m_mostDerivedContract
+			&& !function->isConstructor())
+			function = &function->resolveVirtual(*m_mostDerivedContract);
+		return function;
+	}
+
+	/// Makes an argument list agree with the callee's arity. An argument whose
+	/// expression was dropped leaves the list short, and the call the verifier
+	/// then rejects costs the whole contract rather than the one argument.
+	void padCallArguments(FunctionCall const& _call, std::vector<mlir::Value>& _args, mlir::Location _loc)
+	{
+		FunctionDefinition const* callee = resolvedCallee(_call);
+		if (!callee)
+			return;
+		auto const& parameters = callee->parameters();
+		for (size_t i = _args.size(); i < parameters.size(); ++i)
+			_args.push_back(emitUnsupported(_loc, translateSolidityType(*parameters[i]->type()), "call argument not generated"));
+		if (_args.size() > parameters.size())
+			_args.resize(parameters.size());
+	}
+
 	std::string resolvedCalleeName(FunctionCall const& _call, std::string const& _fallback)
 	{
 		Declaration const* declaration = nullptr;
@@ -1001,6 +1034,30 @@ public:
 		// `Contract.constructor`, and both sides have to agree or the call
 		// references nothing.
 		return contract->name() + "." + (function->isConstructor() ? "constructor" : function->name());
+	}
+
+	/// Emits a return, made to agree with the enclosing function's arity.
+	///
+	/// The verifier checks the two against each other, and several shapes come
+	/// up short: `return;` in a function with named results, a tuple the
+	/// expression generator produced one value for, and a body that falls off
+	/// its end. Emitting the op anyway loses the whole contract instead of the
+	/// one construct, so the difference is made up with the placeholder used
+	/// everywhere else - which warns and counts as a drop rather than quietly
+	/// returning something wrong.
+	void emitReturn(mlir::Location _loc, llvm::SmallVector<mlir::Value, 4> _values)
+	{
+		mlir::Operation* parent = m_builder->getInsertionBlock()->getParentOp();
+		while (parent && !mlir::isa<mlir::solidity::FunctionOp>(parent))
+			parent = parent->getParentOp();
+		if (auto enclosing = mlir::dyn_cast_or_null<mlir::solidity::FunctionOp>(parent))
+		{
+			mlir::ArrayRef<mlir::Type> const results = enclosing.getResultTypes();
+			for (size_t i = _values.size(); i < results.size(); ++i)
+				_values.push_back(emitUnsupported(_loc, results[i], "return value not generated"));
+			_values.resize(std::min(_values.size(), results.size()));
+		}
+		m_builder->create<mlir::solidity::ReturnOp>(_loc, mlir::ValueRange{_values});
 	}
 
 	ContractDefinition const* m_mostDerivedContract = nullptr;
@@ -2112,6 +2169,8 @@ public:
 								args.push_back(argValue);
 						}
 
+						padCallArguments(*funcCall, args, loc);
+
 						if (!dynamic_cast<TupleType const*>(_expr.annotation().type)
 							|| !dynamic_cast<TupleType const*>(_expr.annotation().type)->components().empty())
 						{
@@ -2141,6 +2200,8 @@ public:
 
 					// Create function call operation
 					// Add result type if the function has a return value
+					padCallArguments(*funcCall, args, loc);
+
 					if (!dynamic_cast<TupleType const*>(_expr.annotation().type)
 						|| !dynamic_cast<TupleType const*>(_expr.annotation().type)->components().empty())
 					{
@@ -2772,25 +2833,7 @@ public:
 				if (mlir::Value value = generateSolidityExpression(*ret->expression()))
 					values.push_back(value);
 
-			// The verifier checks this against the enclosing function's arity,
-			// and two shapes come up short: `return;` in a function with named
-			// results, and a tuple the expression generator produced a single
-			// value for. Emitting the op anyway loses the whole contract, so
-			// make up the difference with the placeholder the generator uses
-			// everywhere else - which warns and counts as a drop rather than
-			// quietly returning something wrong.
-			mlir::Operation* parent = m_builder->getInsertionBlock()->getParentOp();
-			while (parent && !mlir::isa<mlir::solidity::FunctionOp>(parent))
-				parent = parent->getParentOp();
-			if (auto enclosing = mlir::dyn_cast_or_null<mlir::solidity::FunctionOp>(parent))
-			{
-				mlir::ArrayRef<mlir::Type> const results = enclosing.getResultTypes();
-				for (size_t i = values.size(); i < results.size(); ++i)
-					values.push_back(emitUnsupported(loc, results[i], "return value not generated"));
-				values.resize(std::min(values.size(), results.size()));
-			}
-
-			m_builder->create<mlir::solidity::ReturnOp>(loc, mlir::ValueRange{values});
+			emitReturn(loc, values);
 		}
 		else if (auto* breakStmt = dynamic_cast<Break const*>(&_stmt))
 		{

@@ -198,7 +198,11 @@ mlir::ParseResult ConstantOp::parse(mlir::OpAsmParser& parser, mlir::OperationSt
 // Custom printer for CreateContractOp
 void CreateContractOp::print(mlir::OpAsmPrinter& p)
 {
-	p << " " << getContractName() << "(";
+	// The parser reads this back as a string attribute, so it has to be
+	// printed as one: unquoted, the dialect cannot re-read its own output.
+	p << " ";
+	p.printAttribute(getContractNameAttr());
+	p << "(";
 	p.printOperands(getConstructorArgs());
 	p << ") value ";
 	p.printOperand(getValue());
