@@ -815,6 +815,42 @@ private:
 		}
 	}
 
+	/// Solidity >= 0.8 reports a failed arithmetic check as `Panic(uint256)`:
+	/// selector 0x4e487b71, then the code - 0x11 for overflow, 0x12 for a
+	/// division by zero. Reverting bare would be the right control flow with
+	/// the wrong answer to `why`.
+	void emitPanicIf(mlir::Value _condition, uint64_t _code)
+	{
+		auto ifOp = m_builder.create<mlir::yul::IfOp>(loc(), _condition);
+		mlir::OpBuilder::InsertionGuard guard(m_builder);
+		m_builder.setInsertionPointToStart(&ifOp.getThenRegion().emplaceBlock());
+
+		llvm::APInt selector(256, 0x4e487b71u);
+		selector <<= 224;
+		m_builder.create<mlir::yul::MStoreOp>(loc(), wordConstant(uint64_t(0)), wordConstant(selector));
+		m_builder.create<mlir::yul::MStoreOp>(loc(), wordConstant(uint64_t(4)), wordConstant(_code));
+		m_builder.create<mlir::yul::RevertOp>(loc(), wordConstant(uint64_t(0)), wordConstant(uint64_t(0x24)));
+	}
+
+	/// Everything outside `unchecked` is checked; the generator marks the
+	/// operations inside it, because the block itself is inlined away.
+	static bool checked(mlir::Operation& _op) { return !_op.hasAttr("unchecked"); }
+
+	static constexpr uint64_t kPanicOverflow = 0x11;
+	static constexpr uint64_t kPanicDivisionByZero = 0x12;
+
+	mlir::Value notValue(mlir::Value _value) { return m_builder.create<mlir::yul::NotOp>(loc(), _value); }
+	mlir::Value isZero(mlir::Value _value) { return m_builder.create<mlir::yul::IsZeroOp>(loc(), _value); }
+
+	/// The smallest signed 256-bit value, which is its own negation - the one
+	/// input that makes signed negation, division and multiplication overflow.
+	mlir::Value signedMinimum()
+	{
+		llvm::APInt minimum(256, 0);
+		minimum.setBit(255);
+		return wordConstant(minimum);
+	}
+
 	void emitRevertIf(mlir::Value _condition)
 	{
 		auto ifOp = m_builder.create<mlir::yul::IfOp>(loc(), _condition);
@@ -1049,14 +1085,99 @@ private:
 		else if (auto sar = llvm::dyn_cast<mlir::solidity::SarOp>(&_op))
 			result = m_builder.create<mlir::yul::SarOp>(loc(), mapped(sar.getShift()), mapped(sar.getValue()));
 		else if (auto add = llvm::dyn_cast<mlir::solidity::AddOp>(&_op))
-			result = m_builder.create<mlir::yul::AddOp>(loc(), mapped(add.getLhs()), mapped(add.getRhs()));
+		{
+			mlir::Value a = mapped(add.getLhs()), b = mapped(add.getRhs());
+			result = m_builder.create<mlir::yul::AddOp>(loc(), a, b);
+			if (checked(_op))
+			{
+				if (llvm::isa<mlir::solidity::IntType>(add.getLhs().getType()))
+				{
+					// Signed: the sum moved the wrong way for the sign of b.
+					mlir::Value zero = wordConstant(uint64_t(0));
+					mlir::Value positive = m_builder.create<mlir::yul::SGtOp>(loc(), b, zero);
+					mlir::Value negative = m_builder.create<mlir::yul::SLtOp>(loc(), b, zero);
+					mlir::Value fell = m_builder.create<mlir::yul::SLtOp>(loc(), result, a);
+					mlir::Value rose = m_builder.create<mlir::yul::SGtOp>(loc(), result, a);
+					emitPanicIf(
+						m_builder.create<mlir::yul::OrOp>(
+							loc(),
+							m_builder.create<mlir::yul::AndOp>(loc(), positive, fell),
+							m_builder.create<mlir::yul::AndOp>(loc(), negative, rose)),
+						kPanicOverflow);
+				}
+				else
+					// Unsigned: a sum below either operand wrapped.
+					emitPanicIf(m_builder.create<mlir::yul::LtOp>(loc(), result, a), kPanicOverflow);
+			}
+		}
 		else if (auto sub = llvm::dyn_cast<mlir::solidity::SubOp>(&_op))
-			result = m_builder.create<mlir::yul::SubOp>(loc(), mapped(sub.getLhs()), mapped(sub.getRhs()));
+		{
+			mlir::Value a = mapped(sub.getLhs()), b = mapped(sub.getRhs());
+			result = m_builder.create<mlir::yul::SubOp>(loc(), a, b);
+			if (checked(_op))
+			{
+				if (llvm::isa<mlir::solidity::IntType>(sub.getLhs().getType()))
+				{
+					mlir::Value zero = wordConstant(uint64_t(0));
+					mlir::Value positive = m_builder.create<mlir::yul::SGtOp>(loc(), b, zero);
+					mlir::Value negative = m_builder.create<mlir::yul::SLtOp>(loc(), b, zero);
+					mlir::Value rose = m_builder.create<mlir::yul::SGtOp>(loc(), result, a);
+					mlir::Value fell = m_builder.create<mlir::yul::SLtOp>(loc(), result, a);
+					emitPanicIf(
+						m_builder.create<mlir::yul::OrOp>(
+							loc(),
+							m_builder.create<mlir::yul::AndOp>(loc(), positive, rose),
+							m_builder.create<mlir::yul::AndOp>(loc(), negative, fell)),
+						kPanicOverflow);
+				}
+				else
+					// Unsigned: subtracting more than there was.
+					emitPanicIf(m_builder.create<mlir::yul::LtOp>(loc(), a, b), kPanicOverflow);
+			}
+		}
 		else if (auto mul = llvm::dyn_cast<mlir::solidity::MulOp>(&_op))
-			result = m_builder.create<mlir::yul::MulOp>(loc(), mapped(mul.getLhs()), mapped(mul.getRhs()));
+		{
+			mlir::Value a = mapped(mul.getLhs()), b = mapped(mul.getRhs());
+			result = m_builder.create<mlir::yul::MulOp>(loc(), a, b);
+			if (checked(_op))
+			{
+				// Dividing the product back out has to give the other operand.
+				// Zero is excluded first because the division would be by zero.
+				bool const isSigned = llvm::isa<mlir::solidity::IntType>(mul.getLhs().getType());
+				mlir::Value back = isSigned
+					? m_builder.create<mlir::yul::SDivOp>(loc(), result, a).getResult()
+					: m_builder.create<mlir::yul::DivOp>(loc(), result, a).getResult();
+				mlir::Value mismatched = isZero(m_builder.create<mlir::yul::EqOp>(loc(), back, b));
+				mlir::Value wrong = m_builder.create<mlir::yul::AndOp>(loc(), isZero(isZero(a)), mismatched);
+				if (isSigned)
+				{
+					// The one case the division cannot see: the smallest value
+					// times -1 is itself.
+					mlir::Value isMinusOne
+						= m_builder.create<mlir::yul::EqOp>(loc(), a, wordConstant(~llvm::APInt(256, 0)));
+					mlir::Value isMinimum = m_builder.create<mlir::yul::EqOp>(loc(), b, signedMinimum());
+					wrong = m_builder.create<mlir::yul::OrOp>(
+						loc(), wrong, m_builder.create<mlir::yul::AndOp>(loc(), isMinusOne, isMinimum));
+				}
+				emitPanicIf(wrong, kPanicOverflow);
+			}
+		}
 		else if (auto div = llvm::dyn_cast<mlir::solidity::DivOp>(&_op))
 		{
 			bool isSigned = llvm::isa<mlir::solidity::IntType>(div.getLhs().getType());
+			// EVM defines x/0 as 0; Solidity does not allow it at all.
+			if (checked(_op))
+			{
+				emitPanicIf(isZero(mapped(div.getRhs())), kPanicDivisionByZero);
+				if (isSigned)
+					emitPanicIf(
+						m_builder.create<mlir::yul::AndOp>(
+							loc(),
+							m_builder.create<mlir::yul::EqOp>(loc(), mapped(div.getLhs()), signedMinimum()),
+							m_builder.create<mlir::yul::EqOp>(
+								loc(), mapped(div.getRhs()), wordConstant(~llvm::APInt(256, 0)))),
+						kPanicOverflow);
+			}
 			if (isSigned)
 				result = m_builder.create<mlir::yul::SDivOp>(loc(), mapped(div.getLhs()), mapped(div.getRhs()));
 			else
@@ -1065,6 +1186,8 @@ private:
 		else if (auto mod = llvm::dyn_cast<mlir::solidity::ModOp>(&_op))
 		{
 			bool isSigned = llvm::isa<mlir::solidity::IntType>(mod.getLhs().getType());
+			if (checked(_op))
+				emitPanicIf(isZero(mapped(mod.getRhs())), kPanicDivisionByZero);
 			if (isSigned)
 				result = m_builder.create<mlir::yul::SModOp>(loc(), mapped(mod.getLhs()), mapped(mod.getRhs()));
 			else

@@ -1351,6 +1351,17 @@ public:
 		return name;
 	}
 
+	/// Stamps an arithmetic operation with whether it is inside `unchecked`.
+	/// Solidity >= 0.8 panics on overflow everywhere else, and the block is
+	/// inlined, so the operation is the only place left to say so.
+	template<typename Op>
+	mlir::Value marked(Op _op)
+	{
+		if (m_uncheckedDepth > 0)
+			_op->setAttr("unchecked", m_builder->getUnitAttr());
+		return _op.getResult();
+	}
+
 	/// An internal function pointer is a small integer, not an address.
 	///
 	/// The EVM has no callable value: solc uses a jump destination, which only
@@ -1606,6 +1617,7 @@ public:
 	std::map<FunctionDefinition const*, std::string> m_emittedFunctionNames;
 
 	std::vector<VariableDeclaration const*> m_returnParameters;
+	unsigned m_uncheckedDepth = 0;
 
 	ContractDefinition const* m_mostDerivedContract = nullptr;
 
@@ -1769,23 +1781,23 @@ public:
 			{
 			case langutil::Token::Add:
 			{
-				return m_builder->create<mlir::solidity::AddOp>(loc, resultType, lhs, rhs);
+				return marked(m_builder->create<mlir::solidity::AddOp>(loc, resultType, lhs, rhs));
 			}
 			case langutil::Token::Sub:
 			{
-				return m_builder->create<mlir::solidity::SubOp>(loc, resultType, lhs, rhs);
+				return marked(m_builder->create<mlir::solidity::SubOp>(loc, resultType, lhs, rhs));
 			}
 			case langutil::Token::Mul:
 			{
-				return m_builder->create<mlir::solidity::MulOp>(loc, resultType, lhs, rhs);
+				return marked(m_builder->create<mlir::solidity::MulOp>(loc, resultType, lhs, rhs));
 			}
 			case langutil::Token::Div:
 			{
-				return m_builder->create<mlir::solidity::DivOp>(loc, resultType, lhs, rhs);
+				return marked(m_builder->create<mlir::solidity::DivOp>(loc, resultType, lhs, rhs));
 			}
 			case langutil::Token::Mod:
 			{
-				return m_builder->create<mlir::solidity::ModOp>(loc, resultType, lhs, rhs);
+				return marked(m_builder->create<mlir::solidity::ModOp>(loc, resultType, lhs, rhs));
 			}
 			case langutil::Token::LessThan:
 			{
@@ -2107,11 +2119,24 @@ public:
 			}
 			case langutil::Token::Sub:
 			{
-				// Unary minus
+				// A negated constant is a constant. Emitting `0 - 7` instead
+				// made it a subtraction on a type that reads as unsigned, so
+				// the overflow check saw it underflow - which it does, as
+				// unsigned. The value is known here; there is nothing to
+				// compute at run time.
+				if (auto const* rational
+					= dynamic_cast<RationalNumberType const*>(_expr.annotation().type))
+				{
+					auto attr = m_builder->getIntegerAttr(
+						mlir::IntegerType::get(m_context.get(), 256, mlir::IntegerType::Unsigned),
+						llvm::APInt(256, rational->literalValue(nullptr).str(), 10));
+					return m_builder->create<mlir::solidity::ConstantOp>(loc, attr, resultType).getResult();
+				}
+
 				auto zero = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
 				auto zeroValue = m_builder->create<mlir::solidity::ConstantOp>(loc, zero, resultType);
 
-				return m_builder->create<mlir::solidity::SubOp>(loc, resultType, zeroValue, operand);
+				return marked(m_builder->create<mlir::solidity::SubOp>(loc, resultType, zeroValue, operand));
 			}
 			case langutil::Token::Not:
 			{
@@ -3042,6 +3067,15 @@ public:
 		{
 			if (block->unchecked())
 			{
+				// `unchecked { }` has to reach the lowering: the block is
+				// inlined here, so without a mark on the operations themselves
+				// nothing downstream can tell the difference.
+				++m_uncheckedDepth;
+				struct Restore
+				{
+					unsigned& depth;
+					~Restore() { --depth; }
+				} restore{m_uncheckedDepth};
 				// Generate unchecked block statements inline to avoid SSA scope issues.
 				// Creating a nested UncheckedOp region causes values defined inside
 				// (like loop counter increments) to be inaccessible in the parent scope.
