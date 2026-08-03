@@ -413,6 +413,49 @@ private:
 			m_map[length.getResult()] = m_builder.create<mlir::yul::MLoadOp>(loc(), mapped(length.getValue()));
 			return false;
 		}
+		if (auto access = llvm::dyn_cast<mlir::solidity::ArrayAccessOp>(&_op))
+		{
+			if (!_op.hasAttr("storageArray"))
+				fail("array access outside storage");
+			m_map[access.getResult()]
+				= m_builder.create<mlir::yul::SLoadOp>(loc(), arrayElementSlot(_op, access.getIndex()));
+			return false;
+		}
+		if (auto store = llvm::dyn_cast<mlir::solidity::ArrayStoreOp>(&_op))
+		{
+			if (!_op.hasAttr("storageArray"))
+				fail("array store outside storage");
+			m_builder.create<mlir::yul::SStoreOp>(
+				loc(), arrayElementSlot(_op, store.getIndex()), mapped(store.getValue()));
+			return false;
+		}
+		if (auto length = llvm::dyn_cast<mlir::solidity::ArrayLengthOp>(&_op))
+		{
+			// A dynamic array keeps its length in its own slot.
+			auto name = _op.getAttrOfType<mlir::StringAttr>("varName");
+			if (!name)
+				fail("array length of an unnamed array");
+			m_map[length.getResult()]
+				= m_builder.create<mlir::yul::SLoadOp>(loc(), wordConstant(storageSlot(name.getValue())));
+			return false;
+		}
+		if (auto push = llvm::dyn_cast<mlir::solidity::ArrayPushOp>(&_op))
+		{
+			if (!_op.hasAttr("storageArray") || !_op.hasAttr("dynamic"))
+				fail("push onto an array that is not dynamic storage");
+			auto name = _op.getAttrOfType<mlir::StringAttr>("varName");
+			mlir::Value slot = wordConstant(storageSlot(name.getValue()));
+			mlir::Value length = m_builder.create<mlir::yul::SLoadOp>(loc(), slot);
+			// The new element goes where the old length pointed, and the length
+			// moves on.
+			m_builder.create<mlir::yul::SStoreOp>(
+				loc(), slot, m_builder.create<mlir::yul::AddOp>(loc(), length, wordConstant(uint64_t(1))));
+			m_builder.create<mlir::yul::SStoreOp>(
+				loc(),
+				m_builder.create<mlir::yul::AddOp>(loc(), dynamicArrayData(slot), length),
+				mapped(push.getValue()));
+			return false;
+		}
 		if (auto create = llvm::dyn_cast<mlir::solidity::CreateContractOp>(&_op))
 		{
 			// `new C(...)` deploys C's *creation* code, which is a different
@@ -1450,6 +1493,27 @@ private:
 			names.push_back(bind.getVarName().str());
 		}
 		return names;
+	}
+
+	/// Where a dynamic array's elements start: keccak256 of its slot, which is
+	/// what keeps them clear of whatever else the layout put nearby.
+	mlir::Value dynamicArrayData(mlir::Value _slot)
+	{
+		m_builder.create<mlir::yul::MStoreOp>(loc(), wordConstant(uint64_t(0)), _slot);
+		return m_builder.create<mlir::yul::Keccak256Op>(
+			loc(), wordConstant(uint64_t(0)), wordConstant(uint64_t(32)));
+	}
+
+	/// The slot of `a[i]`. A dynamic array's data starts away from its slot,
+	/// which holds the length; a fixed one starts at the slot itself.
+	mlir::Value arrayElementSlot(mlir::Operation& _op, mlir::Value _index)
+	{
+		auto name = _op.getAttrOfType<mlir::StringAttr>("varName");
+		if (!name)
+			fail("array access on an unnamed array");
+		mlir::Value slot = wordConstant(storageSlot(name.getValue()));
+		mlir::Value base = _op.hasAttr("dynamic") ? dynamicArrayData(slot) : slot;
+		return m_builder.create<mlir::yul::AddOp>(loc(), base, mapped(_index));
 	}
 
 	/// `scf.if` with results, which is how a variable assigned in a branch

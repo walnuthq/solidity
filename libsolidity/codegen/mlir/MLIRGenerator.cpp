@@ -1383,6 +1383,28 @@ public:
 		}
 	}
 
+	/// Marks a storage array operation with the layout the lowering needs: a
+	/// dynamic array keeps its length in the slot and its data at
+	/// keccak256(slot), a fixed one starts at the slot itself.
+	///
+	/// Only word-sized elements. An element occupying several slots - a struct,
+	/// or a nested array - needs the element size threaded through as well, and
+	/// guessing one slot would read the wrong place rather than fail.
+	bool markStorageArray(mlir::Operation* _op, Type const* _arrayType, std::string const& _varName)
+	{
+		auto const* array = dynamic_cast<ArrayType const*>(_arrayType);
+		if (!array || array->location() != DataLocation::Storage)
+			return false;
+		if (array->baseType()->storageSize() != 1)
+			return false;
+
+		_op->setAttr("varName", m_builder->getStringAttr(_varName));
+		_op->setAttr("storageArray", m_builder->getUnitAttr());
+		if (array->isDynamicallySized())
+			_op->setAttr("dynamic", m_builder->getUnitAttr());
+		return true;
+	}
+
 	/// A struct in storage is named by a slot, not held as a value: a word
 	/// cannot carry one. `m[k]` and a struct state variable therefore produce
 	/// the place, and members are read and written through it.
@@ -2084,6 +2106,11 @@ public:
 					if (!mlir::isa<mlir::solidity::ArrayType>(base.getType()))
 						return emitUnsupported(loc, value.getType(), "store into an unsupported array expression");
 					auto storeOp = m_builder->create<mlir::solidity::ArrayStoreOp>(loc, base, index, value);
+					if (!markStorageArray(
+							storeOp.getOperation(),
+							indexAccess->baseExpression().annotation().type,
+							extractMappingVarName(indexAccess->baseExpression())))
+						return emitUnsupported(loc, value.getType(), "array element that is not a word in storage");
 					if (!varName.empty())
 						storeOp->setAttr("varName", m_builder->getStringAttr(varName));
 				}
@@ -2488,8 +2515,19 @@ public:
 							loc,
 							translateSolidityType(*_expr.annotation().type),
 							"length of an unsupported array expression");
-					return m_builder->create<mlir::solidity::ArrayLengthOp>(
-						loc, mlir::solidity::UIntType::get(m_context.get(), 256), base);
+					{
+						auto lengthOp = m_builder->create<mlir::solidity::ArrayLengthOp>(
+							loc, mlir::solidity::UIntType::get(m_context.get(), 256), base);
+						if (!markStorageArray(
+								lengthOp.getOperation(),
+								memberAccess->expression().annotation().type,
+								extractMappingVarName(memberAccess->expression())))
+							return emitUnsupported(
+								loc,
+								mlir::solidity::UIntType::get(m_context.get(), 256),
+								"length of an array that is not word-sized storage");
+						return lengthOp.getResult();
+					}
 				}
 			}
 			// Handle struct member access
@@ -2612,7 +2650,13 @@ public:
 							auto value = generateSolidityExpression(*funcCall->arguments()[0]);
 							if (!mlir::isa<mlir::solidity::ArrayType>(base.getType()))
 								return emitUnsupported(loc, value.getType(), "push onto an unsupported array expression");
-							m_builder->create<mlir::solidity::ArrayPushOp>(loc, base, value);
+							auto pushOp = m_builder->create<mlir::solidity::ArrayPushOp>(loc, base, value);
+							if (!markStorageArray(
+									pushOp.getOperation(),
+									memberAccess->expression().annotation().type,
+									extractMappingVarName(memberAccess->expression())))
+								return emitUnsupported(
+									loc, value.getType(), "push onto an array that is not word-sized storage");
 							return base;
 						}
 					}
@@ -3116,7 +3160,10 @@ public:
 					std::string varName = extractMappingVarName(indexAccess->baseExpression());
 					if (!varName.empty())
 						op->setAttr("varName", m_builder->getStringAttr(varName));
-					return op;
+					if (!markStorageArray(
+							op.getOperation(), indexAccess->baseExpression().annotation().type, varName))
+						return emitUnsupported(loc, elementType, "array element that is not a word in storage");
+					return op.getResult();
 				}
 				return emitUnsupported(loc, elementType, "array element access with null operand");
 			}
