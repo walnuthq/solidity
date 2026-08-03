@@ -302,21 +302,37 @@ private:
 
 		// A constructor body was converted as a function; call it.
 		//
-		// Only a parameterless one. Constructor arguments arrive appended to
-		// the creation code and need the ABI decoding that does not exist yet,
-		// and calling with the wrong arity builds a call the verifier rejects -
-		// which would cost the whole creation half.
+		// Its arguments follow the creation code, which is the only place they
+		// can be: there is no calldata during construction. So the code copies
+		// itself to find where it ends, and reads them from there.
 		std::string const constructorName = qualified("constructor");
 		auto arity = m_constructorArity.find(constructorName);
 		if (m_declaredFunctions.contains(constructorName))
 		{
-			if (arity != m_constructorArity.end() && arity->second > 0)
-				fail("constructor takes arguments, which the creation code cannot decode yet");
+			llvm::SmallVector<mlir::Value, 4> arguments;
+			unsigned const parameters = arity == m_constructorArity.end() ? 0 : arity->second;
+			if (parameters > 0)
+			{
+				m_usesMemory = true;
+				mlir::Value codeSize = m_builder.create<mlir::yul::CodeSizeOp>(loc());
+				mlir::Value length = wordConstant(uint64_t(32 * parameters));
+				mlir::Value pointer = allocate(length);
+				m_builder.create<mlir::yul::CodeCopyOp>(
+					loc(),
+					pointer,
+					m_builder.create<mlir::yul::SubOp>(loc(), codeSize, length),
+					length);
+				for (unsigned i = 0; i < parameters; ++i)
+					arguments.push_back(m_builder.create<mlir::yul::MLoadOp>(
+						loc(),
+						m_builder.create<mlir::yul::AddOp>(loc(), pointer, wordConstant(uint64_t(32 * i)))));
+			}
+
 			m_builder.create<mlir::yul::FuncCallOp>(
 				loc(),
 				mlir::TypeRange{},
 				mlir::FlatSymbolRefAttr::get(m_builder.getContext(), constructorName),
-				mlir::ValueRange{});
+				arguments);
 		}
 
 		mlir::Value size = m_builder.create<mlir::yul::DataSizeOp>(loc(), kRuntimeObjectName);
@@ -537,22 +553,33 @@ private:
 		{
 			// `new C(...)` deploys C's *creation* code, which is a different
 			// object from the runtime code `type(C).runtimeCode` names - so it
-			// is nested under its own name. Constructor arguments are appended
-			// to it, and nothing decodes them yet, so a constructor that takes
-			// any is refused rather than called with rubbish.
-			if (!create.getConstructorArgs().empty())
-				fail("new C(...) with constructor arguments");
+			// is nested under its own name. Constructor arguments follow the
+			// code, which is where the constructor reads them from.
+			for (mlir::Value argument: create.getConstructorArgs())
+				if (isDynamic(argument.getType()))
+					fail("new C(...) with a dynamic constructor argument");
 
 			std::string const object = create.getContractName().str() + kCreationObjectSuffix;
 			m_referencedObjects.insert(object);
 			m_usesMemory = true;
 
-			mlir::Value size = m_builder.create<mlir::yul::DataSizeOp>(loc(), object);
-			mlir::Value pointer = allocate(size);
+			unsigned const argumentCount = create.getConstructorArgs().size();
+			mlir::Value code = m_builder.create<mlir::yul::DataSizeOp>(loc(), object);
+			mlir::Value total = m_builder.create<mlir::yul::AddOp>(
+				loc(), code, wordConstant(uint64_t(32 * argumentCount)));
+			mlir::Value pointer = allocate(total);
 			m_builder.create<mlir::yul::DataCopyOp>(
-				loc(), pointer, m_builder.create<mlir::yul::DataOffsetOp>(loc(), object), size);
+				loc(), pointer, m_builder.create<mlir::yul::DataOffsetOp>(loc(), object), code);
+
+			mlir::Value at = m_builder.create<mlir::yul::AddOp>(loc(), pointer, code);
+			for (auto [position, argument]: llvm::enumerate(create.getConstructorArgs()))
+				m_builder.create<mlir::yul::MStoreOp>(
+					loc(),
+					m_builder.create<mlir::yul::AddOp>(loc(), at, wordConstant(uint64_t(32 * position))),
+					mapped(argument));
+
 			m_map[create.getResult()]
-				= m_builder.create<mlir::yul::CreateOp>(loc(), wordType(), mapped(create.getValue()), pointer, size);
+				= m_builder.create<mlir::yul::CreateOp>(loc(), wordType(), mapped(create.getValue()), pointer, total);
 			return false;
 		}
 		if (auto code = llvm::dyn_cast<mlir::solidity::ContractCodeOp>(&_op))
