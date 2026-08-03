@@ -56,6 +56,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <string>
 
@@ -71,6 +72,45 @@ std::string quoted(std::string const& _text)
 	for (char c: _text)
 		out += (c == '"' || c == '\n') ? '.' : c;
 	return out;
+}
+
+
+/// The runtime half of another contract in the same source, assembled so it can
+/// be nested as a sub-object. Compiled from scratch rather than cached: a
+/// contract naming another one's code is rare enough that it is not worth the
+/// bookkeeping.
+std::shared_ptr<solidity::evmasm::Assembly> runtimeAssemblyOf(
+	std::string const& _name,
+	CompilerStack& _stack,
+	mlir::MLIRContext& _context)
+{
+	for (std::string const& candidate: _stack.contractNames())
+	{
+		if (candidate != _name && candidate.substr(candidate.rfind(':') + 1) != _name)
+			continue;
+
+		MLIRGenerator generator(_stack, langutil::EVMVersion{}, OptimiserSettings::minimal());
+		std::string const text = generator.generate(_stack.contractDefinition(candidate));
+		if (text.empty())
+			return nullptr;
+		mlir::OwningOpRef<mlir::ModuleOp> solModule
+			= mlir::parseSourceString<mlir::ModuleOp>(text, &_context);
+		if (!solModule)
+			return nullptr;
+
+		std::string error;
+		mlir::OwningOpRef<mlir::ModuleOp> yulModule = mlirgen::convertSolToYul(*solModule, error);
+		if (!yulModule)
+			return nullptr;
+		mlir::OwningOpRef<mlir::ModuleOp> evmModule = mlirgen::convertYulToEVM(*yulModule, error);
+		if (!evmModule)
+			return nullptr;
+
+		mlirgen::EVMAssemblyOptions options;
+		options.name = _name;
+		return mlirgen::emitEVMAssembly(*evmModule, options, error);
+	}
+	return nullptr;
 }
 
 } // anonymous namespace
@@ -179,6 +219,18 @@ int main(int argc, char** argv)
 						stage = "evm";
 						mlirgen::EVMAssemblyOptions options;
 						options.name = name;
+
+						// `type(C).runtimeCode` names another contract's code as
+						// data, so that contract has to be nested here or the
+						// reference resolves to nothing. The set is read now
+						// because compiling the nested one overwrites it.
+						std::set<std::string> const referenced = mlirgen::lastReferencedContracts();
+						for (std::string const& object: referenced)
+						{
+							if (std::shared_ptr<evmasm::Assembly> code = runtimeAssemblyOf(object, stack, context))
+								options.subObjects.push_back({object, code, {}});
+						}
+
 						std::shared_ptr<evmasm::Assembly> assembly
 							= mlirgen::emitEVMAssembly(*evmModule, options, error);
 						if (!assembly)
@@ -193,6 +245,10 @@ int main(int argc, char** argv)
 							std::string creationError;
 							mlir::OwningOpRef<mlir::ModuleOp> creationYul
 								= mlirgen::convertSolToYul(*solModule, creationError, /*creation=*/true);
+							// The creation half converts the same functions, so
+							// it names the same objects.
+							std::set<std::string> const creationReferenced
+								= mlirgen::lastReferencedContracts();
 							std::shared_ptr<evmasm::Assembly> creation;
 							if (creationYul)
 							{
@@ -204,6 +260,10 @@ int main(int argc, char** argv)
 									creationOptions.name = name + "_creation";
 									creationOptions.creation = true;
 									creationOptions.subObjects.push_back({"runtime", assembly, {}});
+									for (std::string const& object: creationReferenced)
+										if (std::shared_ptr<evmasm::Assembly> code
+											= runtimeAssemblyOf(object, stack, context))
+											creationOptions.subObjects.push_back({object, code, {}});
 									creation = mlirgen::emitEVMAssembly(*creationEvm, creationOptions, creationError);
 								}
 							}

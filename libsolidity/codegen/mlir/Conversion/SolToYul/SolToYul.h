@@ -56,6 +56,11 @@ namespace solidity::mlirgen
 mlir::OwningOpRef<mlir::ModuleOp>
 convertSolToYul(mlir::ModuleOp _module, std::string& _error, bool _creation = false);
 
+/// Contracts whose code the last conversion named through `type(C).runtimeCode`
+/// or `.creationCode`. They have to be assembled and nested as sub-objects, or
+/// the data reference resolves to nothing.
+std::set<std::string> const& lastReferencedContracts();
+
 } // namespace solidity::mlirgen
 
 #endif // SOLIDITY_CODEGEN_MLIR_CONVERSION_SOL_TO_YUL_H

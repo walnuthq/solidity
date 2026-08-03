@@ -2261,7 +2261,16 @@ public:
 					};
 
 					Type const* argument = magic->typeArgument();
-					if (memberName == "interfaceId")
+					if (memberName == "runtimeCode" || memberName == "creationCode")
+					{
+						if (auto* contractType = dynamic_cast<ContractType const*>(argument))
+							return m_builder->create<mlir::solidity::ContractCodeOp>(
+								loc,
+								mlir::solidity::DynamicBytesType::get(m_context.get()),
+								m_builder->getStringAttr(contractType->contractDefinition().name()),
+								m_builder->getBoolAttr(memberName == "creationCode")).getResult();
+					}
+					else if (memberName == "interfaceId")
 					{
 						if (auto* contractType = dynamic_cast<ContractType const*>(argument))
 							return wordConstant(bigint(contractType->contractDefinition().interfaceId()));
@@ -2345,6 +2354,12 @@ public:
 					// leaves a plain word in its place. Building the op anyway
 					// produces IR the verifier rejects, which loses the whole
 					// contract instead of just the feature that was dropped.
+					// `string` and `bytes` are a pointer to [length][data...],
+					// so their length is the word at the pointer rather than
+					// anything the array ops describe.
+					if (mlir::isa<mlir::solidity::StringType, mlir::solidity::DynamicBytesType>(base.getType()))
+						return m_builder->create<mlir::solidity::MemoryLengthOp>(
+							loc, mlir::solidity::UIntType::get(m_context.get(), 256), base).getResult();
 					if (!mlir::isa<mlir::solidity::ArrayType>(base.getType()))
 						return emitUnsupported(
 							loc,

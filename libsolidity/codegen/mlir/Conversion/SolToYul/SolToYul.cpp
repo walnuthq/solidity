@@ -80,6 +80,14 @@ struct ConversionError
 /// sol2evm registers that half's assembly under.
 constexpr char kRuntimeObjectName[] = "runtime";
 
+/// Set by the conversion, read by whoever assembles the object. A single
+/// conversion runs at a time, so this needs no more than file scope.
+std::set<std::string>& referencedContracts()
+{
+	static std::set<std::string> objects;
+	return objects;
+}
+
 class SolToYulConverter
 {
 public:
@@ -141,6 +149,8 @@ private:
 	llvm::StringMap<uint64_t> m_storageSlots;
 	bool m_usesMemory = false;
 	bool m_needsBytesHelpers = false;
+	/// Objects this contract's code names, which have to be nested in it.
+	std::set<std::string>& m_referencedObjects = referencedContracts();
 
 	/// `string` and `bytes` do not fit a word, so they live in memory and are
 	/// named by a pointer to [length][data...].
@@ -368,6 +378,37 @@ private:
 		if (auto constant = llvm::dyn_cast<mlir::solidity::ConstantOp>(&_op))
 		{
 			m_map[constant.getResult()] = convertConstant(constant);
+			return false;
+		}
+		if (auto length = llvm::dyn_cast<mlir::solidity::MemoryLengthOp>(&_op))
+		{
+			m_map[length.getResult()] = m_builder.create<mlir::yul::MLoadOp>(loc(), mapped(length.getValue()));
+			return false;
+		}
+		if (auto code = llvm::dyn_cast<mlir::solidity::ContractCodeOp>(&_op))
+		{
+			// The named contract is nested as a sub-object, so its code is data
+			// here: its size is known when the object is assembled, and copying
+			// it into memory makes it an ordinary `bytes` value.
+			// A dotted name is a path to a nested object, so the sub-object
+			// this refers to is named after the contract and holds its runtime
+			// code directly.
+			if (code.getCreation())
+				fail("type(C).creationCode");
+			std::string const object = code.getContractName().str();
+			m_referencedObjects.insert(object);
+			m_usesMemory = true;
+
+			mlir::Value size = m_builder.create<mlir::yul::DataSizeOp>(loc(), object);
+			mlir::Value pointer = allocate(
+				m_builder.create<mlir::yul::AddOp>(loc(), wordConstant(uint64_t(32)), roundedUp(size)));
+			m_builder.create<mlir::yul::MStoreOp>(loc(), pointer, size);
+			m_builder.create<mlir::yul::DataCopyOp>(
+				loc(),
+				m_builder.create<mlir::yul::AddOp>(loc(), pointer, wordConstant(uint64_t(32))),
+				m_builder.create<mlir::yul::DataOffsetOp>(loc(), object),
+				size);
+			m_map[code.getResult()] = pointer;
 			return false;
 		}
 		if (auto literal = llvm::dyn_cast<mlir::solidity::StringLiteralOp>(&_op))
@@ -844,11 +885,18 @@ private:
 			if (std::optional<std::string> const signature = abiSignature(func))
 				entries.emplace_back(solidity::util::selectorFromSignatureU32(*signature), func);
 		}
-		if (entries.empty())
-			return;
-
 		mlir::OpBuilder::InsertionGuard guard(m_builder);
 		m_builder.setInsertionPointToEnd(_dst.getBody());
+
+		// A contract nothing can be called on still has to reject the call.
+		// Returning without emitting anything left an object that accepts
+		// every call and answers nothing, where Solidity reverts.
+		if (entries.empty())
+		{
+			mlir::Value zero = wordConstant(uint64_t(0));
+			m_builder.create<mlir::yul::RevertOp>(loc(), zero, zero);
+			return;
+		}
 
 		mlir::Value word = m_builder.create<mlir::yul::CallDataLoadOp>(loc(), wordConstant(uint64_t(0)));
 		mlir::Value selector = m_builder.create<mlir::yul::ShrOp>(loc(), wordConstant(uint64_t(224)), word);
@@ -1149,7 +1197,13 @@ mlir::OwningOpRef<mlir::ModuleOp> convertSolToYul(mlir::ModuleOp _module, std::s
 {
 	mlir::MLIRContext& ctx = *_module.getContext();
 	ctx.getOrLoadDialect<mlir::yul::YulDialect>();
+	referencedContracts().clear();
 	return SolToYulConverter(ctx, _creation).run(_module, _error);
+}
+
+std::set<std::string> const& lastReferencedContracts()
+{
+	return referencedContracts();
 }
 
 } // namespace solidity::mlirgen

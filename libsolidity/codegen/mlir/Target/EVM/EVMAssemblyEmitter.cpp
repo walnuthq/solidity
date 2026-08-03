@@ -170,8 +170,10 @@ private:
 			m_functions.push_back(func);
 			m_byName[func.getName().str()] = func;
 		}
-		if (m_functions.empty())
-			fail("module contains no functions");
+		// A contract with no functions is still a contract: its runtime is code
+		// that does nothing, which is what an empty object assembles to. It has
+		// to be assemblable because another contract may name it - through
+		// `type(C).runtimeCode` - and nest it as a sub-object.
 	}
 
 	/// Frames are addressed absolutely, so two live activations of one function

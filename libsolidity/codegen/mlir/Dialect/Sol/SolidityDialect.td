@@ -527,6 +527,29 @@ def Solidity_AddressBalanceOp : Solidity_Op<"address_balance", [Pure]> {
   let assemblyFormat = "$address attr-dict `:` type($address) `->` type($balance)";
 }
 
+def Solidity_MemoryLengthOp : Solidity_Op<"memory_length", [Pure]> {
+  let summary = "Length of a dynamic value held in memory";
+  let description = [{
+    `string` and `bytes` are held as a pointer to [length][data...], so their
+    length is the word at the pointer.
+  }];
+  let arguments = (ins Solidity_AnyType:$value);
+  let results = (outs Solidity_AnyType:$length);
+  let assemblyFormat = "$value attr-dict `:` type($value) `->` type($length)";
+}
+
+def Solidity_ContractCodeOp : Solidity_Op<"contract_code", [Pure]> {
+  let summary = "Runtime or creation code of a named contract";
+  let description = [{
+    `type(C).runtimeCode` and `type(C).creationCode`. The named contract becomes
+    a sub-object of the one being compiled, so the code is available as data
+    rather than having to be read from an address at run time.
+  }];
+  let arguments = (ins StrAttr:$contractName, BoolAttr:$creation);
+  let results = (outs Solidity_AnyType:$code);
+  let assemblyFormat = "$contractName $creation attr-dict `:` type($code)";
+}
+
 def Solidity_AddressCodeOp : Solidity_Op<"address_code", [Pure]> {
   let summary = "Get code at an address";
   let description = [{
