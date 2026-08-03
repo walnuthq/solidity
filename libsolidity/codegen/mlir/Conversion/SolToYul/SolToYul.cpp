@@ -473,11 +473,29 @@ private:
 			m_map[convert.getOutput()] = representationConvert(mapped(convert.getInput()), convert.getOutput().getType());
 			return false;
 		}
+		if (auto select = llvm::dyn_cast<mlir::solidity::SelectOp>(&_op))
+		{
+			// Branch-free, because both arms are already evaluated by the time
+			// this op exists - `b xor ((a xor b) * c)` with c in {0,1}, which is
+			// the same shape the EVM backend uses for arith.select.
+			mlir::Value trueValue = mapped(select.getTrueValue());
+			mlir::Value falseValue = mapped(select.getFalseValue());
+			mlir::Value condition = mapped(select.getCondition());
+			mlir::Value difference = m_builder.create<mlir::yul::XorOp>(loc(), trueValue, falseValue);
+			mlir::Value chosen = m_builder.create<mlir::yul::MulOp>(loc(), difference, condition);
+			m_map[select.getResult()] = m_builder.create<mlir::yul::XorOp>(loc(), falseValue, chosen);
+			return false;
+		}
 		if (auto toI1 = llvm::dyn_cast<mlir::solidity::ToI1Op>(&_op))
 		{
 			// Everything is a word here, so narrowing a bool to i1 is only a
 			// change of type - the value is already 0 or 1.
 			m_map[toI1.getResult()] = mapped(toI1.getOperand());
+			return false;
+		}
+		if (auto scfIf = llvm::dyn_cast<mlir::scf::IfOp>(&_op))
+		{
+			convertIfWithResults(scfIf);
 			return false;
 		}
 		if (auto whileOp = llvm::dyn_cast<mlir::scf::WhileOp>(&_op))
@@ -1158,6 +1176,47 @@ private:
 			m_builder.setInsertionPointToStart(&elseIf.getThenRegion().emplaceBlock());
 			convertBlockOps(_if.getElseRegion().front());
 		}
+	}
+
+	/// `scf.if` with results, which is how a variable assigned in a branch
+	/// survives the branch. Yul has no such thing, so it is the same trick as
+	/// the loop: a mutable variable per carried value, assigned by each arm.
+	void convertIfWithResults(mlir::scf::IfOp _if)
+	{
+		llvm::SmallVector<mlir::Value, 4> slots;
+		for (mlir::Type type: _if.getResultTypes())
+		{
+			(void) type;
+			slots.push_back(m_builder.create<mlir::yul::VarOp>(loc(), wordConstant(uint64_t(0))));
+		}
+
+		mlir::Value condition = mapped(_if.getCondition());
+		auto emitArm = [&](mlir::Region& _region, mlir::Value _guard) {
+			if (_region.empty())
+				return;
+			auto guardIf = m_builder.create<mlir::yul::IfOp>(loc(), _guard);
+			mlir::OpBuilder::InsertionGuard inner(m_builder);
+			m_builder.setInsertionPointToStart(&guardIf.getThenRegion().emplaceBlock());
+			for (mlir::Operation& op: _region.front().getOperations())
+			{
+				if (auto yield = llvm::dyn_cast<mlir::scf::YieldOp>(&op))
+				{
+					for (auto [index, value]: llvm::enumerate(yield.getResults()))
+						if (index < slots.size())
+							m_builder.create<mlir::yul::AssignOp>(loc(), slots[index], mapped(value));
+					break;
+				}
+				if (convertOp(op))
+					break;
+			}
+		};
+
+		emitArm(_if.getThenRegion(), condition);
+		emitArm(_if.getElseRegion(), m_builder.create<mlir::yul::IsZeroOp>(loc(), condition));
+
+		for (auto [index, result]: llvm::enumerate(_if.getResults()))
+			if (index < slots.size())
+				m_map[result] = m_builder.create<mlir::yul::VarLoadOp>(loc(), wordType(), slots[index]);
 	}
 
 	/// `scf.while` is what the generator emits for every `for` and `while`, and

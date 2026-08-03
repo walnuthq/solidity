@@ -966,8 +966,14 @@ public:
 				funcOp->setAttr("param_names", m_builder->getArrayAttr(paramNameAttrs));
 
 			std::vector<mlir::Attribute> returnNameAttrs;
+			// Remembered so a body that falls off its end returns what the
+			// named results hold rather than a placeholder.
+			m_returnParameters.clear();
 			for (auto const& ret: _func.returnParameters())
+			{
 				returnNameAttrs.push_back(m_builder->getStringAttr(ret->name()));
+				m_returnParameters.push_back(ret.get());
+			}
 			if (!returnNameAttrs.empty())
 				funcOp->setAttr("return_names", m_builder->getArrayAttr(returnNameAttrs));
 		}
@@ -1542,7 +1548,20 @@ public:
 		{
 			mlir::ArrayRef<mlir::Type> const results = enclosing.getResultTypes();
 			for (size_t i = _values.size(); i < results.size(); ++i)
-				_values.push_back(emitUnsupported(_loc, results[i], "return value not generated"));
+			{
+				// `returns (uint256 x)` with no explicit return - and `return;`
+				// in the same function - returns whatever x holds. Padding with
+				// a placeholder answered zero however x was assigned.
+				mlir::Value named;
+				if (i < m_returnParameters.size() && m_returnParameters[i]
+					&& !m_returnParameters[i]->name().empty())
+				{
+					auto known = m_valueMap.find(m_returnParameters[i]->id());
+					if (known != m_valueMap.end() && known->second && known->second.getType() == results[i])
+						named = known->second;
+				}
+				_values.push_back(named ? named : emitUnsupported(_loc, results[i], "return value not generated"));
+			}
 			_values.resize(std::min(_values.size(), results.size()));
 
 			// A string literal returned where fixed bytes are declared is a
@@ -1585,6 +1604,8 @@ public:
 	std::vector<FunctionDefinition const*> m_functionPointerOrder;
 	std::set<std::pair<size_t, size_t>> m_indirectShapes;
 	std::map<FunctionDefinition const*, std::string> m_emittedFunctionNames;
+
+	std::vector<VariableDeclaration const*> m_returnParameters;
 
 	ContractDefinition const* m_mostDerivedContract = nullptr;
 
@@ -3061,32 +3082,82 @@ public:
 			auto condition = generateSolidityExpression(ifStmt->condition());
 			bool hasElse = ifStmt->falseStatement() != nullptr;
 
-			auto ifOp = m_builder->create<mlir::solidity::IfOp>(loc, condition);
-
-			// Generate then region
-			m_builder->setInsertionPointToEnd(&ifOp.getThenRegion().emplaceBlock());
-			generateSolidityStatement(ifStmt->trueStatement());
-
-			// Generate else region if present
+			// A variable assigned in a branch is live after the `if`, so the
+			// branches have to yield it - the same problem the loop solves by
+			// carrying values. Parking it as a placeholder instead, which is
+			// what happened before, meant `if (c) x = 1; else x = 2;` read zero
+			// afterwards.
+			std::set<int64_t> assigned = collectModifiedVariables(ifStmt->trueStatement());
 			if (hasElse)
 			{
-				m_builder->setInsertionPointToEnd(&ifOp.getElseRegion().emplaceBlock());
-				generateSolidityStatement(*ifStmt->falseStatement());
+				auto other = collectModifiedVariables(*ifStmt->falseStatement());
+				assigned.insert(other.begin(), other.end());
 			}
-			else
+			for (int64_t declared: collectDeclaredVariables(ifStmt->trueStatement()))
+				assigned.erase(declared);
+			if (hasElse)
+				for (int64_t declared: collectDeclaredVariables(*ifStmt->falseStatement()))
+					assigned.erase(declared);
+
+			std::vector<int64_t> const carried(assigned.begin(), assigned.end());
+			if (carried.empty())
 			{
-				// Create an empty else region - it will be empty which is valid for solidity.if
-				ifOp.getElseRegion().emplaceBlock();
+				auto ifOp = m_builder->create<mlir::solidity::IfOp>(loc, condition);
+				m_builder->setInsertionPointToEnd(&ifOp.getThenRegion().emplaceBlock());
+				generateSolidityStatement(ifStmt->trueStatement());
+				if (hasElse)
+				{
+					m_builder->setInsertionPointToEnd(&ifOp.getElseRegion().emplaceBlock());
+					generateSolidityStatement(*ifStmt->falseStatement());
+				}
+				else
+					ifOp.getElseRegion().emplaceBlock();
+
+				m_builder->setInsertionPointAfter(ifOp.getOperation());
+				dropValuesEscaping(ifOp.getOperation(), loc);
+				return mlir::Value();
 			}
 
-			// Reset insertion point after the if statement
-			// This ensures subsequent statements are generated after the if, not inside it
-			m_builder->setInsertionPointAfter(ifOp.getOperation());
+			// The value each carried variable has on entry, which an arm that
+			// does not touch it yields unchanged.
+			llvm::SmallVector<mlir::Value, 4> entry;
+			llvm::SmallVector<mlir::Type, 4> carriedTypes;
+			for (int64_t id: carried)
+			{
+				mlir::Value value = m_valueMap.count(id) ? m_valueMap[id] : mlir::Value();
+				if (!value)
+					value = emitUnsupported(
+						loc, mlir::solidity::UIntType::get(m_context.get(), 256), "variable used before assignment");
+				entry.push_back(value);
+				carriedTypes.push_back(value.getType());
+			}
 
-			// Same rule as for loops: a variable assigned only in a branch has
-			// no value after the `if`, so it must not stay in the map naming
-			// one from inside the region.
-			dropValuesEscaping(ifOp.getOperation(), loc);
+			mlir::Value i1Condition = m_builder->create<mlir::solidity::ToI1Op>(
+				loc, m_builder->getI1Type(), condition);
+			auto scfIf = m_builder->create<mlir::scf::IfOp>(loc, mlir::TypeRange{carriedTypes}, i1Condition, true);
+
+			auto emitArm = [&](mlir::Block& _block, Statement const* _statement) {
+				mlir::OpBuilder::InsertionGuard guard(*m_builder);
+				m_builder->setInsertionPointToEnd(&_block);
+				for (size_t i = 0; i < carried.size(); ++i)
+					m_valueMap[carried[i]] = entry[i];
+				if (_statement)
+					generateSolidityStatement(*_statement);
+				llvm::SmallVector<mlir::Value, 4> yielded;
+				for (size_t i = 0; i < carried.size(); ++i)
+				{
+					mlir::Value value = m_valueMap.count(carried[i]) ? m_valueMap[carried[i]] : mlir::Value();
+					yielded.push_back(value && value.getType() == carriedTypes[i] ? value : entry[i]);
+				}
+				if (_block.empty() || !_block.back().hasTrait<mlir::OpTrait::IsTerminator>())
+					m_builder->create<mlir::scf::YieldOp>(loc, mlir::ValueRange{yielded});
+			};
+			emitArm(scfIf.getThenRegion().front(), &ifStmt->trueStatement());
+			emitArm(scfIf.getElseRegion().front(), ifStmt->falseStatement());
+
+			m_builder->setInsertionPointAfter(scfIf.getOperation());
+			for (size_t i = 0; i < carried.size(); ++i)
+				m_valueMap[carried[i]] = scfIf->getResult(i);
 		}
 		else if (auto* forStmt = dynamic_cast<ForStatement const*>(&_stmt))
 		{
