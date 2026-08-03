@@ -3992,9 +3992,23 @@ public:
 			yul::AsmPrinter printer(inlineAsm->dialect());
 			std::string yulSource = printer(inlineAsm->operations().root());
 
-			// Create the InlineAssemblyOp with serialized Yul source
+			// The block reads Solidity variables as well as writing them, so
+			// the values it starts from are operands. Without them every
+			// reference began at zero.
+			std::vector<mlir::Value> inputs;
+			std::vector<mlir::Attribute> inputNames;
+			for (auto const& [yulIdent, info]: inlineAsm->annotation().externalReferences)
+				if (auto* varDecl = dynamic_cast<VariableDeclaration const*>(info.declaration))
+				{
+					auto known = m_valueMap.find(varDecl->id());
+					if (known == m_valueMap.end() || !known->second)
+						continue;
+					inputs.push_back(known->second);
+					inputNames.push_back(m_builder->getStringAttr(yulIdent->name.str()));
+				}
+
 			m_builder->create<mlir::solidity::InlineAssemblyOp>(
-				loc, m_builder->getStringAttr(yulSource));
+				loc, m_builder->getStringAttr(yulSource), inputs, m_builder->getArrayAttr(inputNames));
 
 			// For external references pointing to Solidity variables,
 			// create AssemblyBindOp so subsequent code can reference them.

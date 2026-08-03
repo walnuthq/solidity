@@ -53,7 +53,10 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
+#include "../../Import/LibyulAST/YulASTImporter.h"
+
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Verifier.h"
@@ -152,6 +155,7 @@ private:
 	bool m_needsBytesHelpers = false;
 	/// Objects this contract's code names, which have to be nested in it.
 	std::set<std::string>& m_referencedObjects = referencedContracts();
+	llvm::StringMap<mlir::Value> m_assemblyVars;
 
 	/// `string` and `bytes` do not fit a word, so they live in memory and are
 	/// named by a pointer to [length][data...].
@@ -500,6 +504,20 @@ private:
 			// Everything is a word here, so narrowing a bool to i1 is only a
 			// change of type - the value is already 0 or 1.
 			m_map[toI1.getResult()] = mapped(toI1.getOperand());
+			return false;
+		}
+		if (auto assembly = llvm::dyn_cast<mlir::solidity::InlineAssemblyOp>(&_op))
+		{
+			convertInlineAssembly(assembly);
+			return false;
+		}
+		if (auto bind = llvm::dyn_cast<mlir::solidity::AssemblyBindOp>(&_op))
+		{
+			// What the block left in that variable.
+			auto known = m_assemblyVars.find(bind.getVarName().str());
+			if (known == m_assemblyVars.end())
+				fail("inline assembly does not define '" + bind.getVarName().str() + "'");
+			m_map[bind.getResult()] = m_builder.create<mlir::yul::VarLoadOp>(loc(), wordType(), known->second);
 			return false;
 		}
 		if (auto scfIf = llvm::dyn_cast<mlir::scf::IfOp>(&_op))
@@ -1325,6 +1343,75 @@ private:
 			m_builder.setInsertionPointToStart(&elseIf.getThenRegion().emplaceBlock());
 			convertBlockOps(_if.getElseRegion().front());
 		}
+	}
+
+	/// An inline assembly block, imported rather than re-invented.
+	///
+	/// The generator serialises the Yul it was given and the libyul importer
+	/// turns that back into `yul` dialect ops, so this only has to splice them
+	/// in and connect the ends: Solidity's values go in through a prologue of
+	/// declarations, and whatever the block assigned is read back out by
+	/// `solidity.assembly_bind`.
+	void convertInlineAssembly(mlir::solidity::InlineAssemblyOp _assembly)
+	{
+		// Every Solidity variable the block mentions is declared ahead of it,
+		// so the source is valid strict assembly on its own. The initialisers
+		// are replaced with the real values while splicing.
+		// Declared in one order: the values coming in first, then anything the
+		// block assigns that had no value to start from.
+		std::vector<std::string> names;
+		llvm::StringMap<mlir::Value> incoming;
+		for (auto [name, value]: llvm::zip(_assembly.getInputNames(), _assembly.getInputs()))
+		{
+			std::string const text = llvm::cast<mlir::StringAttr>(name).getValue().str();
+			names.push_back(text);
+			incoming[text] = mapped(value);
+		}
+		for (std::string const& name: assemblyBindingsAfter(_assembly))
+			if (!incoming.contains(name))
+				names.push_back(name);
+
+		std::string source = "{\n";
+		for (std::string const& name: names)
+			source += "let " + name + " := 0\n";
+		source += _assembly.getYulSource().str() + "\n}";
+
+		std::string error;
+		mlir::OwningOpRef<mlir::ModuleOp> imported
+			= solidity::mlirgen::importYulSource("inline-assembly", source, *m_builder.getContext(), error);
+		if (!imported)
+			fail("inline assembly: " + error);
+
+		mlir::IRMapping mapping;
+		for (mlir::Operation& op: imported->getBody()->getOperations())
+		{
+			mlir::Operation* cloned = m_builder.clone(op, mapping);
+			if (auto var = llvm::dyn_cast<mlir::yul::VarOp>(cloned))
+				if (auto name = var->getAttrOfType<mlir::StringAttr>("yul_name"))
+				{
+					// The prologue's zero stands in for a value the caller has;
+					// this is where the two are joined up.
+					auto known = incoming.find(name.getValue());
+					if (known != incoming.end() && !m_assemblyVars.contains(name.getValue()))
+						var.getInitMutable().assign(known->second);
+					m_assemblyVars[name.getValue().str()] = var.getResult();
+				}
+		}
+	}
+
+	/// The names `solidity.assembly_bind` asks for right after this block -
+	/// which is how the generator says which Solidity variables it touches.
+	std::vector<std::string> assemblyBindingsAfter(mlir::solidity::InlineAssemblyOp _assembly)
+	{
+		std::vector<std::string> names;
+		for (mlir::Operation* next = _assembly->getNextNode(); next; next = next->getNextNode())
+		{
+			auto bind = llvm::dyn_cast<mlir::solidity::AssemblyBindOp>(next);
+			if (!bind)
+				break;
+			names.push_back(bind.getVarName().str());
+		}
+		return names;
 	}
 
 	/// `scf.if` with results, which is how a variable assigned in a branch

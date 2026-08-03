@@ -173,9 +173,13 @@ private:
 
 	mlir::Value defineVar(std::string const& _name, mlir::Value _init)
 	{
-		mlir::Value ref = m_builder.create<mlir::yul::VarOp>(loc(), _init);
-		m_varScopes.back()[_name] = ref;
-		return ref;
+		auto var = m_builder.create<mlir::yul::VarOp>(loc(), _init);
+		// Kept so a caller splicing this block into something else can find a
+		// particular variable again - inline assembly needs to hand Solidity's
+		// values in and read what the block assigned back out.
+		var->setAttr("yul_name", m_builder.getStringAttr(_name));
+		m_varScopes.back()[_name] = var.getResult();
+		return var.getResult();
 	}
 
 	mlir::Value lookupVar(std::string const& _name)

@@ -13,6 +13,8 @@ if(MLIR_FOUND)
     target_link_libraries(SolToYulConversion PUBLIC
         SolidityDialect
         YulMLIRDialect
+        # Inline assembly is imported rather than re-parsed by hand.
+        YulASTImport
         solutil
     )
 

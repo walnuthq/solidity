@@ -1039,8 +1039,12 @@ def Solidity_InlineAssemblyOp : Solidity_Op<"inline_assembly"> {
     Represents an inline assembly block with its serialized Yul source code.
     The source is serialized via AsmPrinter and parsed back in the Yul lowering.
   }];
-  let arguments = (ins StrAttr:$yul_source);
-  let assemblyFormat = "$yul_source attr-dict";
+  let arguments = (ins
+    StrAttr:$yul_source,
+    Variadic<Solidity_AnyType>:$inputs,
+    StrArrayAttr:$input_names
+  );
+  let assemblyFormat = "$yul_source `(` ($inputs^ `:` type($inputs))? `)` attr-dict";
 }
 
 def Solidity_AssemblyBindOp : Solidity_Op<"assembly_bind", [Pure]> {
