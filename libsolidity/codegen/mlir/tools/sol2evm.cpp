@@ -75,6 +75,14 @@ std::string quoted(std::string const& _text)
 }
 
 
+/// The creation half of another contract, which is what `new C(...)` deploys -
+/// a different object from the runtime code `type(C).runtimeCode` names, and it
+/// carries that runtime code nested inside it.
+std::shared_ptr<solidity::evmasm::Assembly> creationAssemblyOf(
+	std::string const& _name,
+	CompilerStack& _stack,
+	mlir::MLIRContext& _context);
+
 /// The runtime half of another contract in the same source, assembled so it can
 /// be nested as a sub-object. Compiled from scratch rather than cached: a
 /// contract naming another one's code is rare enough that it is not worth the
@@ -108,6 +116,48 @@ std::shared_ptr<solidity::evmasm::Assembly> runtimeAssemblyOf(
 
 		mlirgen::EVMAssemblyOptions options;
 		options.name = _name;
+		return mlirgen::emitEVMAssembly(*evmModule, options, error);
+	}
+	return nullptr;
+}
+
+
+std::shared_ptr<solidity::evmasm::Assembly> creationAssemblyOf(
+	std::string const& _name,
+	CompilerStack& _stack,
+	mlir::MLIRContext& _context)
+{
+	std::shared_ptr<solidity::evmasm::Assembly> runtime = runtimeAssemblyOf(_name, _stack, _context);
+	if (!runtime)
+		return nullptr;
+
+	for (std::string const& candidate: _stack.contractNames())
+	{
+		if (candidate != _name && candidate.substr(candidate.rfind(':') + 1) != _name)
+			continue;
+
+		MLIRGenerator generator(_stack, langutil::EVMVersion{}, OptimiserSettings::minimal());
+		std::string const text = generator.generate(_stack.contractDefinition(candidate));
+		if (text.empty())
+			return nullptr;
+		mlir::OwningOpRef<mlir::ModuleOp> solModule
+			= mlir::parseSourceString<mlir::ModuleOp>(text, &_context);
+		if (!solModule)
+			return nullptr;
+
+		std::string error;
+		mlir::OwningOpRef<mlir::ModuleOp> yulModule
+			= mlirgen::convertSolToYul(*solModule, error, /*creation=*/true);
+		if (!yulModule)
+			return nullptr;
+		mlir::OwningOpRef<mlir::ModuleOp> evmModule = mlirgen::convertYulToEVM(*yulModule, error);
+		if (!evmModule)
+			return nullptr;
+
+		mlirgen::EVMAssemblyOptions options;
+		options.name = _name + "_creation";
+		options.creation = true;
+		options.subObjects.push_back({"runtime", runtime, {}});
 		return mlirgen::emitEVMAssembly(*evmModule, options, error);
 	}
 	return nullptr;
@@ -227,7 +277,15 @@ int main(int argc, char** argv)
 						std::set<std::string> const referenced = mlirgen::lastReferencedContracts();
 						for (std::string const& object: referenced)
 						{
-							if (std::shared_ptr<evmasm::Assembly> code = runtimeAssemblyOf(object, stack, context))
+							std::string const suffix = "_new";
+							bool const wantsCreation = object.size() > suffix.size()
+								&& object.compare(object.size() - suffix.size(), suffix.size(), suffix) == 0;
+							std::string const contract
+								= wantsCreation ? object.substr(0, object.size() - suffix.size()) : object;
+							std::shared_ptr<evmasm::Assembly> code
+								= wantsCreation ? creationAssemblyOf(contract, stack, context)
+												: runtimeAssemblyOf(contract, stack, context);
+							if (code)
 								options.subObjects.push_back({object, code, {}});
 						}
 
@@ -261,9 +319,21 @@ int main(int argc, char** argv)
 									creationOptions.creation = true;
 									creationOptions.subObjects.push_back({"runtime", assembly, {}});
 									for (std::string const& object: creationReferenced)
-										if (std::shared_ptr<evmasm::Assembly> code
-											= runtimeAssemblyOf(object, stack, context))
+									{
+										std::string const suffix = "_new";
+										bool const wantsCreation = object.size() > suffix.size()
+											&& object.compare(
+												   object.size() - suffix.size(), suffix.size(), suffix)
+												== 0;
+										std::string const contract = wantsCreation
+											? object.substr(0, object.size() - suffix.size())
+											: object;
+										std::shared_ptr<evmasm::Assembly> code = wantsCreation
+											? creationAssemblyOf(contract, stack, context)
+											: runtimeAssemblyOf(contract, stack, context);
+										if (code)
 											creationOptions.subObjects.push_back({object, code, {}});
+									}
 									creation = mlirgen::emitEVMAssembly(*creationEvm, creationOptions, creationError);
 								}
 							}

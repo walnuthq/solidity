@@ -84,6 +84,11 @@ struct ConversionError
 /// sol2evm registers that half's assembly under.
 constexpr char kRuntimeObjectName[] = "runtime";
 
+/// `new C(...)` needs C's creation code, which is a different object from the
+/// runtime code `type(C).runtimeCode` names. Kept free of dots, because the
+/// emitter reads those as a path into nested objects.
+constexpr char kCreationObjectSuffix[] = "_new";
+
 /// Set by the conversion, read by whoever assembles the object. A single
 /// conversion runs at a time, so this needs no more than file scope.
 std::set<std::string>& referencedContracts()
@@ -399,6 +404,28 @@ private:
 			m_map[length.getResult()] = m_builder.create<mlir::yul::MLoadOp>(loc(), mapped(length.getValue()));
 			return false;
 		}
+		if (auto create = llvm::dyn_cast<mlir::solidity::CreateContractOp>(&_op))
+		{
+			// `new C(...)` deploys C's *creation* code, which is a different
+			// object from the runtime code `type(C).runtimeCode` names - so it
+			// is nested under its own name. Constructor arguments are appended
+			// to it, and nothing decodes them yet, so a constructor that takes
+			// any is refused rather than called with rubbish.
+			if (!create.getConstructorArgs().empty())
+				fail("new C(...) with constructor arguments");
+
+			std::string const object = create.getContractName().str() + kCreationObjectSuffix;
+			m_referencedObjects.insert(object);
+			m_usesMemory = true;
+
+			mlir::Value size = m_builder.create<mlir::yul::DataSizeOp>(loc(), object);
+			mlir::Value pointer = allocate(size);
+			m_builder.create<mlir::yul::DataCopyOp>(
+				loc(), pointer, m_builder.create<mlir::yul::DataOffsetOp>(loc(), object), size);
+			m_map[create.getResult()]
+				= m_builder.create<mlir::yul::CreateOp>(loc(), wordType(), mapped(create.getValue()), pointer, size);
+			return false;
+		}
 		if (auto code = llvm::dyn_cast<mlir::solidity::ContractCodeOp>(&_op))
 		{
 			// The named contract is nested as a sub-object, so its code is data
@@ -507,10 +534,7 @@ private:
 			return false;
 		}
 		if (auto assembly = llvm::dyn_cast<mlir::solidity::InlineAssemblyOp>(&_op))
-		{
-			convertInlineAssembly(assembly);
-			return false;
-		}
+			return convertInlineAssembly(assembly);
 		if (auto bind = llvm::dyn_cast<mlir::solidity::AssemblyBindOp>(&_op))
 		{
 			// What the block left in that variable.
@@ -1352,7 +1376,9 @@ private:
 	/// in and connect the ends: Solidity's values go in through a prologue of
 	/// declarations, and whatever the block assigned is read back out by
 	/// `solidity.assembly_bind`.
-	void convertInlineAssembly(mlir::solidity::InlineAssemblyOp _assembly)
+	/// True when the block ended the enclosing one - `assembly { revert(0, 0) }`
+	/// is a terminator, and anything emitted after it lands past the end.
+	bool convertInlineAssembly(mlir::solidity::InlineAssemblyOp _assembly)
 	{
 		// Every Solidity variable the block mentions is declared ahead of it,
 		// so the source is valid strict assembly on its own. The initialisers
@@ -1383,9 +1409,11 @@ private:
 			fail("inline assembly: " + error);
 
 		mlir::IRMapping mapping;
+		bool terminated = false;
 		for (mlir::Operation& op: imported->getBody()->getOperations())
 		{
 			mlir::Operation* cloned = m_builder.clone(op, mapping);
+			terminated = cloned->hasTrait<mlir::OpTrait::IsTerminator>();
 			if (auto var = llvm::dyn_cast<mlir::yul::VarOp>(cloned))
 				if (auto name = var->getAttrOfType<mlir::StringAttr>("yul_name"))
 				{
@@ -1397,6 +1425,7 @@ private:
 					m_assemblyVars[name.getValue().str()] = var.getResult();
 				}
 		}
+		return terminated;
 	}
 
 	/// The names `solidity.assembly_bind` asks for right after this block -
