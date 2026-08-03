@@ -224,7 +224,12 @@ private:
 		for (mlir::Operation& op: _contract.getBody().front().getOperations())
 		{
 			auto stateVar = llvm::dyn_cast<mlir::solidity::StateVarOp>(&op);
-			if (!stateVar || stateVar.getIsConstant() || stateVar.getIsImmutable())
+			// Immutables are modelled as storage here. solc inlines them into
+			// the runtime code, which is cheaper to read but needs the code to
+			// be patched after assembly; a slot written by the creation half is
+			// read back by the runtime half just as correctly. Skipping them
+			// meant every immutable read zero.
+			if (!stateVar || stateVar.getIsConstant())
 				continue;
 			// The generator records the initialiser as its decimal value; a
 			// variable without one is already zero and needs no store.

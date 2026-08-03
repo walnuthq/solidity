@@ -19,6 +19,7 @@
 #include <libsolidity/ast/AST.h>
 #include <libsolidity/ast/ASTAnnotations.h>
 #include <libsolidity/ast/Types.h>
+#include <libsolidity/ast/TypeProvider.h>
 #include <libsolidity/codegen/mlir/MLIRGenerator.h>
 #include <libsolidity/interface/CompilerStack.h>
 #include <libsolutil/FunctionSelector.h>
@@ -1057,20 +1058,95 @@ public:
 	/// different ones - and dropping that resolution here is what made both
 	/// lower to the same symbol and bind to whichever won.
 	/// The FunctionDefinition a call reaches, after virtual resolution.
+	/// Strips parentheses. `((super).f)()` is the same call as `super.f()`, but
+	/// each level arrives as a one-component tuple, so anything matching on the
+	/// node type sees a TupleExpression and gives up.
+	static Expression const& withoutParentheses(Expression const& _expr)
+	{
+		Expression const* expr = &_expr;
+		while (auto const* tuple = dynamic_cast<TupleExpression const*>(expr))
+		{
+			if (tuple->isInlineArray() || tuple->components().size() != 1 || !tuple->components().front())
+				break;
+			expr = tuple->components().front().get();
+		}
+		return *expr;
+	}
+
+	/// The contract a `super` member access searches *after*, or null when the
+	/// base is not `super`. `super` carries it as the contract of its own type,
+	/// which is the one the expression is written in - so a body inherited into
+	/// a derived contract searches from where it is defined, not from where it
+	/// ended up.
+	static ContractDefinition const* superSearchStart(MemberAccess const& _member)
+	{
+		auto const* typeType
+			= dynamic_cast<TypeType const*>(withoutParentheses(_member.expression()).annotation().type);
+		if (!typeType)
+			return nullptr;
+		auto const* contractType = dynamic_cast<ContractType const*>(typeType->actualType());
+		return contractType && contractType->isSuper() ? &contractType->contractDefinition() : nullptr;
+	}
+
+	/// The next implementation of `_function` after `_from` in the most-derived
+	/// contract's linearisation - what `super.f()` means.
+	///
+	/// `FunctionDefinition::resolveVirtual` takes a search start, but searches
+	/// from it inclusively, so handing it the contract the call is written in
+	/// returns that same contract's override and the function calls itself.
+	/// The step `super` asks for is strictly the next one along.
+	FunctionDefinition const* resolveSuper(FunctionDefinition const& _function, ContractDefinition const& _from)
+	{
+		if (!m_mostDerivedContract || _function.name().empty())
+			return nullptr;
+
+		auto const& linearised = m_mostDerivedContract->annotation().linearizedBaseContracts;
+		auto position = std::find(linearised.begin(), linearised.end(), &_from);
+		if (position == linearised.end())
+			return nullptr;
+
+		FunctionType const* wanted = TypeProvider::function(_function)->asExternallyCallableFunction(false);
+		for (++position; position != linearised.end(); ++position)
+			for (FunctionDefinition const* candidate: (*position)->definedFunctions(_function.name()))
+				if (candidate->isImplemented()
+					&& FunctionType(*candidate).asExternallyCallableFunction(false)->hasEqualParameterTypes(*wanted))
+					return candidate;
+		return nullptr;
+	}
+
 	FunctionDefinition const* resolvedCallee(FunctionCall const& _call)
 	{
+		Expression const& callee = withoutParentheses(_call.expression());
+		auto const* member = dynamic_cast<MemberAccess const*>(&callee);
+
 		Declaration const* declaration = nullptr;
-		if (auto const* ident = dynamic_cast<Identifier const*>(&_call.expression()))
+		if (auto const* ident = dynamic_cast<Identifier const*>(&callee))
 			declaration = ident->annotation().referencedDeclaration;
-		else if (auto const* member = dynamic_cast<MemberAccess const*>(&_call.expression()))
+		else if (member)
 			declaration = member->annotation().referencedDeclaration;
 
 		auto const* function = dynamic_cast<FunctionDefinition const*>(declaration);
 		if (!function || !dynamic_cast<ContractDefinition const*>(function->scope()))
 			return nullptr;
-		if (dynamic_cast<Identifier const*>(&_call.expression()) && m_mostDerivedContract
-			&& !function->isConstructor())
-			function = &function->resolveVirtual(*m_mostDerivedContract);
+		if (!m_mostDerivedContract || function->isConstructor())
+			return function;
+
+		// An unqualified call is virtual: `hook()` inside a body Concrete
+		// inherits must reach Concrete's override, not the declaration the name
+		// resolved to in the base. An explicit `Base.f(...)` arrives as a
+		// MemberAccess and stays direct.
+		if (!member)
+			return &function->resolveVirtual(*m_mostDerivedContract);
+
+		// `super.f()` is neither: it resolves against the most-derived
+		// contract's linearisation, starting after the contract the call is
+		// written in. Treating it as a direct call reaches the override that is
+		// asking, which is a loop; treating it as virtual does the same.
+		if (ContractDefinition const* from = superSearchStart(*member))
+		{
+			if (FunctionDefinition const* next = resolveSuper(*function, *from))
+				return next;
+		}
 		return function;
 	}
 
@@ -1181,24 +1257,9 @@ public:
 
 	std::string resolvedCalleeName(FunctionCall const& _call, std::string const& _fallback)
 	{
-		Declaration const* declaration = nullptr;
-		if (auto const* ident = dynamic_cast<Identifier const*>(&_call.expression()))
-			declaration = ident->annotation().referencedDeclaration;
-		else if (auto const* member = dynamic_cast<MemberAccess const*>(&_call.expression()))
-			declaration = member->annotation().referencedDeclaration;
-
-		auto const* function = dynamic_cast<FunctionDefinition const*>(declaration);
-		if (!function || !dynamic_cast<ContractDefinition const*>(function->scope()))
+		FunctionDefinition const* function = resolvedCallee(_call);
+		if (!function)
 			return _fallback;
-
-		// An unqualified call is virtual: `hook()` inside a body Concrete
-		// inherits must reach Concrete's override, not the declaration the
-		// name resolved to in the base. An explicit `Base.f(...)` arrives as
-		// a MemberAccess and stays direct.
-		if (dynamic_cast<Identifier const*>(&_call.expression()) && m_mostDerivedContract
-			&& !function->isConstructor())
-			function = &function->resolveVirtual(*m_mostDerivedContract);
-
 		auto const* contract = dynamic_cast<ContractDefinition const*>(function->scope());
 		if (!contract)
 			return _fallback;
@@ -1346,6 +1407,18 @@ public:
 
 			auto resultType = lhs.getType();
 
+			// Signedness decides the opcode, not just the type: EVM has one set
+			// of comparisons for unsigned words and another for two's
+			// complement. Comparing int256(-1) with lt() asks whether
+			// 2^256-1 < 1, which is false where Solidity says true - a wrong
+			// answer with nothing to signal it. Div and Mod already pick their
+			// signed form in the lowering, from the same operand type.
+			bool const isSigned = llvm::isa<mlir::solidity::IntType>(lhs.getType())
+				|| llvm::isa<mlir::solidity::IntType>(rhs.getType());
+			auto predicate = [&](char const* _unsigned, char const* _signed) {
+				return m_builder->getStringAttr(isSigned ? _signed : _unsigned);
+			};
+
 			switch (binOp->getOperator())
 			{
 			case langutil::Token::Add:
@@ -1372,13 +1445,13 @@ public:
 			{
 				return m_builder->create<mlir::solidity::CmpOp>(
 					loc, mlir::solidity::BoolType::get(m_context.get()),
-					lhs, rhs, m_builder->getStringAttr("lt"));
+					lhs, rhs, predicate("lt", "slt"));
 			}
 			case langutil::Token::GreaterThan:
 			{
 				return m_builder->create<mlir::solidity::CmpOp>(
 					loc, mlir::solidity::BoolType::get(m_context.get()),
-					lhs, rhs, m_builder->getStringAttr("gt"));
+					lhs, rhs, predicate("gt", "sgt"));
 			}
 			case langutil::Token::Equal:
 			{
@@ -1390,13 +1463,13 @@ public:
 			{
 				return m_builder->create<mlir::solidity::CmpOp>(
 					loc, mlir::solidity::BoolType::get(m_context.get()),
-					lhs, rhs, m_builder->getStringAttr("le"));
+					lhs, rhs, predicate("le", "sle"));
 			}
 			case langutil::Token::GreaterThanOrEqual:
 			{
 				return m_builder->create<mlir::solidity::CmpOp>(
 					loc, mlir::solidity::BoolType::get(m_context.get()),
-					lhs, rhs, m_builder->getStringAttr("ge"));
+					lhs, rhs, predicate("ge", "sge"));
 			}
 			case langutil::Token::NotEqual:
 			{
@@ -1426,11 +1499,15 @@ public:
 			}
 			case langutil::Token::SAR:
 			{
+				// `>>` on a signed operand keeps the sign bit; on an unsigned
+				// one it does not. These two were mapped to each other's ops.
+				if (isSigned)
+					return m_builder->create<mlir::solidity::SarOp>(loc, resultType, lhs, rhs);
 				return m_builder->create<mlir::solidity::ShrOp>(loc, resultType, lhs, rhs);
 			}
 			case langutil::Token::SHR:
 			{
-				return m_builder->create<mlir::solidity::SarOp>(loc, resultType, lhs, rhs);
+				return m_builder->create<mlir::solidity::ShrOp>(loc, resultType, lhs, rhs);
 			}
 			case langutil::Token::And:
 			{
@@ -1836,6 +1913,44 @@ public:
 				}
 			}
 
+			// `type(T).min`, `.max` and `.interfaceId` are compile-time
+			// constants the analyser has already worked out; there is nothing
+			// to evaluate at run time. Without these the whole expression was
+			// dropped and the function answered zero.
+			if (auto* magic = dynamic_cast<MagicType const*>(memberAccess->expression().annotation().type))
+				if (magic->kind() == MagicType::Kind::MetaType)
+				{
+					auto resultType = translateSolidityType(*_expr.annotation().type);
+					auto wordConstant = [&](bigint const& _value) {
+						// Two's complement for the signed minima.
+						bigint wrapped = _value < 0 ? (bigint(1) << 256) + _value : _value;
+						// A fixed-bytes value sits at the top of the word, so
+						// `interfaceId` as bytes4 is the selector shifted up -
+						// right-aligned it reads as zero from the ABI.
+						if (auto* fixedBytes = dynamic_cast<FixedBytesType const*>(_expr.annotation().type))
+							wrapped <<= (32 - fixedBytes->numBytes()) * 8;
+						auto attr = m_builder->getIntegerAttr(
+							mlir::IntegerType::get(m_context.get(), 256, mlir::IntegerType::Unsigned),
+							llvm::APInt(256, u256(wrapped).str(), 10));
+						return m_builder->create<mlir::solidity::ConstantOp>(loc, attr, resultType).getResult();
+					};
+
+					Type const* argument = magic->typeArgument();
+					if (memberName == "interfaceId")
+					{
+						if (auto* contractType = dynamic_cast<ContractType const*>(argument))
+							return wordConstant(bigint(contractType->contractDefinition().interfaceId()));
+					}
+					else if (memberName == "min" || memberName == "max")
+					{
+						bool const wantMin = memberName == "min";
+						if (auto* enumType = dynamic_cast<EnumType const*>(argument))
+							return wordConstant(wantMin ? bigint(0) : bigint(enumType->numberOfMembers() - 1));
+						if (auto* integerType = dynamic_cast<IntegerType const*>(argument))
+							return wordConstant(wantMin ? integerType->minValue() : integerType->maxValue());
+					}
+				}
+
 			// Handle EnumDefinition.member (e.g., State.OPEN)
 			if (auto* baseIdent = dynamic_cast<Identifier const*>(&memberAccess->expression()))
 			{
@@ -1936,8 +2051,13 @@ public:
 		}
 		else if (auto* funcCall = dynamic_cast<FunctionCall const*>(&_expr))
 		{
+			// `((super).f)()` is the same call as `super.f()`. Each level of
+			// parentheses arrives as a one-component tuple, so dispatching on
+			// the node type without stripping them misses every parenthesised
+			// call and it falls through to a path that cannot resolve it.
+			Expression const& callee = withoutParentheses(funcCall->expression());
 			// Handle .call{value: amount}("") pattern — FunctionCallOptions wrapping
-			if (auto* funcCallOpts = dynamic_cast<FunctionCallOptions const*>(&funcCall->expression()))
+			if (auto* funcCallOpts = dynamic_cast<FunctionCallOptions const*>(&callee))
 			{
 				if (auto* memberAccess = dynamic_cast<MemberAccess const*>(&funcCallOpts->expression()))
 				{
@@ -1971,7 +2091,7 @@ public:
 			}
 
 			// Handle member function calls first (e.g., array.push(), .transfer())
-			if (auto* memberAccess = dynamic_cast<MemberAccess const*>(&funcCall->expression()))
+			if (auto* memberAccess = dynamic_cast<MemberAccess const*>(&callee))
 			{
 				// Don't generate base for abi.* calls or contract/library calls
 				bool skipBaseGen = false;
@@ -2014,7 +2134,7 @@ public:
 				}
 			}
 			// Handle struct constructor calls
-			else if (auto* typeConversion = dynamic_cast<Identifier const*>(&funcCall->expression()))
+			else if (auto* typeConversion = dynamic_cast<Identifier const*>(&callee))
 			{
 				if (auto* structDecl
 					= dynamic_cast<StructDefinition const*>(typeConversion->annotation().referencedDeclaration))
@@ -2038,7 +2158,7 @@ public:
 				}
 			}
 			// Handle new ContractName(args) — contract creation via CREATE opcode
-			else if (auto* newExpr = dynamic_cast<NewExpression const*>(&funcCall->expression()))
+			else if (auto* newExpr = dynamic_cast<NewExpression const*>(&callee))
 			{
 				std::string typeName;
 				if (auto* userDefined = dynamic_cast<UserDefinedTypeName const*>(&newExpr->typeName()))
@@ -2082,7 +2202,7 @@ public:
 					zeroValue, args).getResult();
 			}
 
-			if (auto* ident = dynamic_cast<Identifier const*>(&funcCall->expression()))
+			if (auto* ident = dynamic_cast<Identifier const*>(&callee))
 			{
 				// Handle special functions like require, assert, revert
 				if (ident->name() == "require")
@@ -2151,7 +2271,7 @@ public:
 				std::string funcName;
 
 				// Get function name from identifier
-				if (auto* ident = dynamic_cast<Identifier const*>(&funcCall->expression()))
+				if (auto* ident = dynamic_cast<Identifier const*>(&callee))
 				{
 					funcName = ident->name();
 
@@ -2252,7 +2372,7 @@ public:
 					}
 				}
 				// Handle member function calls (e.g., library.func() or obj.method())
-				else if (auto* memberAccess = dynamic_cast<MemberAccess const*>(&funcCall->expression()))
+				else if (auto* memberAccess = dynamic_cast<MemberAccess const*>(&callee))
 				{
 					// Check for abi.encode, abi.encodePacked, abi.decode, type().max, etc.
 					// These need special handling and cannot be generated as function calls
