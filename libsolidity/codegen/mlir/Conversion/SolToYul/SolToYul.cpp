@@ -433,28 +433,40 @@ private:
 		}
 		if (auto access = llvm::dyn_cast<mlir::solidity::ArrayAccessOp>(&_op))
 		{
-			if (!_op.hasAttr("storageArray"))
-				fail("array access outside storage");
-			m_map[access.getResult()]
-				= m_builder.create<mlir::yul::SLoadOp>(loc(), arrayElementSlot(_op, access.getIndex()));
+			// In memory an array is a pointer to [length][data...], the same
+			// shape a `string` or `bytes` has, so the element is a word into
+			// that. In storage it is a slot.
+			if (_op.hasAttr("storageArray"))
+				m_map[access.getResult()]
+					= m_builder.create<mlir::yul::SLoadOp>(loc(), arrayElementSlot(_op, access.getIndex()));
+			else
+				m_map[access.getResult()] = m_builder.create<mlir::yul::MLoadOp>(
+					loc(), memoryElement(_op, mapped(access.getArray()), mapped(access.getIndex())));
 			return false;
 		}
 		if (auto store = llvm::dyn_cast<mlir::solidity::ArrayStoreOp>(&_op))
 		{
-			if (!_op.hasAttr("storageArray"))
-				fail("array store outside storage");
-			m_builder.create<mlir::yul::SStoreOp>(
-				loc(), arrayElementSlot(_op, store.getIndex()), mapped(store.getValue()));
+			if (_op.hasAttr("storageArray"))
+				m_builder.create<mlir::yul::SStoreOp>(
+					loc(), arrayElementSlot(_op, store.getIndex()), mapped(store.getValue()));
+			else
+				m_builder.create<mlir::yul::MStoreOp>(
+					loc(),
+					memoryElement(_op, mapped(store.getArray()), mapped(store.getIndex())),
+					mapped(store.getValue()));
 			return false;
 		}
 		if (auto length = llvm::dyn_cast<mlir::solidity::ArrayLengthOp>(&_op))
 		{
-			// A dynamic array keeps its length in its own slot.
+			// A dynamic array keeps its length in its own slot; in memory it is
+			// the word the pointer addresses.
 			auto name = _op.getAttrOfType<mlir::StringAttr>("varName");
-			if (!name)
-				fail("array length of an unnamed array");
-			m_map[length.getResult()]
-				= m_builder.create<mlir::yul::SLoadOp>(loc(), wordConstant(storageSlot(name.getValue())));
+			if (_op.hasAttr("storageArray") && name)
+				m_map[length.getResult()]
+					= m_builder.create<mlir::yul::SLoadOp>(loc(), wordConstant(storageSlot(name.getValue())));
+			else
+				m_map[length.getResult()]
+					= m_builder.create<mlir::yul::MLoadOp>(loc(), mapped(length.getArray()));
 			return false;
 		}
 		if (auto push = llvm::dyn_cast<mlir::solidity::ArrayPushOp>(&_op))
@@ -472,6 +484,34 @@ private:
 				loc(),
 				m_builder.create<mlir::yul::AddOp>(loc(), dynamicArrayData(slot), length),
 				mapped(push.getValue()));
+			return false;
+		}
+		if (auto create = llvm::dyn_cast<mlir::solidity::StructCreateOp>(&_op))
+		{
+			// A struct in memory is its fields, one word each, in order.
+			m_usesMemory = true;
+			unsigned const fields = create.getFields().size();
+			mlir::Value pointer = allocate(wordConstant(uint64_t(32 * fields)));
+			for (auto [position, field]: llvm::enumerate(create.getFields()))
+				m_builder.create<mlir::yul::MStoreOp>(
+					loc(),
+					m_builder.create<mlir::yul::AddOp>(loc(), pointer, wordConstant(uint64_t(32 * position))),
+					mapped(field));
+			m_map[create.getResult()] = pointer;
+			return false;
+		}
+		if (auto member = llvm::dyn_cast<mlir::solidity::MemberAccessOp>(&_op))
+		{
+			// The storage form went through storage_member_load; this is the
+			// memory one, where the struct is a pointer and the member is a
+			// word into it.
+			auto index = _op.getAttrOfType<mlir::IntegerAttr>("fieldIndex");
+			if (!index)
+				fail("member access without a field index");
+			m_map[member.getResult()] = m_builder.create<mlir::yul::MLoadOp>(
+				loc(),
+				m_builder.create<mlir::yul::AddOp>(
+					loc(), mapped(member.getObject()), wordConstant(uint64_t(32 * index.getInt()))));
 			return false;
 		}
 		if (auto emit = llvm::dyn_cast<mlir::solidity::EmitOp>(&_op))
@@ -1620,6 +1660,18 @@ private:
 			names.push_back(bind.getVarName().str());
 		}
 		return names;
+	}
+
+	/// The address of `a[i]` when `a` is in memory: a pointer to
+	/// [length][data...], so the elements start one word in.
+	mlir::Value memoryElement(mlir::Operation& _op, mlir::Value _pointer, mlir::Value _index)
+	{
+		// Only a dynamic array carries its length in front of the elements.
+		mlir::Value data = _op.hasAttr("dynamic")
+			? m_builder.create<mlir::yul::AddOp>(loc(), _pointer, wordConstant(uint64_t(32))).getResult()
+			: _pointer;
+		return m_builder.create<mlir::yul::AddOp>(
+			loc(), data, m_builder.create<mlir::yul::MulOp>(loc(), _index, wordConstant(uint64_t(32))));
 	}
 
 	/// Where a dynamic array's elements start: keccak256 of its slot, which is

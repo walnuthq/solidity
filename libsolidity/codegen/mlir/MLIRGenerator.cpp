@@ -1393,7 +1393,17 @@ public:
 	bool markStorageArray(mlir::Operation* _op, Type const* _arrayType, std::string const& _varName)
 	{
 		auto const* array = dynamic_cast<ArrayType const*>(_arrayType);
-		if (!array || array->location() != DataLocation::Storage)
+		if (!array)
+			return false;
+
+		// Dynamic-ness matters wherever the array lives: in storage it decides
+		// whether the elements are at the slot or at keccak256(slot), and in
+		// memory whether a length word precedes them. A fixed-size memory array
+		// has none, so skipping one reads the wrong element.
+		if (array->isDynamicallySized())
+			_op->setAttr("dynamic", m_builder->getUnitAttr());
+
+		if (array->location() != DataLocation::Storage)
 			return false;
 		if (array->baseType()->storageSize() != 1)
 			return false;
@@ -2111,11 +2121,10 @@ public:
 					if (!mlir::isa<mlir::solidity::ArrayType>(base.getType()))
 						return emitUnsupported(loc, value.getType(), "store into an unsupported array expression");
 					auto storeOp = m_builder->create<mlir::solidity::ArrayStoreOp>(loc, base, index, value);
-					if (!markStorageArray(
-							storeOp.getOperation(),
-							indexAccess->baseExpression().annotation().type,
-							extractMappingVarName(indexAccess->baseExpression())))
-						return emitUnsupported(loc, value.getType(), "array element that is not a word in storage");
+					markStorageArray(
+						storeOp.getOperation(),
+						indexAccess->baseExpression().annotation().type,
+						extractMappingVarName(indexAccess->baseExpression()));
 					if (!varName.empty())
 						storeOp->setAttr("varName", m_builder->getStringAttr(varName));
 				}
@@ -2223,8 +2232,50 @@ public:
 			}
 			case langutil::Token::Delete:
 			{
-				auto zero = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-				return m_builder->create<mlir::solidity::ConstantOp>(loc, zero, resultType);
+				// `delete x` writes the zero value back to x. Yielding a zero
+				// and storing it nowhere made every delete a no-op that looked
+				// like it worked - a state variable kept its value, and so did
+				// a memory array.
+				auto zeroAttr = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
+				Expression const& target = withoutParentheses(unaryOp->subExpression());
+
+				if (auto const* ident = dynamic_cast<Identifier const*>(&target))
+					if (auto const* varDecl
+						= dynamic_cast<VariableDeclaration const*>(ident->annotation().referencedDeclaration))
+					{
+						auto varType = translateSolidityType(*varDecl->type());
+						// A fixed memory array is zeroed in place: the variable
+						// still names the same words.
+						if (auto const* array = dynamic_cast<ArrayType const*>(varDecl->type()))
+							if (array->location() == DataLocation::Memory && !array->isDynamicallySized()
+								&& m_valueMap.count(varDecl->id()))
+							{
+								mlir::Value pointer = m_valueMap[varDecl->id()];
+								auto word = mlir::solidity::UIntType::get(m_context.get(), 256);
+								for (uint64_t i = 0; i < static_cast<uint64_t>(array->length()); ++i)
+								{
+									mlir::Value index = m_builder->create<mlir::solidity::ConstantOp>(
+										loc, m_builder->getIntegerAttr(m_builder->getI64Type(), int64_t(i)), word);
+									mlir::Value zero = m_builder->create<mlir::solidity::ConstantOp>(
+										loc, zeroAttr, word);
+									auto store = m_builder->create<mlir::solidity::ArrayStoreOp>(
+										loc, pointer, index, zero);
+									markStorageArray(store.getOperation(), varDecl->type(), "");
+								}
+								return pointer;
+							}
+
+						mlir::Value zero
+							= m_builder->create<mlir::solidity::ConstantOp>(loc, zeroAttr, varType);
+						if (varDecl->isStateVariable())
+							m_builder->create<mlir::solidity::StoreStateVarOp>(
+								loc, stateVarName(*varDecl), zero);
+						else
+							m_valueMap[varDecl->id()] = zero;
+						return zero;
+					}
+
+				return emitUnsupported(loc, resultType, "delete of an unsupported target");
 			}
 			case langutil::Token::Sub:
 			{
@@ -2523,14 +2574,10 @@ public:
 					{
 						auto lengthOp = m_builder->create<mlir::solidity::ArrayLengthOp>(
 							loc, mlir::solidity::UIntType::get(m_context.get(), 256), base);
-						if (!markStorageArray(
-								lengthOp.getOperation(),
-								memberAccess->expression().annotation().type,
-								extractMappingVarName(memberAccess->expression())))
-							return emitUnsupported(
-								loc,
-								mlir::solidity::UIntType::get(m_context.get(), 256),
-								"length of an array that is not word-sized storage");
+						markStorageArray(
+							lengthOp.getOperation(),
+							memberAccess->expression().annotation().type,
+							extractMappingVarName(memberAccess->expression()));
 						return lengthOp.getResult();
 					}
 				}
@@ -3171,9 +3218,10 @@ public:
 					std::string varName = extractMappingVarName(indexAccess->baseExpression());
 					if (!varName.empty())
 						op->setAttr("varName", m_builder->getStringAttr(varName));
-					if (!markStorageArray(
-							op.getOperation(), indexAccess->baseExpression().annotation().type, varName))
-						return emitUnsupported(loc, elementType, "array element that is not a word in storage");
+					// Memory arrays go through unmarked: the lowering reads the
+					// element out of the pointer rather than out of a slot.
+					markStorageArray(
+						op.getOperation(), indexAccess->baseExpression().annotation().type, varName);
 					return op.getResult();
 				}
 				return emitUnsupported(loc, elementType, "array element access with null operand");
@@ -4046,6 +4094,25 @@ public:
 					{
 						auto declType = translateSolidityType(*decl->type());
 						auto declLoc = this->loc(*decl);
+
+						// A memory array is a pointer, and zero is not one:
+						// leaving it there put the elements in the scratch area
+						// at address 0, over the free memory pointer that lives
+						// at 0x40. It has to own the words it addresses.
+						if (auto const* array = dynamic_cast<ArrayType const*>(decl->type()))
+							if (array->location() == DataLocation::Memory && !array->isDynamicallySized())
+							{
+								std::vector<mlir::Value> zeros;
+								for (uint64_t i = 0; i < static_cast<uint64_t>(array->length()); ++i)
+									zeros.push_back(m_builder->create<mlir::solidity::ConstantOp>(
+										declLoc,
+										m_builder->getIntegerAttr(m_builder->getI64Type(), 0),
+										mlir::solidity::UIntType::get(m_context.get(), 256)));
+								m_valueMap[decl->id()] = m_builder->create<mlir::solidity::StructCreateOp>(
+									declLoc, declType, m_builder->getStringAttr(decl->name()), zeros).getResult();
+								continue;
+							}
+
 						m_valueMap[decl->id()] = m_builder->create<mlir::solidity::ConstantOp>(
 							declLoc, m_builder->getIntegerAttr(m_builder->getI64Type(), 0), declType);
 					}
