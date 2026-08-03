@@ -2672,7 +2672,10 @@ public:
 						if (auto* contractType = dynamic_cast<ContractType const*>(funcType->returnParameterTypes().front()))
 						{
 							m_childContracts.insert(&contractType->contractDefinition());
-							fullObjectName = typeName + "_" + std::to_string(contractType->contractDefinition().id());
+							// The plain name: this is what the object is
+							// compiled and nested under, and an id suffix
+							// matches no contract the driver can look up.
+							fullObjectName = typeName;
 						}
 					}
 				}

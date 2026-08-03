@@ -129,7 +129,16 @@ public:
 			for (mlir::Operation& op: _src.getBody()->getOperations())
 			{
 				if (auto contract = llvm::dyn_cast<mlir::solidity::ContractOp>(&op))
+				{
+					// A contract carried along so `new C(...)` can name it is
+					// compiled as its own object, not spliced into this one.
+					// Converting it here appended its functions after this
+					// object's dispatcher, which ends in a revert - so the
+					// module had operations past a terminator.
+					if (contract->hasAttr("is_subobject"))
+						continue;
 					convertContract(contract, *dst);
+				}
 				else if (auto func = llvm::dyn_cast<mlir::solidity::FunctionOp>(&op))
 				{
 					m_builder.setInsertionPointToEnd(dst->getBody());
