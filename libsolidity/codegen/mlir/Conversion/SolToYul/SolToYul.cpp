@@ -456,6 +456,23 @@ private:
 				mapped(push.getValue()));
 			return false;
 		}
+		if (auto decode = llvm::dyn_cast<mlir::solidity::AbiDecodeOp>(&_op))
+		{
+			// The first operand is the encoded bytes - a pointer to
+			// [length][data...] - and each static component is one word of
+			// that data, in order.
+			for (mlir::Type type: decode->getResultTypes())
+				if (isDynamic(type))
+					fail("abi.decode of a dynamic component");
+
+			mlir::Value data = m_builder.create<mlir::yul::AddOp>(
+				loc(), mapped(decode.getOperands().front()), wordConstant(uint64_t(32)));
+			for (auto [index, result]: llvm::enumerate(decode->getResults()))
+				m_map[result] = m_builder.create<mlir::yul::MLoadOp>(
+					loc(),
+					m_builder.create<mlir::yul::AddOp>(loc(), data, wordConstant(uint64_t(32 * index))));
+			return false;
+		}
 		if (auto create = llvm::dyn_cast<mlir::solidity::CreateContractOp>(&_op))
 		{
 			// `new C(...)` deploys C's *creation* code, which is a different
@@ -1110,8 +1127,31 @@ private:
 
 			llvm::SmallVector<mlir::Value, 4> arguments;
 			for (unsigned i = 0; i < argumentCount; ++i)
-				arguments.push_back(
-					m_builder.create<mlir::yul::CallDataLoadOp>(loc(), wordConstant(uint64_t(4 + 32 * i))));
+			{
+				mlir::Value head
+					= m_builder.create<mlir::yul::CallDataLoadOp>(loc(), wordConstant(uint64_t(4 + 32 * i)));
+				if (!isDynamic(func.getArgumentTypes()[i]))
+				{
+					arguments.push_back(head);
+					continue;
+				}
+
+				// A dynamic argument's head word is an offset to where its
+				// length and data actually are; passing the offset itself made
+				// the callee read a pointer that pointed at nothing.
+				m_usesMemory = true;
+				mlir::Value at = m_builder.create<mlir::yul::AddOp>(loc(), wordConstant(uint64_t(4)), head);
+				mlir::Value length = m_builder.create<mlir::yul::CallDataLoadOp>(loc(), at);
+				mlir::Value pointer = allocate(
+					m_builder.create<mlir::yul::AddOp>(loc(), wordConstant(uint64_t(32)), roundedUp(length)));
+				m_builder.create<mlir::yul::MStoreOp>(loc(), pointer, length);
+				m_builder.create<mlir::yul::CallDataCopyOp>(
+					loc(),
+					m_builder.create<mlir::yul::AddOp>(loc(), pointer, wordConstant(uint64_t(32))),
+					m_builder.create<mlir::yul::AddOp>(loc(), at, wordConstant(uint64_t(32))),
+					length);
+				arguments.push_back(pointer);
+			}
 
 			llvm::SmallVector<mlir::Type, 1> resultTypes(func.getResultTypes().size(), wordType());
 			auto called = m_builder.create<mlir::yul::FuncCallOp>(

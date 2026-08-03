@@ -928,8 +928,10 @@ def Solidity_AbiDecodeOp : Solidity_Op<"abi_decode", [Pure]> {
     ABI-decodes the given data. Equivalent to abi.decode(...).
   }];
   let arguments = (ins Variadic<Solidity_AnyType>:$args);
-  let results = (outs Solidity_AnyType:$result);
-  let assemblyFormat = "`(` $args `)` attr-dict `:` functional-type($args, $result)";
+  // One per decoded component: `abi.decode(data, (uint256, bool))` yields two,
+  // and a single result left the op short of its own type.
+  let results = (outs Variadic<Solidity_AnyType>:$results);
+  let assemblyFormat = "`(` $args `)` attr-dict `:` functional-type($args, $results)";
 }
 
 //===----------------------------------------------------------------------===//

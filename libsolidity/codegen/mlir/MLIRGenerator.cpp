@@ -2993,23 +2993,29 @@ public:
 
 							if (abiFunc == "encode")
 							{
-								return m_builder->create<mlir::solidity::AbiEncodeOp>(loc, resultType, argValues);
+								return m_builder->create<mlir::solidity::AbiEncodeOp>(loc, resultType, argValues).getResult();
 							}
 							else if (abiFunc == "encodePacked")
 							{
-								return m_builder->create<mlir::solidity::AbiEncodePackedOp>(loc, resultType, argValues);
+								return m_builder->create<mlir::solidity::AbiEncodePackedOp>(loc, resultType, argValues).getResult();
 							}
 							else if (abiFunc == "encodeWithSelector")
 							{
-								return m_builder->create<mlir::solidity::AbiEncodeWithSelectorOp>(loc, resultType, argValues);
+								return m_builder->create<mlir::solidity::AbiEncodeWithSelectorOp>(loc, resultType, argValues).getResult();
 							}
 							else if (abiFunc == "encodeWithSignature")
 							{
-								return m_builder->create<mlir::solidity::AbiEncodeWithSignatureOp>(loc, resultType, argValues);
+								return m_builder->create<mlir::solidity::AbiEncodeWithSignatureOp>(loc, resultType, argValues).getResult();
 							}
 							else if (abiFunc == "decode")
 							{
-								return m_builder->create<mlir::solidity::AbiDecodeOp>(loc, resultType, argValues);
+								// One result per decoded component: `abi.decode`
+								// of a tuple yields all of them, and declaring
+								// one left the call short of its own type.
+								auto decoded = callResultTypes(*_expr.annotation().type);
+								auto op = m_builder->create<mlir::solidity::AbiDecodeOp>(
+									loc, mlir::TypeRange{decoded}, argValues);
+								return op->getNumResults() > 0 ? op->getResult(0) : mlir::Value();
 							}
 							else
 							{
