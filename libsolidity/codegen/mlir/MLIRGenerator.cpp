@@ -281,33 +281,28 @@ public:
 		// If the constructor has parameters and the derived contract provides base
 		// constructor arguments, generate a merged 0-param constructor.
 		{
-			bool generatedConstructor = false;
-			for (auto it = _contract.annotation().linearizedBaseContracts.begin();
-				 it != _contract.annotation().linearizedBaseContracts.end() && !generatedConstructor;
-				 ++it)
-			{
-				ContractDefinition const* baseContract = *it;
-				for (auto const& func: baseContract->definedFunctions())
+			// The most-derived contract's own constructor decides the shape. If
+			// it takes arguments they have to be decoded from the creation
+			// code, which is still T10's business, so it is generated as
+			// declared and the creation half says so. Otherwise the whole chain
+			// runs, most-base first, as Solidity defines it.
+			FunctionDefinition const* own = nullptr;
+			for (auto const& func: _contract.definedFunctions())
+				if (func->isConstructor())
 				{
-					if (func->isConstructor() && func->isImplemented())
-					{
-						if (!func->parameters().empty() && baseContract != &_contract)
-						{
-							// Base constructor with parameters — generate merged 0-param version
-							// with base constructor arguments inlined
-							generateMergedConstructor(*func, _contract);
-						}
-						else
-						{
-							// Own constructor (with or without params) or parameterless — generate as-is
-							// The lowering will handle calldata decoding for parameterized own constructors
-							generateSolidityFunction(*func);
-						}
-						generatedConstructor = true;
-						break;
-					}
+					own = func;
+					break;
 				}
-			}
+
+			bool anyConstructor = false;
+			for (ContractDefinition const* base: _contract.annotation().linearizedBaseContracts)
+				for (auto const& func: base->definedFunctions())
+					anyConstructor = anyConstructor || func->isConstructor();
+
+			if (own && !own->parameters().empty())
+				generateSolidityFunction(*own);
+			else if (anyConstructor)
+				generateConstructorChain(_contract);
 		}
 
 		// Generate library functions from all reachable libraries.
@@ -659,10 +654,16 @@ public:
 		auto savedInsertionPoint = m_builder->saveInsertionPoint();
 		m_builder->setInsertionPointToEnd(&entryBlock);
 
-		auto loadResult = m_builder->create<mlir::solidity::LoadStateVarOp>(
-			loc, returnType, stateVarName(_var));
+		// A constant has no slot: it is substituted wherever it is named, so
+		// loading one read whatever happened to be in storage - zero.
+		mlir::Value result;
+		if (_var.isConstant() && _var.value())
+			result = generateSolidityExpression(*_var.value());
+		if (!result)
+			result = m_builder->create<mlir::solidity::LoadStateVarOp>(loc, returnType, stateVarName(_var))
+						 .getResult();
 
-		m_builder->create<mlir::solidity::ReturnOp>(loc, mlir::ValueRange{loadResult.getResult()});
+		m_builder->create<mlir::solidity::ReturnOp>(loc, mlir::ValueRange{result});
 
 		m_builder->restoreInsertionPoint(savedInsertionPoint);
 	}
@@ -670,6 +671,78 @@ public:
 	/// Generate a merged 0-parameter constructor for a derived contract.
 	/// Base constructor arguments (from InheritanceSpecifier) are evaluated
 	/// at the top of the body and mapped to the constructor's parameters.
+	/// Binds one constructor's parameters from the arguments the derived
+	/// contract supplies for it, then emits its body at the current point.
+	void inlineConstructorBody(
+		FunctionDefinition const& _constructor,
+		ContractDefinition const& _derivedContract,
+		mlir::Location _loc)
+	{
+		auto const params = _constructor.parameters();
+		auto supplied = _derivedContract.annotation().baseConstructorArguments.find(&_constructor);
+		std::vector<ASTPointer<Expression>> const* args = nullptr;
+		if (supplied != _derivedContract.annotation().baseConstructorArguments.end())
+		{
+			if (auto* inheritance = dynamic_cast<InheritanceSpecifier const*>(supplied->second))
+				args = inheritance->arguments();
+			else if (auto* modifier = dynamic_cast<ModifierInvocation const*>(supplied->second))
+				args = modifier->arguments();
+		}
+
+		for (size_t i = 0; i < params.size(); ++i)
+		{
+			mlir::Value value;
+			if (args && i < args->size())
+				value = generateSolidityExpression(*(*args)[i]);
+			if (!value)
+				value = emitUnsupported(
+					_loc, translateSolidityType(*params[i]->type()), "base constructor argument not supplied");
+			m_symbolTable.insert(params[i]->name(), value);
+			m_valueMap[params[i]->id()] = value;
+		}
+
+		if (_constructor.isImplemented())
+			generateSolidityStatement(_constructor.body());
+	}
+
+	/// The whole constructor chain as one parameterless function.
+	///
+	/// Solidity runs every base constructor, most-base first, then the derived
+	/// body. Only the first constructor found walking towards the bases used to
+	/// be generated, so `contract D is B { constructor() B("x") {} }` ran D's
+	/// empty body and never B's - and everything B was given to store stayed
+	/// zero.
+	void generateConstructorChain(ContractDefinition const& _contract)
+	{
+		auto loc = this->loc(_contract);
+		auto funcOp = m_builder->create<mlir::solidity::FunctionOp>(
+			loc, "", m_builder->getFunctionType({}, {}), "public", "nonpayable");
+		funcOp->setAttr("kind", m_builder->getStringAttr("constructor"));
+
+		auto& entryBlock = funcOp.getBody().emplaceBlock();
+		SymbolTableScopeT functionScope(m_symbolTable);
+		auto savedIP = m_builder->saveInsertionPoint();
+		m_builder->setInsertionPointToEnd(&entryBlock);
+
+		for (auto it = _contract.annotation().linearizedBaseContracts.rbegin();
+			 it != _contract.annotation().linearizedBaseContracts.rend();
+			 ++it)
+			for (auto const& func: (*it)->definedFunctions())
+				if (func->isConstructor())
+				{
+					inlineConstructorBody(*func, _contract, loc);
+					break;
+				}
+
+		bool terminated = false;
+		if (!entryBlock.empty())
+			terminated = mlir::isa<mlir::solidity::ReturnOp, mlir::solidity::RevertOp>(entryBlock.back());
+		if (!terminated)
+			emitReturn(loc, {});
+
+		m_builder->restoreInsertionPoint(savedIP);
+	}
+
 	void generateMergedConstructor(
 		FunctionDefinition const& _baseConstructor,
 		ContractDefinition const& _derivedContract)
@@ -1363,6 +1436,37 @@ public:
 			for (size_t i = _values.size(); i < results.size(); ++i)
 				_values.push_back(emitUnsupported(_loc, results[i], "return value not generated"));
 			_values.resize(std::min(_values.size(), results.size()));
+
+			// A string literal returned where fixed bytes are declared is a
+			// word, not a memory value - `return hex"01"` from a bytes1
+			// function is 0x01 at the top of the word. The conversion is
+			// implicit in the source, so the literal carries the string type
+			// and only the declared result says otherwise.
+			for (size_t i = 0; i < _values.size(); ++i)
+			{
+				auto fixedBytes = llvm::dyn_cast<mlir::solidity::BytesType>(results[i]);
+				if (!fixedBytes || _values[i].getType() == results[i])
+					continue;
+				auto literal = _values[i].getDefiningOp<mlir::solidity::StringLiteralOp>();
+				if (!literal)
+					continue;
+
+				llvm::StringRef const text = literal.getValue();
+				llvm::APInt word(256, 0);
+				for (unsigned byte = 0; byte < 32; ++byte)
+				{
+					word <<= 8;
+					if (byte < text.size() && byte < fixedBytes.getSize())
+						word |= llvm::APInt(256, static_cast<uint8_t>(text[byte]));
+				}
+				mlir::OpBuilder::InsertionGuard guard(*m_builder);
+				m_builder->setInsertionPointAfter(literal);
+				_values[i] = m_builder->create<mlir::solidity::ConstantOp>(
+					_loc,
+					m_builder->getIntegerAttr(
+						mlir::IntegerType::get(m_context.get(), 256, mlir::IntegerType::Unsigned), word),
+					results[i]).getResult();
+			}
 		}
 		m_builder->create<mlir::solidity::ReturnOp>(_loc, mlir::ValueRange{_values});
 	}
@@ -1403,6 +1507,23 @@ public:
 				  || literal->token() == langutil::Token::UnicodeStringLiteral
 				  || literal->token() == langutil::Token::HexStringLiteral)
 			{
+				// A literal whose type is a fixed-bytes one is a word, not a
+				// memory value: `hex"01"` as bytes1 is 0x01 at the top of the
+				// word. Building it as a string put a pointer there instead.
+				if (auto* fixedBytes = dynamic_cast<FixedBytesType const*>(_expr.annotation().type))
+				{
+					llvm::APInt word(256, 0);
+					for (unsigned i = 0; i < 32; ++i)
+					{
+						word <<= 8;
+						if (i < literal->value().size() && i < fixedBytes->numBytes())
+							word |= llvm::APInt(256, static_cast<uint8_t>(literal->value()[i]));
+					}
+					auto attr = m_builder->getIntegerAttr(
+						mlir::IntegerType::get(m_context.get(), 256, mlir::IntegerType::Unsigned), word);
+					return m_builder->create<mlir::solidity::ConstantOp>(loc, attr, type).getResult();
+				}
+
 				return m_builder->create<mlir::solidity::StringLiteralOp>(
 					loc, type, m_builder->getStringAttr(literal->value()));
 			}
@@ -1414,6 +1535,9 @@ public:
 				if (varDecl->isStateVariable())
 				{
 					auto type = translateSolidityType(*_expr.annotation().type);
+					if (varDecl->isConstant() && varDecl->value())
+						if (mlir::Value substituted = generateSolidityExpression(*varDecl->value()))
+							return substituted;
 					return m_builder->create<mlir::solidity::LoadStateVarOp>(loc, type, stateVarName(*varDecl));
 				}
 				else if (m_valueMap.count(varDecl->id()))

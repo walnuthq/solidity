@@ -139,6 +139,15 @@ private:
 	mlir::OpBuilder m_builder;
 	llvm::DenseMap<mlir::Value, mlir::Value> m_map;
 	llvm::StringMap<uint64_t> m_storageSlots;
+	bool m_usesMemory = false;
+	bool m_needsBytesHelpers = false;
+
+	/// `string` and `bytes` do not fit a word, so they live in memory and are
+	/// named by a pointer to [length][data...].
+	static bool isDynamic(mlir::Type _type)
+	{
+		return llvm::isa<mlir::solidity::StringType, mlir::solidity::DynamicBytesType>(_type);
+	}
 	llvm::StringSet<> m_declaredFunctions;
 	llvm::StringMap<unsigned> m_constructorArity;
 	std::string m_contractName;
@@ -210,6 +219,25 @@ private:
 			emitCreation(_contract, _dst);
 		else
 			emitDispatcher(_contract, _dst);
+
+		// Emitted last because it is the conversion of the bodies above that
+		// says whether anything needs them.
+		if (m_needsBytesHelpers)
+		{
+			emitLoadBytesHelper(_dst);
+			emitStoreBytesHelper(_dst);
+		}
+
+		// The free memory pointer has to hold the start of the heap before the
+		// first allocation, so this goes at the very front of the object -
+		// which is only known to be needed once the bodies are converted. A
+		// contract that never allocates does not pay for it.
+		if (m_usesMemory)
+		{
+			mlir::OpBuilder::InsertionGuard guard(m_builder);
+			m_builder.setInsertionPointToStart(_dst.getBody());
+			initialiseFreeMemoryPointer();
+		}
 	}
 
 	/// The creation half. State variables with an initialiser are stored to
@@ -342,15 +370,43 @@ private:
 			m_map[constant.getResult()] = convertConstant(constant);
 			return false;
 		}
+		if (auto literal = llvm::dyn_cast<mlir::solidity::StringLiteralOp>(&_op))
+		{
+			m_map[literal.getResult()] = materialiseLiteral(literal.getValue());
+			m_usesMemory = true;
+			return false;
+		}
 		if (auto load = llvm::dyn_cast<mlir::solidity::LoadStateVarOp>(&_op))
 		{
 			mlir::Value slot = wordConstant(storageSlot(load.getVarName()));
+			// A dynamic value does not fit a slot: the slot holds its length
+			// and, past 31 bytes, only a pointer to where the data starts.
+			if (isDynamic(load.getResult().getType()))
+			{
+				m_needsBytesHelpers = m_usesMemory = true;
+				m_map[load.getResult()] = m_builder.create<mlir::yul::FuncCallOp>(
+					loc(),
+					mlir::TypeRange{wordType()},
+					mlir::FlatSymbolRefAttr::get(m_builder.getContext(), kLoadBytesHelper),
+					mlir::ValueRange{slot})->getResult(0);
+				return false;
+			}
 			m_map[load.getResult()] = m_builder.create<mlir::yul::SLoadOp>(loc(), slot);
 			return false;
 		}
 		if (auto store = llvm::dyn_cast<mlir::solidity::StoreStateVarOp>(&_op))
 		{
 			mlir::Value slot = wordConstant(storageSlot(store.getVarName()));
+			if (isDynamic(store.getValue().getType()))
+			{
+				m_needsBytesHelpers = m_usesMemory = true;
+				m_builder.create<mlir::yul::FuncCallOp>(
+					loc(),
+					mlir::TypeRange{},
+					mlir::FlatSymbolRefAttr::get(m_builder.getContext(), kStoreBytesHelper),
+					mlir::ValueRange{slot, mapped(store.getValue())});
+				return false;
+			}
 			m_builder.create<mlir::yul::SStoreOp>(loc(), slot, mapped(store.getValue()));
 			return false;
 		}
@@ -467,6 +523,226 @@ private:
 		fail("unsupported sol op in sol->yul conversion: " + _op.getName().getStringRef().str());
 	}
 
+	/// Solidity keeps the free memory pointer at 0x40 and starts the heap at
+	/// 0x80, leaving 0x00-0x3f as scratch (which the mapping slot derivation
+	/// already uses) and 0x60 as the zero slot. Nothing here allocated before,
+	/// because nothing needed memory that outlived an expression.
+	static constexpr uint64_t kFreeMemoryPointer = 0x40;
+	static constexpr uint64_t kHeapStart = 0x80;
+
+	void initialiseFreeMemoryPointer()
+	{
+		m_builder.create<mlir::yul::MStoreOp>(
+			loc(), wordConstant(kFreeMemoryPointer), wordConstant(kHeapStart));
+	}
+
+	/// Bumps the free memory pointer by `_size` and yields the old value.
+	/// Solidity never frees, so this is the whole allocator.
+	mlir::Value allocate(mlir::Value _size)
+	{
+		mlir::Value pointer = m_builder.create<mlir::yul::MLoadOp>(loc(), wordConstant(kFreeMemoryPointer));
+		mlir::Value next = m_builder.create<mlir::yul::AddOp>(loc(), pointer, _size);
+		m_builder.create<mlir::yul::MStoreOp>(loc(), wordConstant(kFreeMemoryPointer), next);
+		return pointer;
+	}
+
+	/// `_value` rounded up to a whole number of words.
+	mlir::Value roundedUp(mlir::Value _value)
+	{
+		mlir::Value padded = m_builder.create<mlir::yul::AddOp>(loc(), _value, wordConstant(uint64_t(31)));
+		return m_builder.create<mlir::yul::AndOp>(
+			loc(), padded, wordConstant(~llvm::APInt(256, 31)));
+	}
+
+	/// A string or bytes literal written into fresh memory as Solidity holds
+	/// them: the length in the first word, the bytes after it. The length is
+	/// known here, so the copy is unrolled and needs no loop.
+	mlir::Value materialiseLiteral(llvm::StringRef _text)
+	{
+		uint64_t const length = _text.size();
+		uint64_t const padded = (length + 31) / 32 * 32;
+		mlir::Value pointer = allocate(wordConstant(32 + padded));
+		m_builder.create<mlir::yul::MStoreOp>(loc(), pointer, wordConstant(length));
+
+		for (uint64_t offset = 0; offset < padded; offset += 32)
+		{
+			llvm::APInt word(256, 0);
+			for (uint64_t i = 0; i < 32; ++i)
+			{
+				word <<= 8;
+				if (offset + i < length)
+					word |= llvm::APInt(256, static_cast<uint8_t>(_text[offset + i]));
+			}
+			mlir::Value at = m_builder.create<mlir::yul::AddOp>(
+				loc(), pointer, wordConstant(32 + offset));
+			m_builder.create<mlir::yul::MStoreOp>(loc(), at, wordConstant(word));
+		}
+		return pointer;
+	}
+
+	/// Solidity stores `bytes` and `string` two ways in one slot. Up to 31 bytes
+	/// the data sits in the slot itself, left-aligned, with `2 * length` in the
+	/// lowest byte; from 32 bytes the slot holds `2 * length + 1` and the data
+	/// starts at keccak256(slot). The low bit tells the two apart.
+	///
+	/// These are emitted once per module as ordinary Yul functions rather than
+	/// inline, because both ends of every dynamic access need them.
+	static constexpr char const* kLoadBytesHelper = "$loadStorageBytes";
+	static constexpr char const* kStoreBytesHelper = "$storeStorageBytes";
+
+	/// slot -> memory pointer to [length][data...]
+	void emitLoadBytesHelper(mlir::ModuleOp _dst)
+	{
+		mlir::OpBuilder::InsertionGuard guard(m_builder);
+		// A definition, not a statement: it goes at the front so it cannot land
+		// after the return that ends the object's code.
+		m_builder.setInsertionPointToStart(_dst.getBody());
+
+		auto func = m_builder.create<mlir::yul::FuncOp>(
+			loc(), kLoadBytesHelper, m_builder.getFunctionType({wordType()}, {wordType()}));
+		mlir::Block& body = func.getBody().emplaceBlock();
+		body.addArgument(wordType(), loc());
+		m_builder.setInsertionPointToEnd(&body);
+
+		mlir::Value slot = body.getArgument(0);
+		mlir::Value packed = m_builder.create<mlir::yul::SLoadOp>(loc(), slot);
+		mlir::Value isLong = m_builder.create<mlir::yul::AndOp>(loc(), packed, wordConstant(uint64_t(1)));
+
+		// length = isLong ? (packed - 1) / 2 : (packed & 0xff) / 2, branch-free.
+		mlir::Value shortLength = m_builder.create<mlir::yul::AndOp>(loc(), packed, wordConstant(uint64_t(0xff)));
+		mlir::Value chosen = m_builder.create<mlir::yul::MulOp>(loc(), isLong, packed);
+		mlir::Value notLong = m_builder.create<mlir::yul::IsZeroOp>(loc(), isLong);
+		mlir::Value shortPart = m_builder.create<mlir::yul::MulOp>(loc(), notLong, shortLength);
+		mlir::Value combined = m_builder.create<mlir::yul::AddOp>(loc(), chosen, shortPart);
+		mlir::Value length = m_builder.create<mlir::yul::ShrOp>(loc(), wordConstant(uint64_t(1)), combined);
+
+		mlir::Value pointer = allocate(
+			m_builder.create<mlir::yul::AddOp>(loc(), wordConstant(uint64_t(32)), roundedUp(length)));
+		m_builder.create<mlir::yul::MStoreOp>(loc(), pointer, length);
+		mlir::Value data = m_builder.create<mlir::yul::AddOp>(loc(), pointer, wordConstant(uint64_t(32)));
+
+		// Short: the slot word is the data, but it also carries the length in its
+		// lowest byte, so only the top `length` bytes of it belong to the value.
+		auto shortCase = m_builder.create<mlir::yul::IfOp>(loc(), notLong);
+		{
+			mlir::OpBuilder::InsertionGuard inner(m_builder);
+			m_builder.setInsertionPointToStart(&shortCase.getThenRegion().emplaceBlock());
+			mlir::Value bits = m_builder.create<mlir::yul::MulOp>(loc(), length, wordConstant(uint64_t(8)));
+			mlir::Value keep = m_builder.create<mlir::yul::SubOp>(loc(), wordConstant(uint64_t(256)), bits);
+			mlir::Value masked = m_builder.create<mlir::yul::ShlOp>(
+				loc(), keep, m_builder.create<mlir::yul::ShrOp>(loc(), keep, packed));
+			m_builder.create<mlir::yul::MStoreOp>(loc(), data, masked);
+		}
+
+		// Long: whole words from keccak256(slot) onwards.
+		auto longCase = m_builder.create<mlir::yul::IfOp>(loc(), isLong);
+		{
+			mlir::OpBuilder::InsertionGuard inner(m_builder);
+			m_builder.setInsertionPointToStart(&longCase.getThenRegion().emplaceBlock());
+			m_builder.create<mlir::yul::MStoreOp>(loc(), wordConstant(uint64_t(0)), slot);
+			mlir::Value base = m_builder.create<mlir::yul::Keccak256Op>(
+				loc(), wordConstant(uint64_t(0)), wordConstant(uint64_t(32)));
+			emitWordLoop(length, [&](mlir::Value _index) {
+				mlir::Value from = m_builder.create<mlir::yul::AddOp>(
+					loc(), base, m_builder.create<mlir::yul::ShrOp>(loc(), wordConstant(uint64_t(5)), _index));
+				mlir::Value word = m_builder.create<mlir::yul::SLoadOp>(loc(), from);
+				mlir::Value to = m_builder.create<mlir::yul::AddOp>(loc(), data, _index);
+				m_builder.create<mlir::yul::MStoreOp>(loc(), to, word);
+			});
+		}
+
+		m_builder.create<mlir::yul::LeaveOp>(loc(), mlir::ValueRange{pointer});
+	}
+
+	/// slot, memory pointer to [length][data...] -> stored
+	void emitStoreBytesHelper(mlir::ModuleOp _dst)
+	{
+		mlir::OpBuilder::InsertionGuard guard(m_builder);
+		m_builder.setInsertionPointToStart(_dst.getBody());
+
+		auto func = m_builder.create<mlir::yul::FuncOp>(
+			loc(), kStoreBytesHelper, m_builder.getFunctionType({wordType(), wordType()}, {}));
+		mlir::Block& body = func.getBody().emplaceBlock();
+		body.addArgument(wordType(), loc());
+		body.addArgument(wordType(), loc());
+		m_builder.setInsertionPointToEnd(&body);
+
+		mlir::Value slot = body.getArgument(0);
+		mlir::Value pointer = body.getArgument(1);
+		mlir::Value length = m_builder.create<mlir::yul::MLoadOp>(loc(), pointer);
+		mlir::Value data = m_builder.create<mlir::yul::AddOp>(loc(), pointer, wordConstant(uint64_t(32)));
+		mlir::Value isLong = m_builder.create<mlir::yul::LtOp>(loc(), wordConstant(uint64_t(31)), length);
+
+		auto shortCase = m_builder.create<mlir::yul::IfOp>(
+			loc(), m_builder.create<mlir::yul::IsZeroOp>(loc(), isLong));
+		{
+			mlir::OpBuilder::InsertionGuard inner(m_builder);
+			m_builder.setInsertionPointToStart(&shortCase.getThenRegion().emplaceBlock());
+			// Keep only the bytes that belong to the value, then put 2*length
+			// in the byte the data cannot reach.
+			mlir::Value word = m_builder.create<mlir::yul::MLoadOp>(loc(), data);
+			mlir::Value bits = m_builder.create<mlir::yul::MulOp>(loc(), length, wordConstant(uint64_t(8)));
+			mlir::Value keep = m_builder.create<mlir::yul::SubOp>(loc(), wordConstant(uint64_t(256)), bits);
+			mlir::Value masked = m_builder.create<mlir::yul::ShlOp>(
+				loc(), keep, m_builder.create<mlir::yul::ShrOp>(loc(), keep, word));
+			mlir::Value tag = m_builder.create<mlir::yul::MulOp>(loc(), length, wordConstant(uint64_t(2)));
+			m_builder.create<mlir::yul::SStoreOp>(
+				loc(), slot, m_builder.create<mlir::yul::OrOp>(loc(), masked, tag));
+		}
+
+		auto longCase = m_builder.create<mlir::yul::IfOp>(loc(), isLong);
+		{
+			mlir::OpBuilder::InsertionGuard inner(m_builder);
+			m_builder.setInsertionPointToStart(&longCase.getThenRegion().emplaceBlock());
+			mlir::Value tag = m_builder.create<mlir::yul::AddOp>(
+				loc(),
+				m_builder.create<mlir::yul::MulOp>(loc(), length, wordConstant(uint64_t(2))),
+				wordConstant(uint64_t(1)));
+			m_builder.create<mlir::yul::SStoreOp>(loc(), slot, tag);
+			m_builder.create<mlir::yul::MStoreOp>(loc(), wordConstant(uint64_t(0)), slot);
+			mlir::Value base = m_builder.create<mlir::yul::Keccak256Op>(
+				loc(), wordConstant(uint64_t(0)), wordConstant(uint64_t(32)));
+			emitWordLoop(length, [&](mlir::Value _index) {
+				mlir::Value word = m_builder.create<mlir::yul::MLoadOp>(
+					loc(), m_builder.create<mlir::yul::AddOp>(loc(), data, _index));
+				mlir::Value to = m_builder.create<mlir::yul::AddOp>(
+					loc(), base, m_builder.create<mlir::yul::ShrOp>(loc(), wordConstant(uint64_t(5)), _index));
+				m_builder.create<mlir::yul::SStoreOp>(loc(), to, word);
+			});
+		}
+
+		m_builder.create<mlir::yul::LeaveOp>(loc(), mlir::ValueRange{});
+	}
+
+	/// `for (i = 0; i < roundUp32(length); i += 32) _body(i)`.
+	template<typename Body>
+	void emitWordLoop(mlir::Value _length, Body _body)
+	{
+		mlir::Value limit = roundedUp(_length);
+		auto var = m_builder.create<mlir::yul::VarOp>(loc(), wordConstant(uint64_t(0)));
+
+		auto forOp = m_builder.create<mlir::yul::ForOp>(loc());
+		{
+			mlir::OpBuilder::InsertionGuard inner(m_builder);
+			m_builder.setInsertionPointToStart(&forOp.getCondRegion().emplaceBlock());
+			mlir::Value index = m_builder.create<mlir::yul::VarLoadOp>(loc(), wordType(), var);
+			m_builder.create<mlir::yul::ConditionOp>(
+				loc(), m_builder.create<mlir::yul::LtOp>(loc(), index, limit));
+		}
+		{
+			mlir::OpBuilder::InsertionGuard inner(m_builder);
+			m_builder.setInsertionPointToStart(&forOp.getBodyRegion().emplaceBlock());
+			_body(m_builder.create<mlir::yul::VarLoadOp>(loc(), wordType(), var));
+		}
+		{
+			mlir::OpBuilder::InsertionGuard inner(m_builder);
+			m_builder.setInsertionPointToStart(&forOp.getPostRegion().emplaceBlock());
+			mlir::Value index = m_builder.create<mlir::yul::VarLoadOp>(loc(), wordType(), var);
+			m_builder.create<mlir::yul::AssignOp>(
+				loc(), var, m_builder.create<mlir::yul::AddOp>(loc(), index, wordConstant(uint64_t(32))));
+		}
+	}
+
 	void emitRevertIf(mlir::Value _condition)
 	{
 		auto ifOp = m_builder.create<mlir::yul::IfOp>(loc(), _condition);
@@ -510,6 +786,10 @@ private:
 			return std::string("bool");
 		if (auto bytesType = llvm::dyn_cast<mlir::solidity::BytesType>(_type))
 			return "bytes" + std::to_string(bytesType.getSize());
+		if (llvm::isa<mlir::solidity::StringType>(_type))
+			return std::string("string");
+		if (llvm::isa<mlir::solidity::DynamicBytesType>(_type))
+			return std::string("bytes");
 		return std::nullopt;
 	}
 
@@ -610,10 +890,39 @@ private:
 			// returning a tuple answered nothing at all.
 			mlir::Value zero = wordConstant(uint64_t(0));
 			unsigned const resultCount = called->getNumResults();
-			for (unsigned i = 0; i < resultCount; ++i)
-				m_builder.create<mlir::yul::MStoreOp>(
-					loc(), wordConstant(uint64_t(32 * i)), called->getResult(i));
-			m_builder.create<mlir::yul::ReturnOp>(loc(), zero, wordConstant(uint64_t(32 * resultCount)));
+			mlir::ArrayRef<mlir::Type> const declared = func.getResultTypes();
+			bool const dynamic = resultCount == 1 && declared.size() == 1 && isDynamic(declared[0]);
+
+			if (dynamic)
+			{
+				// A dynamic result is a memory pointer to [length][data...].
+				// The ABI wants an offset to that pair, so the encoding is one
+				// word of offset followed by the pair itself, padded to a whole
+				// number of words.
+				m_usesMemory = true;
+				mlir::Value pointer = called->getResult(0);
+				mlir::Value length = m_builder.create<mlir::yul::MLoadOp>(loc(), pointer);
+				mlir::Value payload = m_builder.create<mlir::yul::AddOp>(
+					loc(), wordConstant(uint64_t(32)), roundedUp(length));
+				mlir::Value total = m_builder.create<mlir::yul::AddOp>(
+					loc(), wordConstant(uint64_t(32)), payload);
+
+				mlir::Value head = allocate(total);
+				m_builder.create<mlir::yul::MStoreOp>(loc(), head, wordConstant(uint64_t(32)));
+				m_builder.create<mlir::yul::MCopyOp>(
+					loc(),
+					m_builder.create<mlir::yul::AddOp>(loc(), head, wordConstant(uint64_t(32))),
+					pointer,
+					payload);
+				m_builder.create<mlir::yul::ReturnOp>(loc(), head, total);
+			}
+			else
+			{
+				for (unsigned i = 0; i < resultCount; ++i)
+					m_builder.create<mlir::yul::MStoreOp>(
+						loc(), wordConstant(uint64_t(32 * i)), called->getResult(i));
+				m_builder.create<mlir::yul::ReturnOp>(loc(), zero, wordConstant(uint64_t(32 * resultCount)));
+			}
 		}
 
 		mlir::Value zero = wordConstant(uint64_t(0));
