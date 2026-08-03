@@ -221,27 +221,16 @@ private:
 		mlir::OpBuilder::InsertionGuard guard(m_builder);
 		m_builder.setInsertionPointToEnd(_dst.getBody());
 
-		for (mlir::Operation& op: _contract.getBody().front().getOperations())
-		{
-			auto stateVar = llvm::dyn_cast<mlir::solidity::StateVarOp>(&op);
-			// Immutables are modelled as storage here. solc inlines them into
-			// the runtime code, which is cheaper to read but needs the code to
-			// be patched after assembly; a slot written by the creation half is
-			// read back by the runtime half just as correctly. Skipping them
-			// meant every immutable read zero.
-			if (!stateVar || stateVar.getIsConstant())
-				continue;
-			// The generator records the initialiser as its decimal value; a
-			// variable without one is already zero and needs no store.
-			auto initial = llvm::dyn_cast_or_null<mlir::StringAttr>(stateVar.getInitialValueAttr());
-			if (!initial || initial.getValue().empty())
-				continue;
-			llvm::APInt value(256, 0);
-			if (initial.getValue().getAsInteger(10, value))
-				continue; // not a plain integer literal; nothing to store yet
-			m_builder.create<mlir::yul::SStoreOp>(
-				loc(), wordConstant(storageSlot(stateVar.getName())), wordConstant(value));
-		}
+		// The generator emits every initialiser as a function rather than as a
+		// literal on the declaration, because only a plain integer fits in the
+		// latter - `keccak256("x")` and everything else read zero.
+		std::string const initializerName = qualified("init");
+		if (m_declaredFunctions.contains(initializerName))
+			m_builder.create<mlir::yul::FuncCallOp>(
+				loc(),
+				mlir::TypeRange{},
+				mlir::FlatSymbolRefAttr::get(m_builder.getContext(), initializerName),
+				mlir::ValueRange{});
 
 		// A constructor body was converted as a function; call it.
 		//

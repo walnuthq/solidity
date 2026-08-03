@@ -20,6 +20,7 @@
 #include <libsolidity/ast/ASTAnnotations.h>
 #include <libsolidity/ast/Types.h>
 #include <libsolidity/ast/TypeProvider.h>
+#include <libsolutil/Keccak256.h>
 #include <libsolidity/codegen/mlir/MLIRGenerator.h>
 #include <libsolidity/interface/CompilerStack.h>
 #include <libsolutil/FunctionSelector.h>
@@ -191,6 +192,10 @@ public:
 				generateStateVariable(*var, _contract);
 			}
 		}
+
+		// Initialisers run before the constructor body, so they are generated
+		// as their own function the creation half calls first.
+		generateInitializer(_contract);
 
 		// Generate auto-getter functions for public state variables.
 		// In Solidity, `uint256 public x` auto-generates `function x() view returns (uint256)`.
@@ -592,6 +597,49 @@ public:
 
 		// Return the result
 		m_builder->create<mlir::solidity::ReturnOp>(loc, mlir::ValueRange{accessResult.getResult()});
+
+		m_builder->restoreInsertionPoint(savedInsertionPoint);
+	}
+
+	/// State variable initialisers, as a function the creation half calls.
+	///
+	/// They were recorded as a decimal string on the declaration, which only a
+	/// plain integer literal fits - so `bytes32 immutable v = keccak256("x")`,
+	/// and every other expression, was dropped and read zero. Generating them
+	/// as ordinary IR costs nothing: it is the same expression generator the
+	/// rest of the contract already uses.
+	void generateInitializer(ContractDefinition const& _contract)
+	{
+		std::vector<VariableDeclaration const*> initialised;
+		for (auto it = _contract.annotation().linearizedBaseContracts.rbegin();
+			 it != _contract.annotation().linearizedBaseContracts.rend();
+			 ++it)
+			for (auto const& var: (*it)->stateVariables())
+				// A constant has no storage to initialise; it is substituted
+				// wherever it is named.
+				if (var->value() && !var->isConstant())
+					initialised.push_back(var);
+
+		if (initialised.empty())
+			return;
+
+		auto loc = this->loc(_contract);
+		auto funcOp = m_builder->create<mlir::solidity::FunctionOp>(
+			loc, kInitializerName, m_builder->getFunctionType({}, {}), "internal", "nonpayable");
+		// The dispatcher skips anything carrying a `kind`: this is reached from
+		// the creation code, never by a selector.
+		funcOp->setAttr("kind", m_builder->getStringAttr("initializer"));
+
+		auto& entryBlock = funcOp.getBody().emplaceBlock();
+		auto savedInsertionPoint = m_builder->saveInsertionPoint();
+		m_builder->setInsertionPointToEnd(&entryBlock);
+
+		for (VariableDeclaration const* var: initialised)
+		{
+			if (mlir::Value value = generateSolidityExpression(*var->value()))
+				m_builder->create<mlir::solidity::StoreStateVarOp>(loc, stateVarName(*var), value);
+		}
+		m_builder->create<mlir::solidity::ReturnOp>(loc, mlir::ValueRange{});
 
 		m_builder->restoreInsertionPoint(savedInsertionPoint);
 	}
@@ -1318,6 +1366,8 @@ public:
 		}
 		m_builder->create<mlir::solidity::ReturnOp>(_loc, mlir::ValueRange{_values});
 	}
+
+	static constexpr char const* kInitializerName = "init";
 
 	ContractDefinition const* m_mostDerivedContract = nullptr;
 
@@ -2344,6 +2394,24 @@ public:
 					// keccak256(data) - hash function
 					if (funcName == "keccak256" && funcCall->arguments().size() == 1)
 					{
+						// Of a literal it is a compile-time constant, and worth
+						// folding here: the operand would otherwise be a
+						// `solidity.string_literal`, which needs the memory
+						// allocator that does not exist yet, and the whole
+						// expression was dropped for want of it.
+						if (auto* literal = dynamic_cast<Literal const*>(
+								&withoutParentheses(*funcCall->arguments()[0])))
+							if (literal->token() == langutil::Token::StringLiteral
+								|| literal->token() == langutil::Token::HexStringLiteral)
+							{
+								auto const hash = solidity::util::keccak256(literal->value());
+								auto attr = m_builder->getIntegerAttr(
+									mlir::IntegerType::get(m_context.get(), 256, mlir::IntegerType::Unsigned),
+									llvm::APInt(256, u256(hash).str(), 10));
+								return m_builder->create<mlir::solidity::ConstantOp>(
+									loc, attr, mlir::solidity::BytesType::get(m_context.get(), 32)).getResult();
+							}
+
 						auto data = generateSolidityExpression(*funcCall->arguments()[0]);
 
 						return m_builder->create<mlir::solidity::Keccak256Op>(
