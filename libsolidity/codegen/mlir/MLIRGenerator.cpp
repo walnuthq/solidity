@@ -3915,6 +3915,7 @@ public:
 
 			// Build the full event signature string for computing topic0
 			// e.g., "Transfer(address,address,uint256)"
+			bool anonymousEvent = false;
 			std::string eventSignature = eventName + "(";
 			auto const* exprType = eventCall.expression().annotation().type;
 			if (auto const* funcType = dynamic_cast<FunctionType const*>(exprType))
@@ -3934,6 +3935,10 @@ public:
 			if (auto const* funcType = dynamic_cast<FunctionType const*>(exprType))
 			{
 				// Try to get the event definition to find indexed parameters
+				if (auto const* eventDef = dynamic_cast<EventDefinition const*>(&funcType->declaration()))
+				{
+					anonymousEvent = eventDef->isAnonymous();
+				}
 				if (auto const* eventDef = dynamic_cast<EventDefinition const*>(&funcType->declaration()))
 				{
 					for (auto const& param: eventDef->parameters())
@@ -3964,6 +3969,7 @@ public:
 				loc, m_builder->getStringAttr(eventName),
 				m_builder->getStringAttr(eventSignature),
 				indexedArrayAttr,
+				anonymousEvent ? m_builder->getUnitAttr() : mlir::UnitAttr(),
 				args);
 			return nullptr;
 		}

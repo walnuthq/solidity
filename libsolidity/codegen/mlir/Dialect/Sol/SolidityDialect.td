@@ -977,6 +977,9 @@ def Solidity_EmitOp : Solidity_Op<"emit"> {
     StrAttr:$event,
     OptionalAttr<StrAttr>:$eventSignature,
     OptionalAttr<ArrayAttr>:$indexed,
+    // An anonymous event has no signature topic, so its first indexed argument
+    // is topic0 rather than topic1.
+    UnitAttr:$anonymous,
     Variadic<Solidity_AnyType>:$args
   );
 }

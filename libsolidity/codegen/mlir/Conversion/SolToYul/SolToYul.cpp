@@ -39,6 +39,8 @@
 
 #include "SolToYul.h"
 
+#include <libsolutil/Keccak256.h>
+
 #include "SolidityDialect.h"
 #include "SolidityOps.h"
 #include "YulDialect.h"
@@ -454,6 +456,64 @@ private:
 				loc(),
 				m_builder.create<mlir::yul::AddOp>(loc(), dynamicArrayData(slot), length),
 				mapped(push.getValue()));
+			return false;
+		}
+		if (auto emit = llvm::dyn_cast<mlir::solidity::EmitOp>(&_op))
+		{
+			// An event is a log: its signature hash is topic0 unless it is
+			// anonymous, each indexed argument is a further topic, and the rest
+			// are ABI-encoded into the data.
+			llvm::SmallVector<mlir::Value, 4> topics;
+			if (!emit.getAnonymous())
+			{
+				auto signature = emit.getEventSignature();
+				if (!signature)
+					fail("emit without a signature");
+				topics.push_back(
+					wordConstant(llvm::APInt(256, solidity::u256(solidity::util::keccak256(signature->str())).str(), 10)));
+			}
+
+			llvm::SmallVector<mlir::Value, 4> data;
+			auto indexed = emit.getIndexed();
+			for (auto [position, argument]: llvm::enumerate(emit.getArgs()))
+			{
+				if (isDynamic(argument.getType()))
+					fail("emit with a dynamic argument");
+				bool const isTopic = indexed && position < indexed->size()
+					&& llvm::cast<mlir::BoolAttr>((*indexed)[position]).getValue();
+				(isTopic ? topics : data).push_back(mapped(argument));
+			}
+			if (topics.size() > 4)
+				fail("emit with more topics than a log can carry");
+
+			mlir::Value pointer = wordConstant(uint64_t(0));
+			mlir::Value length = wordConstant(uint64_t(0));
+			if (!data.empty())
+			{
+				m_usesMemory = true;
+				length = wordConstant(uint64_t(32 * data.size()));
+				pointer = allocate(length);
+				for (auto [position, value]: llvm::enumerate(data))
+					m_builder.create<mlir::yul::MStoreOp>(
+						loc(),
+						m_builder.create<mlir::yul::AddOp>(
+							loc(), pointer, wordConstant(uint64_t(32 * position))),
+						value);
+			}
+
+			switch (topics.size())
+			{
+			case 0: m_builder.create<mlir::yul::Log0Op>(loc(), pointer, length); break;
+			case 1: m_builder.create<mlir::yul::Log1Op>(loc(), pointer, length, topics[0]); break;
+			case 2: m_builder.create<mlir::yul::Log2Op>(loc(), pointer, length, topics[0], topics[1]); break;
+			case 3:
+				m_builder.create<mlir::yul::Log3Op>(loc(), pointer, length, topics[0], topics[1], topics[2]);
+				break;
+			default:
+				m_builder.create<mlir::yul::Log4Op>(
+					loc(), pointer, length, topics[0], topics[1], topics[2], topics[3]);
+				break;
+			}
 			return false;
 		}
 		if (auto decode = llvm::dyn_cast<mlir::solidity::AbiDecodeOp>(&_op))
