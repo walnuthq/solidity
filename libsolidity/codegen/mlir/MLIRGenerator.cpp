@@ -263,6 +263,7 @@ public:
 					if (generatedFunctions.find(signature) == generatedFunctions.end())
 					{
 						generatedFunctions.insert(signature);
+						m_emittedFunctionNames[func] = func->name();
 						generateSolidityFunction(*func);
 					}
 					else if (func->isImplemented())
@@ -271,7 +272,10 @@ public:
 						// under the name such a call resolves to, qualified by
 						// its defining contract so it cannot collide with the
 						// override that shadows it.
+					{
+						m_emittedFunctionNames[func] = baseContract->name() + "." + func->name();
 						generateSolidityFunction(*func, baseContract->name() + "." + func->name());
+					}
 				}
 			}
 		}
@@ -304,6 +308,10 @@ public:
 			else if (anyConstructor)
 				generateConstructorChain(_contract);
 		}
+
+		// Generated after every body above, because only then is it known which
+		// functions had their address taken and with what shape.
+		generateIndirectDispatchers();
 
 		// Generate library functions from all reachable libraries.
 		// Libraries can be used via "using for" directives or called directly (Library.func()).
@@ -594,6 +602,82 @@ public:
 		m_builder->create<mlir::solidity::ReturnOp>(loc, mlir::ValueRange{accessResult.getResult()});
 
 		m_builder->restoreInsertionPoint(savedInsertionPoint);
+	}
+
+	/// The name a function was emitted under. A base implementation shadowed by
+	/// an override exists under a qualified name, and the dispatcher calls by
+	/// name - so `super.f` as a pointer has to name the same one the equivalent
+	/// call would reach.
+	std::string emittedNameOf(FunctionDefinition const& _function)
+	{
+		auto known = m_emittedFunctionNames.find(&_function);
+		if (known != m_emittedFunctionNames.end())
+			return known->second;
+		return _function.name();
+	}
+
+	/// One dispatcher per shape, turning a pointer back into a call by name.
+	///
+	/// Generated after every body, because only then is it known which
+	/// functions had their address taken. An unknown id reverts - it cannot be
+	/// a pointer this contract ever made.
+	void generateIndirectDispatchers()
+	{
+		for (auto const& [arity, resultCount]: m_indirectShapes)
+		{
+			auto loc = m_builder->getUnknownLoc();
+			auto word = mlir::solidity::UIntType::get(m_context.get(), 256);
+			llvm::SmallVector<mlir::Type, 4> inputs(arity + 1, word);
+			llvm::SmallVector<mlir::Type, 2> results(resultCount, word);
+
+			auto funcOp = m_builder->create<mlir::solidity::FunctionOp>(
+				loc,
+				indirectDispatcherName(arity, resultCount),
+				m_builder->getFunctionType(inputs, results),
+				"internal",
+				"nonpayable");
+
+			auto& entryBlock = funcOp.getBody().emplaceBlock();
+			llvm::SmallVector<mlir::Value, 4> params;
+			for (mlir::Type type: inputs)
+				params.push_back(entryBlock.addArgument(type, loc));
+
+			auto savedIP = m_builder->saveInsertionPoint();
+			m_builder->setInsertionPointToEnd(&entryBlock);
+
+			for (FunctionDefinition const* target: m_functionPointerOrder)
+			{
+				if (target->parameters().size() != arity || target->returnParameters().size() != resultCount)
+					continue;
+
+				mlir::Value id = m_builder->create<mlir::solidity::ConstantOp>(
+					loc,
+					m_builder->getIntegerAttr(
+						m_builder->getI64Type(), static_cast<int64_t>(m_functionPointerIds[target])),
+					word);
+				mlir::Value matches = m_builder->create<mlir::solidity::CmpOp>(
+					loc, mlir::solidity::BoolType::get(m_context.get()), params[0], id,
+					m_builder->getStringAttr("eq"));
+
+				auto ifOp = m_builder->create<mlir::solidity::IfOp>(loc, matches);
+				mlir::OpBuilder::InsertionGuard guard(*m_builder);
+				m_builder->setInsertionPointToEnd(&ifOp.getThenRegion().emplaceBlock());
+
+				auto called = m_builder->create<mlir::solidity::FunctionCallOp>(
+					loc,
+					mlir::TypeRange{results},
+					m_builder->getStringAttr(emittedNameOf(*target)),
+					mlir::ValueRange{llvm::ArrayRef<mlir::Value>(params).drop_front()});
+				llvm::SmallVector<mlir::Value, 2> returned(called->getResults());
+				m_builder->create<mlir::solidity::ReturnOp>(loc, mlir::ValueRange{returned});
+				ifOp.getElseRegion().emplaceBlock();
+			}
+
+			// An id this contract never handed out cannot be a pointer it made.
+			m_builder->create<mlir::solidity::RevertOp>(
+				loc, m_builder->getStringAttr("call through an unknown function pointer"));
+			m_builder->restoreInsertionPoint(savedIP);
+		}
 	}
 
 	/// State variable initialisers, as a function the creation half calls.
@@ -1261,6 +1345,30 @@ public:
 		return name;
 	}
 
+	/// An internal function pointer is a small integer, not an address.
+	///
+	/// The EVM has no callable value: solc uses a jump destination, which only
+	/// works because it lays the code out itself. Here every function is a Yul
+	/// function reached by name, so a pointer is an id and calling one goes
+	/// through a generated dispatcher that turns the id back into a name.
+	uint64_t functionPointerId(FunctionDefinition const& _function)
+	{
+		auto known = m_functionPointerIds.find(&_function);
+		if (known != m_functionPointerIds.end())
+			return known->second;
+		uint64_t const id = m_functionPointerIds.size() + 1;
+		m_functionPointerIds[&_function] = id;
+		m_functionPointerOrder.push_back(&_function);
+		return id;
+	}
+
+	/// The dispatcher's name for a given shape. One per distinct signature,
+	/// because the call has to agree with the callee's arity on both sides.
+	std::string indirectDispatcherName(size_t _arguments, size_t _results)
+	{
+		return "$call." + std::to_string(_arguments) + "." + std::to_string(_results);
+	}
+
 	FunctionDefinition const* resolvedCallee(FunctionCall const& _call)
 	{
 		Expression const& callee = withoutParentheses(_call.expression());
@@ -1473,6 +1581,11 @@ public:
 
 	static constexpr char const* kInitializerName = "init";
 
+	std::map<FunctionDefinition const*, uint64_t> m_functionPointerIds;
+	std::vector<FunctionDefinition const*> m_functionPointerOrder;
+	std::set<std::pair<size_t, size_t>> m_indirectShapes;
+	std::map<FunctionDefinition const*, std::string> m_emittedFunctionNames;
+
 	ContractDefinition const* m_mostDerivedContract = nullptr;
 
 	mlir::Value generateSolidityExpression(Expression const& _expr)
@@ -1552,6 +1665,18 @@ public:
 					m_valueMap[varDecl->id()] = zeroValue;
 					return zeroValue;
 				}
+			}
+			else if (auto* referenced
+					 = dynamic_cast<FunctionDefinition const*>(ident->annotation().referencedDeclaration))
+			{
+				// A function named where a value is wanted is a pointer to it.
+				// This used to fall through to the zero placeholder, so every
+				// pointer was null and calling one did nothing.
+				return m_builder->create<mlir::solidity::ConstantOp>(
+					loc,
+					m_builder->getIntegerAttr(
+						m_builder->getI64Type(), static_cast<int64_t>(functionPointerId(*referenced))),
+					mlir::solidity::UIntType::get(m_context.get(), 256));
 			}
 			else if (auto* enumValue = dynamic_cast<EnumValue const*>(ident->annotation().referencedDeclaration))
 			{
@@ -2151,6 +2276,26 @@ public:
 					}
 				}
 
+			// `super.f` or `Base.f` named where a value is wanted is a pointer,
+			// and it has to resolve to the same implementation the equivalent
+			// call would reach - `super` steps along the linearisation rather
+			// than binding to the override that is asking.
+			if (auto* referenced
+				= dynamic_cast<FunctionDefinition const*>(memberAccess->annotation().referencedDeclaration))
+				if (auto* memberType = dynamic_cast<FunctionType const*>(memberAccess->annotation().type))
+					if (memberType->kind() == FunctionType::Kind::Internal)
+					{
+						FunctionDefinition const* target = referenced;
+						if (ContractDefinition const* from = superSearchStart(*memberAccess))
+							if (FunctionDefinition const* next = resolveSuper(*referenced, *from))
+								target = next;
+						return m_builder->create<mlir::solidity::ConstantOp>(
+							loc,
+							m_builder->getIntegerAttr(
+								m_builder->getI64Type(), static_cast<int64_t>(functionPointerId(*target))),
+							mlir::solidity::UIntType::get(m_context.get(), 256)).getResult();
+					}
+
 			// Handle EnumDefinition.member (e.g., State.OPEN)
 			if (auto* baseIdent = dynamic_cast<Identifier const*>(&memberAccess->expression()))
 			{
@@ -2401,6 +2546,42 @@ public:
 					m_builder->getStringAttr(fullObjectName),
 					zeroValue, args).getResult();
 			}
+
+			// A call whose callee is a value rather than a name - `fn()` where
+			// `fn` holds a pointer - goes through the dispatcher for its shape.
+			if (auto* calleeType = dynamic_cast<FunctionType const*>(callee.annotation().type))
+				// A local holding a pointer is an Identifier too, so what
+				// separates the two is what the name refers to: a variable
+				// means the callee is a value.
+				if (calleeType->kind() == FunctionType::Kind::Internal && !resolvedCallee(*funcCall)
+					&& !dynamic_cast<FunctionDefinition const*>(
+						dynamic_cast<Identifier const*>(&callee)
+							? dynamic_cast<Identifier const*>(&callee)->annotation().referencedDeclaration
+							: nullptr))
+				{
+					mlir::Value pointer = generateSolidityExpression(callee);
+					if (pointer)
+					{
+						std::vector<mlir::Value> args{pointer};
+						for (auto const& argument: funcCall->arguments())
+							if (mlir::Value value = generateSolidityExpression(*argument))
+								args.push_back(value);
+
+						auto resultTypes = callResultTypes(*_expr.annotation().type);
+						if (auto const* tuple = dynamic_cast<TupleType const*>(_expr.annotation().type))
+							if (tuple->components().empty())
+								resultTypes.clear();
+
+						size_t const arity = args.size() - 1;
+						m_indirectShapes.insert({arity, resultTypes.size()});
+						auto call = m_builder->create<mlir::solidity::FunctionCallOp>(
+							loc,
+							mlir::TypeRange{resultTypes},
+							m_builder->getStringAttr(indirectDispatcherName(arity, resultTypes.size())),
+							args);
+						return call->getNumResults() > 0 ? call->getResult(0) : mlir::Value();
+					}
+				}
 
 			if (auto* ident = dynamic_cast<Identifier const*>(&callee))
 			{
