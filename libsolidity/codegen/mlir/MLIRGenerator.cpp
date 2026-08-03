@@ -1362,6 +1362,52 @@ public:
 		return _op.getResult();
 	}
 
+	/// `a op= b` as `a op b`, for the assignment forms.
+	mlir::Value compoundResult(
+		mlir::Location _loc, Token _operator, mlir::Value _current, mlir::Value _operand, mlir::Type _type)
+	{
+		switch (_operator)
+		{
+		case Token::AssignAdd:
+			return marked(m_builder->create<mlir::solidity::AddOp>(_loc, _type, _current, _operand));
+		case Token::AssignSub:
+			return marked(m_builder->create<mlir::solidity::SubOp>(_loc, _type, _current, _operand));
+		case Token::AssignMul:
+			return marked(m_builder->create<mlir::solidity::MulOp>(_loc, _type, _current, _operand));
+		case Token::AssignDiv:
+			return marked(m_builder->create<mlir::solidity::DivOp>(_loc, _type, _current, _operand));
+		case Token::AssignMod:
+			return marked(m_builder->create<mlir::solidity::ModOp>(_loc, _type, _current, _operand));
+		default:
+			return _operand;
+		}
+	}
+
+	/// A struct in storage is named by a slot, not held as a value: a word
+	/// cannot carry one. `m[k]` and a struct state variable therefore produce
+	/// the place, and members are read and written through it.
+	static bool isStorageStruct(Expression const& _expr)
+	{
+		auto const* structType = dynamic_cast<StructType const*>(_expr.annotation().type);
+		return structType && structType->location() == DataLocation::Storage;
+	}
+
+	/// Which slot, counting from the struct's own, a member lives in.
+	///
+	/// Packing is solc's business and it puts several small members in one
+	/// slot at different byte offsets; nothing here masks, so a member that
+	/// does not start a slot is refused rather than read wrongly.
+	std::optional<int64_t> memberSlotOffset(StructType const& _struct, std::string const& _member)
+	{
+		for (auto const& [slot, offset]: {_struct.storageOffsetsOfMember(_member)})
+		{
+			if (offset != 0)
+				return std::nullopt;
+			return static_cast<int64_t>(slot);
+		}
+		return std::nullopt;
+	}
+
 	/// An internal function pointer is a small integer, not an address.
 	///
 	/// The EVM has no callable value: solc uses a jump destination, which only
@@ -1893,6 +1939,37 @@ public:
 		{
 			mlir::Value value;
 
+			// `s.member = v` where s is in storage writes through the slot. It
+			// used to fall to a generic path that produced the member's value
+			// and then had nowhere to put anything, so the write was lost.
+			if (auto* target = dynamic_cast<MemberAccess const*>(&assignment->leftHandSide()))
+				if (auto* structType
+					= dynamic_cast<StructType const*>(target->expression().annotation().type))
+					if (structType->location() == DataLocation::Storage)
+					{
+						std::optional<int64_t> const offset
+							= memberSlotOffset(*structType, target->memberName());
+						mlir::Value slot = generateSolidityExpression(target->expression());
+						mlir::Value assigned = generateSolidityExpression(assignment->rightHandSide());
+						if (!offset || !slot || !assigned)
+							return emitUnsupported(
+								loc,
+								translateSolidityType(*_expr.annotation().type),
+								"assignment to struct member '" + target->memberName() + "'");
+
+						if (assignment->assignmentOperator() != Token::Assign)
+						{
+							mlir::Value current = m_builder->create<mlir::solidity::StorageMemberLoadOp>(
+								loc, assigned.getType(), slot, m_builder->getI64IntegerAttr(*offset));
+							assigned = compoundResult(
+								loc, assignment->assignmentOperator(), current, assigned, assigned.getType());
+						}
+
+						m_builder->create<mlir::solidity::StorageMemberStoreOp>(
+							loc, slot, assigned, m_builder->getI64IntegerAttr(*offset));
+						return assigned;
+					}
+
 			// Handle compound assignments (e.g., +=, *=, etc.)
 			if (assignment->assignmentOperator() != Token::Assign)
 			{
@@ -2418,6 +2495,19 @@ public:
 			// Handle struct member access
 			else if (auto* structType = dynamic_cast<StructType const*>(baseType))
 			{
+				if (structType->location() == DataLocation::Storage)
+				{
+					std::optional<int64_t> const offset = memberSlotOffset(*structType, memberName);
+					if (!offset)
+						return emitUnsupported(
+							loc,
+							translateSolidityType(*_expr.annotation().type),
+							"struct member '" + memberName + "' shares a slot with another");
+					return m_builder->create<mlir::solidity::StorageMemberLoadOp>(
+						loc, translateSolidityType(*_expr.annotation().type), base,
+						m_builder->getI64IntegerAttr(*offset)).getResult();
+				}
+
 				auto op = m_builder->create<mlir::solidity::MemberAccessOp>(
 					loc, translateSolidityType(*_expr.annotation().type), base, m_builder->getStringAttr(memberName));
 				// Compute field index for lowering
@@ -3001,8 +3091,12 @@ public:
 				auto keys = collectMappingKeys(*indexAccess, varName);
 				auto valueType = translateSolidityType(*_expr.annotation().type);
 
-				return m_builder->create<mlir::solidity::MappingAccessOp>(
+				auto access = m_builder->create<mlir::solidity::MappingAccessOp>(
 					loc, valueType, m_builder->getStringAttr(varName), keys);
+				if (isStorageStruct(_expr))
+					// The slot itself, because a struct does not fit a word.
+					access.setAsReference(true);
+				return access.getResult();
 			}
 			else if (dynamic_cast<ArrayType const*>(indexAccess->baseExpression().annotation().type))
 			{

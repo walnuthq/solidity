@@ -527,6 +527,24 @@ def Solidity_AddressBalanceOp : Solidity_Op<"address_balance", [Pure]> {
   let assemblyFormat = "$address attr-dict `:` type($address) `->` type($balance)";
 }
 
+def Solidity_StorageMemberLoadOp : Solidity_Op<"storage_member_load", [Pure]> {
+  let summary = "Read a struct member through a storage slot";
+  let description = [{
+    The operand is a storage slot, not a value: `m[k]` and a struct state
+    variable name a place rather than what is in it, and a member is at a fixed
+    offset from that place.
+  }];
+  let arguments = (ins Solidity_AnyType:$slot, I64Attr:$offset);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "$slot $offset attr-dict `:` type($slot) `->` type($result)";
+}
+
+def Solidity_StorageMemberStoreOp : Solidity_Op<"storage_member_store"> {
+  let summary = "Write a struct member through a storage slot";
+  let arguments = (ins Solidity_AnyType:$slot, Solidity_AnyType:$value, I64Attr:$offset);
+  let assemblyFormat = "$slot `,` $value $offset attr-dict `:` type($slot) `,` type($value)";
+}
+
 def Solidity_MemoryLengthOp : Solidity_Op<"memory_length", [Pure]> {
   let summary = "Length of a dynamic value held in memory";
   let description = [{
@@ -751,7 +769,7 @@ def Solidity_MappingAccessOp : Solidity_Op<"mapping_access", [Pure]> {
     Accesses a mapping element by one or more keys. For nested mappings like
     allowance[owner][spender], all keys are passed in order (owner, spender).
   }];
-  let arguments = (ins StrAttr:$varName, Variadic<Solidity_AnyType>:$keys);
+  let arguments = (ins StrAttr:$varName, Variadic<Solidity_AnyType>:$keys, UnitAttr:$asReference);
   let results = (outs Solidity_AnyType:$result);
   let assemblyFormat = "$varName `(` $keys `)` attr-dict `:` functional-type($keys, $result)";
 }

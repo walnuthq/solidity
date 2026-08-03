@@ -200,10 +200,19 @@ private:
 		// Storage layout: sequential slots in declaration order (the real
 		// pipeline uses ContractType::linearizedStateVariables(); the
 		// generator emits state_var ops in that order).
+		// The generator works the layout out with Solidity's own rules, which
+		// account for what a struct occupies; numbering them one apiece here
+		// put the next variable on top of a struct's second member.
 		uint64_t nextSlot = 0;
 		for (mlir::Operation& op: _contract.getBody().front().getOperations())
 			if (auto stateVar = llvm::dyn_cast<mlir::solidity::StateVarOp>(&op))
-				m_storageSlots[stateVar.getName()] = nextSlot++;
+			{
+				if (auto declared = stateVar->getAttrOfType<mlir::IntegerAttr>("storageSlot"))
+					m_storageSlots[stateVar.getName()] = static_cast<uint64_t>(declared.getInt());
+				else
+					m_storageSlots[stateVar.getName()] = nextSlot;
+				nextSlot = m_storageSlots[stateVar.getName()] + 1;
+			}
 
 		// A call can name a function this contract does not contain - one that
 		// is inherited but never emitted here, or reached through `super`.
@@ -516,7 +525,24 @@ private:
 		if (auto access = llvm::dyn_cast<mlir::solidity::MappingAccessOp>(&_op))
 		{
 			mlir::Value slot = mappingSlot(storageSlot(access.getVarName()), access.getKeys());
-			m_map[access.getResult()] = m_builder.create<mlir::yul::SLoadOp>(loc(), slot);
+			// A struct does not fit a word, so what the expression names is the
+			// place rather than what is in it.
+			m_map[access.getResult()]
+				= access.getAsReference() ? slot : m_builder.create<mlir::yul::SLoadOp>(loc(), slot).getResult();
+			return false;
+		}
+		if (auto load = llvm::dyn_cast<mlir::solidity::StorageMemberLoadOp>(&_op))
+		{
+			mlir::Value slot = m_builder.create<mlir::yul::AddOp>(
+				loc(), mapped(load.getSlot()), wordConstant(static_cast<uint64_t>(load.getOffset())));
+			m_map[load.getResult()] = m_builder.create<mlir::yul::SLoadOp>(loc(), slot);
+			return false;
+		}
+		if (auto store = llvm::dyn_cast<mlir::solidity::StorageMemberStoreOp>(&_op))
+		{
+			mlir::Value slot = m_builder.create<mlir::yul::AddOp>(
+				loc(), mapped(store.getSlot()), wordConstant(static_cast<uint64_t>(store.getOffset())));
+			m_builder.create<mlir::yul::SStoreOp>(loc(), slot, mapped(store.getValue()));
 			return false;
 		}
 		if (auto store = llvm::dyn_cast<mlir::solidity::MappingStoreOp>(&_op))
