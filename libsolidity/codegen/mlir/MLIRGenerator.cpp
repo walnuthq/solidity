@@ -1397,6 +1397,11 @@ public:
 			return false;
 		if (array->baseType()->storageSize() != 1)
 			return false;
+		// A base the name could not be read from is not a state variable this
+		// can find a slot for - an array reached through another access, say.
+		// Marking it anyway named a variable that does not exist.
+		if (_varName.empty())
+			return false;
 
 		_op->setAttr("varName", m_builder->getStringAttr(_varName));
 		_op->setAttr("storageArray", m_builder->getUnitAttr());
