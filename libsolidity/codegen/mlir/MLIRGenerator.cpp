@@ -1088,6 +1088,85 @@ public:
 		return emitUnsupported(_loc, _expected, _what);
 	}
 
+	/// A value defined inside a region does not exist after it. When a loop or
+	/// an `if` assigned a variable and the region did not yield it, the map
+	/// still named the inner value, and every later use of that variable was an
+	/// undeclared SSA name - so the contract was lost for one assignment. Park
+	/// those as placeholders instead.
+	void dropValuesEscaping(mlir::Operation* _op, mlir::Location _loc)
+	{
+		if (!_op)
+			return;
+		for (auto& [id, value]: m_valueMap)
+		{
+			if (!value)
+				continue;
+			mlir::Operation* owner = value.getDefiningOp();
+			if (!owner)
+				if (mlir::Block* block = value.getParentBlock())
+					owner = block->getParentOp();
+			if (owner && owner != _op && _op->isProperAncestor(owner))
+				value = emitUnsupported(_loc, value.getType(), "value assigned only inside a region that does not yield it");
+		}
+	}
+
+	/// One yielded value per loop-carried variable, in order.
+	///
+	/// A variable the body never assigned has no entry in the map, and dropping
+	/// it left the yield shorter than the arity the region declares; yielding
+	/// argument 0 in its place named a different variable. The value that
+	/// entered the iteration is this position's own block argument, which is
+	/// what "unchanged" means here.
+	llvm::SmallVector<mlir::Value, 4> loopYieldValues(mlir::Block* _block, std::vector<int64_t> const& _varIds)
+	{
+		llvm::SmallVector<mlir::Value, 4> values;
+		if (!_block)
+			return values;
+		// The region declares the arity; the variable list only says what each
+		// position means. An empty body has nothing in the map and still has to
+		// yield one value per argument.
+		for (unsigned i = 0; i < _block->getNumArguments(); ++i)
+		{
+			mlir::Value value;
+			if (i < _varIds.size())
+			{
+				auto it = m_valueMap.find(_varIds[i]);
+				if (it != m_valueMap.end() && it->second)
+					value = it->second;
+			}
+			values.push_back(value ? value : _block->getArgument(i));
+		}
+		return values;
+	}
+
+	/// The block a break or continue would yield from, but only when it is the
+	/// loop's own body block. Inside a nested `scf.if` a yield belongs to the
+	/// `if`, not the loop, so emitting the loop's values there builds a yield
+	/// under the wrong parent - and the contract is lost for one `break`.
+	mlir::Block* immediateLoopBody()
+	{
+		mlir::Block* block = m_builder->getInsertionBlock();
+		return block && mlir::isa_and_nonnull<mlir::scf::WhileOp>(block->getParentOp()) ? block : nullptr;
+	}
+
+	/// The result types a call site must declare. A function returning a tuple
+	/// declares one result per component, and collapsing them to the single
+	/// type the annotation translates to left the call one result short of the
+	/// callee - which the verifier rejects, costing the contract.
+	llvm::SmallVector<mlir::Type, 2> callResultTypes(Type const& _annotated)
+	{
+		llvm::SmallVector<mlir::Type, 2> types;
+		if (auto const* tuple = dynamic_cast<TupleType const*>(&_annotated))
+		{
+			for (auto const& component: tuple->components())
+				if (component)
+					types.push_back(translateSolidityType(*component));
+			return types;
+		}
+		types.push_back(translateSolidityType(_annotated));
+		return types;
+	}
+
 	void padCallArguments(FunctionCall const& _call, std::vector<mlir::Value>& _args, mlir::Location _loc)
 	{
 		FunctionDefinition const* callee = resolvedCallee(_call);
@@ -2017,7 +2096,11 @@ public:
 							if (auto* literal = dynamic_cast<Literal const*>(funcCall->arguments()[1].get()))
 								msgAttr = m_builder->getStringAttr(literal->value());
 						}
-						m_builder->create<mlir::solidity::RequireOp>(loc, cond, msgAttr);
+						m_builder->create<mlir::solidity::RequireOp>(
+							loc,
+							typedOperand(loc, cond, mlir::solidity::BoolType::get(m_context.get()),
+								"require condition not generated as a boolean"),
+							msgAttr);
 					}
 					return nullptr;
 				}
@@ -2026,7 +2109,10 @@ public:
 					if (!funcCall->arguments().empty())
 					{
 						auto cond = generateSolidityExpression(*funcCall->arguments()[0]);
-						m_builder->create<mlir::solidity::AssertOp>(loc, cond);
+						m_builder->create<mlir::solidity::AssertOp>(
+							loc,
+							typedOperand(loc, cond, mlir::solidity::BoolType::get(m_context.get()),
+								"assert condition not generated as a boolean"));
 					}
 					return nullptr;
 				}
@@ -2280,9 +2366,9 @@ public:
 						if (!dynamic_cast<TupleType const*>(_expr.annotation().type)
 							|| !dynamic_cast<TupleType const*>(_expr.annotation().type)->components().empty())
 						{
-							auto resultType = translateSolidityType(*_expr.annotation().type);
+							auto resultTypes = callResultTypes(*_expr.annotation().type);
 							return m_builder->create<mlir::solidity::FunctionCallOp>(
-								loc, mlir::TypeRange{resultType}, m_builder->getStringAttr(resolvedCalleeName(*funcCall, funcName)), args).getResult(0);
+								loc, mlir::TypeRange{resultTypes}, m_builder->getStringAttr(resolvedCalleeName(*funcCall, funcName)), args).getResult(0);
 						}
 						else
 						{
@@ -2311,9 +2397,9 @@ public:
 					if (!dynamic_cast<TupleType const*>(_expr.annotation().type)
 						|| !dynamic_cast<TupleType const*>(_expr.annotation().type)->components().empty())
 					{
-						auto resultType = translateSolidityType(*_expr.annotation().type);
+						auto resultTypes = callResultTypes(*_expr.annotation().type);
 						return m_builder->create<mlir::solidity::FunctionCallOp>(
-							loc, mlir::TypeRange{resultType}, m_builder->getStringAttr(resolvedCalleeName(*funcCall, funcName)), args).getResult(0);
+							loc, mlir::TypeRange{resultTypes}, m_builder->getStringAttr(resolvedCalleeName(*funcCall, funcName)), args).getResult(0);
 					}
 					else
 					{
@@ -2407,14 +2493,32 @@ public:
 				// Unchecked semantics don't affect Yul lowering.
 				mlir::Value lastValue;
 				for (auto const& stmt: block->statements())
+				{
+					// A break, continue or return ends the block. Statements
+					// after it are unreachable, and emitting them puts ops past
+					// a terminator - which costs the whole contract, not the
+					// dead code.
+					mlir::Block* current = m_builder->getInsertionBlock();
+					if (current && !current->empty() && current->back().hasTrait<mlir::OpTrait::IsTerminator>())
+						break;
 					lastValue = generateSolidityStatement(*stmt);
+				}
 				return lastValue;
 			}
 			else
 			{
 				mlir::Value lastValue;
 				for (auto const& stmt: block->statements())
+				{
+					// A break, continue or return ends the block. Statements
+					// after it are unreachable, and emitting them puts ops past
+					// a terminator - which costs the whole contract, not the
+					// dead code.
+					mlir::Block* current = m_builder->getInsertionBlock();
+					if (current && !current->empty() && current->back().hasTrait<mlir::OpTrait::IsTerminator>())
+						break;
 					lastValue = generateSolidityStatement(*stmt);
+				}
 				return lastValue;
 			}
 		}
@@ -2444,6 +2548,11 @@ public:
 			// Reset insertion point after the if statement
 			// This ensures subsequent statements are generated after the if, not inside it
 			m_builder->setInsertionPointAfter(ifOp.getOperation());
+
+			// Same rule as for loops: a variable assigned only in a branch has
+			// no value after the `if`, so it must not stay in the map naming
+			// one from inside the region.
+			dropValuesEscaping(ifOp.getOperation(), loc);
 		}
 		else if (auto* forStmt = dynamic_cast<ForStatement const*>(&_stmt))
 		{
@@ -2609,18 +2718,8 @@ public:
 				// (e.g., from a break statement in the loop body)
 				if (afterBlock->empty() || !afterBlock->back().hasTrait<mlir::OpTrait::IsTerminator>())
 				{
-					// Collect updated values for all loop-carried variables
-					std::vector<mlir::Value> updatedValues;
-					for (auto varId: loopCarriedVarIdsList)
-					{
-						if (m_valueMap.count(varId) > 0)
-							updatedValues.push_back(m_valueMap[varId]);
-						else
-							updatedValues.push_back(afterBlock->getArgument(0)); // Fallback
-					}
-
-					// Yield the updated loop-carried values
-					m_builder->create<mlir::scf::YieldOp>(loc, mlir::ValueRange{updatedValues});
+					m_builder->create<mlir::scf::YieldOp>(
+						loc, mlir::ValueRange{loopYieldValues(afterBlock, loopCarriedVarIdsList)});
 				}
 			}
 
@@ -2633,6 +2732,10 @@ public:
 
 			// Reset insertion point after the loop
 			m_builder->setInsertionPointAfter(whileOp);
+
+			// Anything the loop assigned but did not yield is gone once the
+			// loop ends, so it must not stay in the map as a live value.
+			dropValuesEscaping(whileOp, loc);
 
 			// Clear loop-carried variables tracking
 			m_loopCarriedVarIds.clear();
@@ -2732,19 +2835,8 @@ public:
 
 				if (needsTerminator)
 				{
-					// Prepare the values to yield
-					std::vector<mlir::Value> updatedValues;
-					for (auto varId: loopCarriedVarIdsList)
-					{
-						if (m_valueMap.count(varId) > 0)
-							updatedValues.push_back(m_valueMap[varId]);
-					}
-
-					if (updatedValues.empty() && !initialValues.empty())
-						updatedValues = {afterBlock->getArgument(0)};
-
-					// Always add the yield for proper termination
-					m_builder->create<mlir::scf::YieldOp>(loc, mlir::ValueRange{updatedValues});
+					m_builder->create<mlir::scf::YieldOp>(
+						loc, mlir::ValueRange{loopYieldValues(afterBlock, loopCarriedVarIdsList)});
 				}
 
 				// Ensure all blocks in the after region have terminators
@@ -2901,18 +2993,8 @@ public:
 				// (e.g., from a break statement in the loop body)
 				if (afterBlock->empty() || !afterBlock->back().hasTrait<mlir::OpTrait::IsTerminator>())
 				{
-					// Collect updated values for all loop-carried variables
-					std::vector<mlir::Value> updatedValues;
-					for (auto varId: loopCarriedVarIdsList)
-					{
-						if (m_valueMap.count(varId) > 0)
-							updatedValues.push_back(m_valueMap[varId]);
-						else
-							updatedValues.push_back(afterBlock->getArgument(0)); // Fallback
-					}
-
-					// Yield the updated loop-carried values
-					m_builder->create<mlir::scf::YieldOp>(loc, mlir::ValueRange{updatedValues});
+					m_builder->create<mlir::scf::YieldOp>(
+						loc, mlir::ValueRange{loopYieldValues(afterBlock, loopCarriedVarIdsList)});
 				}
 			}
 
@@ -2925,6 +3007,10 @@ public:
 
 			// Reset insertion point after the loop
 			m_builder->setInsertionPointAfter(whileOp);
+
+			// Anything the loop assigned but did not yield is gone once the
+			// loop ends, so it must not stay in the map as a live value.
+			dropValuesEscaping(whileOp, loc);
 
 			// Clear loop-carried variables tracking
 			m_loopCarriedVarIds.clear();
@@ -2946,38 +3032,18 @@ public:
 		else if (auto* breakStmt = dynamic_cast<Break const*>(&_stmt))
 		{
 			// Only generate scf::YieldOp if we're in an immediate SCF loop
-			if (m_immediateLoopContext == LoopContext::SCF)
+			if (m_immediateLoopContext == LoopContext::SCF && immediateLoopBody())
 			{
 				// For break statements in SCF loops, we need to yield with current values
 				// This is a simplified handling - proper implementation would track loop contexts
 				// and branch to the appropriate exit block
 
-				// If we're in a loop context (which we should be), create a yield
-				// with the current loop-carried values
-				// For now, just create a dummy yield to satisfy SCF requirements
-				std::vector<mlir::Value> currentValues;
-
-				// This is a simplified approach - we should track the loop context
-				// and use the appropriate loop-carried values
-				if (!m_loopCarriedVarIds.empty())
-				{
-					for (auto varId: m_loopCarriedVarIds)
-					{
-						if (m_valueMap.count(varId) > 0)
-							currentValues.push_back(m_valueMap[varId]);
-					}
-				}
-
-				// If no loop-carried values, create a dummy value
-				if (currentValues.empty())
-				{
-					auto zeroValue = m_builder->create<mlir::solidity::ConstantOp>(
-						loc, m_builder->getI64IntegerAttr(0), mlir::solidity::UIntType::get(m_context.get(), 256));
-					currentValues.push_back(zeroValue);
-				}
-
-				// Create the yield to exit the loop
-				m_builder->create<mlir::scf::YieldOp>(loc, mlir::ValueRange{currentValues});
+				// The yield has to match the region's arity exactly. A dummy
+				// zero when there was nothing to carry, or a short list when a
+				// carried variable was untouched, is what the verifier rejected.
+				std::vector<int64_t> const carried(m_loopCarriedVarIds.begin(), m_loopCarriedVarIds.end());
+				m_builder->create<mlir::scf::YieldOp>(
+					loc, mlir::ValueRange{loopYieldValues(immediateLoopBody(), carried)});
 			}
 			else
 			{
@@ -2989,31 +3055,13 @@ public:
 		else if (auto* continueStmt = dynamic_cast<Continue const*>(&_stmt))
 		{
 			// Only generate scf::YieldOp if we're in an immediate SCF loop
-			if (m_immediateLoopContext == LoopContext::SCF)
+			if (m_immediateLoopContext == LoopContext::SCF && immediateLoopBody())
 			{
 				// For continue statements, we need to yield with updated values
 				// to continue to the next iteration
-				std::vector<mlir::Value> currentValues;
-
-				if (!m_loopCarriedVarIds.empty())
-				{
-					for (auto varId: m_loopCarriedVarIds)
-					{
-						if (m_valueMap.count(varId) > 0)
-							currentValues.push_back(m_valueMap[varId]);
-					}
-				}
-
-				// If no loop-carried values, create a dummy value
-				if (currentValues.empty())
-				{
-					auto zeroValue = m_builder->create<mlir::solidity::ConstantOp>(
-						loc, m_builder->getI64IntegerAttr(0), mlir::solidity::UIntType::get(m_context.get(), 256));
-					currentValues.push_back(zeroValue);
-				}
-
-				// Create the yield to continue the loop
-				m_builder->create<mlir::scf::YieldOp>(loc, mlir::ValueRange{currentValues});
+				std::vector<int64_t> const carried(m_loopCarriedVarIds.begin(), m_loopCarriedVarIds.end());
+				m_builder->create<mlir::scf::YieldOp>(
+					loc, mlir::ValueRange{loopYieldValues(immediateLoopBody(), carried)});
 			}
 			else
 			{
@@ -3121,30 +3169,29 @@ public:
 					// Generate the init expression (e.g., the low-level call)
 					auto initValue = generateSolidityExpression(*varDeclStmt->initialValue());
 
-					// Use the expression result for the first declared variable,
-					// and zero-initialize the rest
-					bool firstAssigned = false;
-					for (auto const& decl: declarations)
+					// One result per component. Binding the first and zeroing the
+					// rest read `(a, b) = pair()` as `a = pair(); b = 0`, which
+					// compiles and answers wrongly - the worst of the two. Where
+					// the initialiser genuinely produces no such result, say so
+					// with a placeholder rather than a zero that looks like data.
+					mlir::Operation* producer = initValue ? initValue.getDefiningOp() : nullptr;
+					for (size_t i = 0; i < declarations.size(); ++i)
 					{
-						if (decl)
-						{
-							auto declType = translateSolidityType(*decl->type());
-							auto declLoc = this->loc(*decl);
+						auto const& decl = declarations[i];
+						if (!decl)
+							// An omitted component still occupies its position.
+							continue;
 
-							if (!firstAssigned && initValue)
-							{
-								// Use the call result for the first component (e.g., bool success)
-								m_valueMap[decl->id()] = initValue;
-								firstAssigned = true;
-							}
-							else
-							{
-								// Other components get zero/default values
-								auto zero = m_builder->getIntegerAttr(m_builder->getI64Type(), 0);
-								m_valueMap[decl->id()] = m_builder->create<mlir::solidity::ConstantOp>(
-									declLoc, zero, declType);
-							}
-						}
+						auto declType = translateSolidityType(*decl->type());
+						auto declLoc = this->loc(*decl);
+
+						if (producer && i < producer->getNumResults() && producer->getResult(i).getType() == declType)
+							m_valueMap[decl->id()] = producer->getResult(i);
+						else if (i == 0 && initValue)
+							m_valueMap[decl->id()] = initValue;
+						else
+							m_valueMap[decl->id()] = emitUnsupported(
+								declLoc, declType, "component of a destructuring its initialiser does not produce");
 					}
 					return initValue ? initValue : mlir::Value();
 				}
