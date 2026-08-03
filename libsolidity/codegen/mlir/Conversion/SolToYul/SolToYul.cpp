@@ -53,6 +53,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Verifier.h"
@@ -470,6 +471,18 @@ private:
 		if (auto convert = llvm::dyn_cast<mlir::solidity::ConvertOp>(&_op))
 		{
 			m_map[convert.getOutput()] = representationConvert(mapped(convert.getInput()), convert.getOutput().getType());
+			return false;
+		}
+		if (auto toI1 = llvm::dyn_cast<mlir::solidity::ToI1Op>(&_op))
+		{
+			// Everything is a word here, so narrowing a bool to i1 is only a
+			// change of type - the value is already 0 or 1.
+			m_map[toI1.getResult()] = mapped(toI1.getOperand());
+			return false;
+		}
+		if (auto whileOp = llvm::dyn_cast<mlir::scf::WhileOp>(&_op))
+		{
+			convertWhile(whileOp);
 			return false;
 		}
 		if (auto ifOp = llvm::dyn_cast<mlir::solidity::IfOp>(&_op))
@@ -1145,6 +1158,81 @@ private:
 			m_builder.setInsertionPointToStart(&elseIf.getThenRegion().emplaceBlock());
 			convertBlockOps(_if.getElseRegion().front());
 		}
+	}
+
+	/// `scf.while` is what the generator emits for every `for` and `while`, and
+	/// nothing lowered it - so no contract with a loop got past this rung.
+	///
+	/// The two dialects disagree about where a loop's state lives. `scf.while`
+	/// carries it as region arguments and yielded results, which is SSA and has
+	/// no place in Yul; `yul.for` has mutable variables instead. So each
+	/// carried value becomes a `yul.var`, the region arguments read it, and the
+	/// terminators assign it.
+	void convertWhile(mlir::scf::WhileOp _while)
+	{
+		llvm::SmallVector<mlir::Value, 4> slots;
+		for (mlir::Value initial: _while.getInits())
+			slots.push_back(m_builder.create<mlir::yul::VarOp>(loc(), mapped(initial)));
+
+		auto readInto = [&](mlir::Block& _block) {
+			for (auto [index, argument]: llvm::enumerate(_block.getArguments()))
+				if (index < slots.size())
+					m_map[argument] = m_builder.create<mlir::yul::VarLoadOp>(loc(), wordType(), slots[index]);
+		};
+		auto assignAll = [&](mlir::ValueRange _values) {
+			for (auto [index, value]: llvm::enumerate(_values))
+				if (index < slots.size())
+					m_builder.create<mlir::yul::AssignOp>(loc(), slots[index], mapped(value));
+		};
+
+		auto forOp = m_builder.create<mlir::yul::ForOp>(loc());
+		{
+			mlir::OpBuilder::InsertionGuard guard(m_builder);
+			m_builder.setInsertionPointToStart(&forOp.getCondRegion().emplaceBlock());
+
+			mlir::Block& before = _while.getBefore().front();
+			readInto(before);
+			mlir::Value cond;
+			for (mlir::Operation& op: before.getOperations())
+			{
+				if (auto condition = llvm::dyn_cast<mlir::scf::ConditionOp>(&op))
+				{
+					// What the condition forwards is what the body sees and
+					// what the loop yields on exit, so it lands in the slots
+					// either way.
+					assignAll(condition.getArgs());
+					cond = mapped(condition.getCondition());
+					break;
+				}
+				convertOp(op);
+			}
+			m_builder.create<mlir::yul::ConditionOp>(loc(), cond ? cond : wordConstant(uint64_t(0)));
+		}
+		{
+			mlir::OpBuilder::InsertionGuard guard(m_builder);
+			m_builder.setInsertionPointToStart(&forOp.getBodyRegion().emplaceBlock());
+
+			mlir::Block& after = _while.getAfter().front();
+			readInto(after);
+			for (mlir::Operation& op: after.getOperations())
+			{
+				if (auto yield = llvm::dyn_cast<mlir::scf::YieldOp>(&op))
+				{
+					assignAll(yield.getResults());
+					break;
+				}
+				convertOp(op);
+			}
+		}
+		forOp.getPostRegion().emplaceBlock();
+
+		// After the loop the carried values are whatever the condition last
+		// forwarded, which is exactly what the slots hold.
+		mlir::OpBuilder::InsertionGuard guard(m_builder);
+		m_builder.setInsertionPointAfter(forOp);
+		for (auto [index, result]: llvm::enumerate(_while.getResults()))
+			if (index < slots.size())
+				m_map[result] = m_builder.create<mlir::yul::VarLoadOp>(loc(), wordType(), slots[index]);
 	}
 
 	void convertFor(mlir::solidity::ForOp _for)
