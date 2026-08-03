@@ -567,8 +567,6 @@ private:
 				continue;
 			if (func.getVisibility() && *func.getVisibility() != "public" && *func.getVisibility() != "external")
 				continue;
-			if (func.getResultTypes().size() > 1)
-				continue; // multiple results need tuple encoding
 			bool describable = true;
 			for (mlir::Type type: func.getResultTypes())
 				describable = describable && abiTypeName(type).has_value();
@@ -618,14 +616,15 @@ private:
 				mlir::FlatSymbolRefAttr::get(m_builder.getContext(), qualified(func.getSymName())),
 				arguments);
 
+			// One word per result, in order. Only a single result was encoded
+			// before and everything else returned empty data, so a function
+			// returning a tuple answered nothing at all.
 			mlir::Value zero = wordConstant(uint64_t(0));
-			if (called->getNumResults() == 1)
-			{
-				m_builder.create<mlir::yul::MStoreOp>(loc(), zero, called->getResult(0));
-				m_builder.create<mlir::yul::ReturnOp>(loc(), zero, wordConstant(uint64_t(32)));
-			}
-			else
-				m_builder.create<mlir::yul::ReturnOp>(loc(), zero, zero);
+			unsigned const resultCount = called->getNumResults();
+			for (unsigned i = 0; i < resultCount; ++i)
+				m_builder.create<mlir::yul::MStoreOp>(
+					loc(), wordConstant(uint64_t(32 * i)), called->getResult(i));
+			m_builder.create<mlir::yul::ReturnOp>(loc(), zero, wordConstant(uint64_t(32 * resultCount)));
 		}
 
 		mlir::Value zero = wordConstant(uint64_t(0));

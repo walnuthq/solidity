@@ -172,10 +172,12 @@ public:
 		// This uses ContractType::linearizedStateVariables() which already skips
 		// constants and immutables, and computes proper storage layout with packing.
 		m_stateVarSlots.clear();
+		m_stateVarNames.clear();
+		m_usedStateVarNames.clear();
 		{
 			ContractType contractType(_contract);
 			for (auto const& [varDecl, slot, offset]: contractType.linearizedStateVariables(DataLocation::Storage))
-				m_stateVarSlots[varDecl->name()] = slot;
+				m_stateVarSlots[stateVarName(*varDecl)] = slot;
 		}
 
 		// Generate state variables from all base contracts (in reverse order: base to derived)
@@ -396,10 +398,12 @@ public:
 
 			// Generate child contract's state variables
 			m_stateVarSlots.clear();
+			m_stateVarNames.clear();
+			m_usedStateVarNames.clear();
 			{
 				ContractType contractType(*childContract);
 				for (auto const& [varDecl, slot, offset]: contractType.linearizedStateVariables(DataLocation::Storage))
-					m_stateVarSlots[varDecl->name()] = slot;
+					m_stateVarSlots[stateVarName(*varDecl)] = slot;
 			}
 			for (auto cit = childContract->annotation().linearizedBaseContracts.rbegin();
 				 cit != childContract->annotation().linearizedBaseContracts.rend(); ++cit)
@@ -527,7 +531,7 @@ public:
 		mlir::IntegerAttr slotAttr;
 		if (!_var.isConstant() && !_var.immutable())
 		{
-			auto slotIt = m_stateVarSlots.find(_var.name());
+			auto slotIt = m_stateVarSlots.find(stateVarName(_var));
 			if (slotIt != m_stateVarSlots.end())
 				slotAttr = m_builder->getI64IntegerAttr(static_cast<int64_t>(slotIt->second));
 		}
@@ -535,7 +539,7 @@ public:
 		// Create state variable operation using typed builder
 		auto stateVarOp = m_builder->create<mlir::solidity::StateVarOp>(
 			loc,
-			_var.name(),
+			stateVarName(_var),
 			solidityType,
 			m_builder->getStringAttr(visibility),
 			_var.isConstant(),
@@ -608,7 +612,7 @@ public:
 		m_builder->setInsertionPointToEnd(&entryBlock);
 
 		auto loadResult = m_builder->create<mlir::solidity::LoadStateVarOp>(
-			loc, returnType, _var.name());
+			loc, returnType, stateVarName(_var));
 
 		m_builder->create<mlir::solidity::ReturnOp>(loc, mlir::ValueRange{loadResult.getResult()});
 
@@ -1114,6 +1118,28 @@ public:
 		return nullptr;
 	}
 
+	/// The name a state variable is known by in the IR.
+	///
+	/// A derived contract may declare one with a name a base already used.
+	/// Keyed by name alone the two share a storage slot, so the second silently
+	/// reads and writes the first - and both answer whichever was stored last.
+	/// The first declaration seen (bases first) keeps the plain name; a
+	/// shadowing one is qualified by the contract that declares it.
+	std::string stateVarName(VariableDeclaration const& _var)
+	{
+		auto known = m_stateVarNames.find(_var.id());
+		if (known != m_stateVarNames.end())
+			return known->second;
+
+		std::string name = _var.name();
+		if (m_usedStateVarNames.count(name))
+			if (auto const* contract = dynamic_cast<ContractDefinition const*>(_var.scope()))
+				name = contract->name() + "." + _var.name();
+		m_usedStateVarNames.insert(name);
+		m_stateVarNames[_var.id()] = name;
+		return name;
+	}
+
 	FunctionDefinition const* resolvedCallee(FunctionCall const& _call)
 	{
 		Expression const& callee = withoutParentheses(_call.expression());
@@ -1338,7 +1364,7 @@ public:
 				if (varDecl->isStateVariable())
 				{
 					auto type = translateSolidityType(*_expr.annotation().type);
-					return m_builder->create<mlir::solidity::LoadStateVarOp>(loc, type, varDecl->name());
+					return m_builder->create<mlir::solidity::LoadStateVarOp>(loc, type, stateVarName(*varDecl));
 				}
 				else if (m_valueMap.count(varDecl->id()))
 				{
@@ -1548,7 +1574,7 @@ public:
 						if (varDecl->isStateVariable())
 						{
 							currentValue = m_builder->create<mlir::solidity::LoadStateVarOp>(
-								loc, translateSolidityType(*varDecl->type()), varDecl->name());
+								loc, translateSolidityType(*varDecl->type()), stateVarName(*varDecl));
 						}
 						else
 						{
@@ -1624,7 +1650,7 @@ public:
 				{
 					if (varDecl->isStateVariable())
 					{
-						m_builder->create<mlir::solidity::StoreStateVarOp>(loc, varDecl->name(), value);
+						m_builder->create<mlir::solidity::StoreStateVarOp>(loc, stateVarName(*varDecl), value);
 					}
 					else
 					{
@@ -1696,7 +1722,7 @@ public:
 					{
 						if (varDecl->isStateVariable())
 						{
-							m_builder->create<mlir::solidity::StoreStateVarOp>(loc, varDecl->name(), result);
+							m_builder->create<mlir::solidity::StoreStateVarOp>(loc, stateVarName(*varDecl), result);
 						}
 						else
 						{
@@ -1733,7 +1759,7 @@ public:
 					{
 						if (varDecl->isStateVariable())
 						{
-							m_builder->create<mlir::solidity::StoreStateVarOp>(loc, varDecl->name(), result);
+							m_builder->create<mlir::solidity::StoreStateVarOp>(loc, stateVarName(*varDecl), result);
 						}
 						else
 						{
@@ -3144,8 +3170,34 @@ public:
 		{
 			llvm::SmallVector<mlir::Value, 4> values;
 			if (ret->expression())
-				if (mlir::Value value = generateSolidityExpression(*ret->expression()))
-					values.push_back(value);
+			{
+				Expression const& returned = withoutParentheses(*ret->expression());
+				auto const* tuple = dynamic_cast<TupleExpression const*>(&returned);
+				if (tuple && !tuple->isInlineArray() && tuple->components().size() > 1)
+					// `return (a, b)` is one value per component. Generating the
+					// tuple as a single expression produced only the first, and
+					// the arity padding then made up the difference with
+					// placeholders - so every result after the first came back
+					// zero, with nothing to say so.
+					for (auto const& component: tuple->components())
+					{
+						if (!component)
+							continue;
+						if (mlir::Value value = generateSolidityExpression(*component))
+							values.push_back(value);
+					}
+				else if (mlir::Value value = generateSolidityExpression(returned))
+				{
+					// `return f()` where f returns a tuple is the same story:
+					// the expression is one value, the call op has several.
+					mlir::Operation* producer = value.getDefiningOp();
+					if (producer && producer->getNumResults() > 1 && producer->getResult(0) == value)
+						for (mlir::Value result: producer->getResults())
+							values.push_back(result);
+					else
+						values.push_back(value);
+				}
+			}
 
 			emitReturn(loc, values);
 		}
@@ -4037,6 +4089,8 @@ private:
 
 	// Map state variable names to their computed storage slots
 	std::map<std::string, u256> m_stateVarSlots;
+	std::map<int64_t, std::string> m_stateVarNames;
+	std::set<std::string> m_usedStateVarNames;
 
 	// Track loop-carried variables for break/continue statements
 	std::set<int64_t> m_loopCarriedVarIds;
