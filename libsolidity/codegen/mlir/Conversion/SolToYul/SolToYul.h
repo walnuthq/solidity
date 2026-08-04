@@ -40,6 +40,9 @@
 #include "mlir/IR/OwningOpRef.h"
 #pragma GCC diagnostic pop
 
+#include <liblangutil/EVMVersion.h>
+
+#include <set>
 #include <string>
 
 namespace solidity::mlirgen
@@ -54,7 +57,11 @@ namespace solidity::mlirgen
 /// the state-variable initialisers and the constructor, then copies the runtime
 /// half into place and returns it.
 mlir::OwningOpRef<mlir::ModuleOp>
-convertSolToYul(mlir::ModuleOp _module, std::string& _error, bool _creation = false);
+convertSolToYul(
+	mlir::ModuleOp _module,
+	std::string& _error,
+	bool _creation = false,
+	langutil::EVMVersion _evmVersion = {});
 
 /// Contracts whose code the last conversion named through `type(C).runtimeCode`
 /// or `.creationCode`. They have to be assembled and nested as sub-objects, or

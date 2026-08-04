@@ -23,12 +23,12 @@ today's EVM bytecode backend reachable as the differential anchor), the
 | `Target/YulText/` | `yul` dialect -> Yul source emitter | working (M1) |
 | `Target/RISCV/` | LLVM-dialect -> RV32IM objects (in-process llc) + test wrappers | working (M5) |
 | `Import/LibyulAST/` | libyul AST -> `yul` dialect (incl. object trees, real via-ir) | working (M2b) |
-| `Conversion/SolToYul/` | `sol` -> `yul` (storage slots, cmp predicates, if/else, require) | scaffolded (M2) |
-| `Conversion/YulToEVM/` | block-local var promotion + CF flattening + builtin mapping | scaffolded (M4) |
+| `Conversion/SolToYul/` | `sol` -> `yul` (creation/runtime, dispatch, storage, memory, ABI subset) | working (M2) |
+| `Conversion/YulToEVM/` | block-local var promotion + CF flattening + builtin mapping | mature (M4) |
 | `Conversion/EVMToLLVM/` | landmine legalization + evm-rt calls + clamped shifts | working (M5, pure subset) |
 | `runtime/evm-rt/` | i256/i512 runtime in LLVM IR (div family, exp, byte, signextend) | working (M5) |
 | `hosts/risc0/` | RISC Zero guest+host: zkVM execution, cycle counts, receipts | scaffolded (M7 groundwork) |
-| `tools/` | 5 test drivers + `yul2rv` (ladder-stage reporter for real contracts) | working |
+| `tools/` | rung emitters, bytecode drivers, and `yul2rv` | working |
 
 Real-contract coverage (see `riscv_bench.py` in solidity-compiler-benchmarks):
 **82/82 objects of the 30-contract suite compile to RV32IM object files**
@@ -182,7 +182,7 @@ Current status:
   live across the recursive call.
 - **solc's own semantic test suite compiles**: 1661 sources, **4128 Yul objects,
   all of them reach bytecode**.
-- **622 contracts from that suite deploy and agree** per selector with the
+- **697 contracts from that suite deploy and agree** per selector with the
   `solc --via-ir` build, with one divergence that is by construction (above).
 
 ### Running it
@@ -206,79 +206,91 @@ python3 libsolidity/codegen/mlir/test/corpus_coverage.py \
 Or from solc itself, on an MLIR-enabled build:
 
 ```sh
-solc --via-ir --optimize --mlir-bin Contract.sol
+solc --mlir-bin Contract.sol
 ```
 
-## The `sol` rung: a producer, and a measured gap
+`--mlir-bin` uses solc's production Solidity-to-strict-Yul frontend and imports
+the resulting object tree into MLIR:
 
-`MLIRGenerator` (Solidity AST -> `sol` dialect) is ported onto this branch, so
-the first rung has a producer for the first time. It lives in `libsolidity`
-rather than under `codegen/mlir` because it needs the AST. Its Yul-text
-lowering was left behind deliberately: `Conversion/SolToYul` supersedes it, and
-porting a rival lowering would defeat the point.
+```
+Solidity AST -> strict Yul -> yul dialect -> evm dialect -> EVM assembly
+```
 
-`tools/sol2evm` drives the whole ladder with no solc Yul pipeline anywhere:
+Strict-Yul generation is the frontend boundary; after that boundary the route
+does not fall back to either legacy EVM code generation or the Yul bytecode
+backend. Adding `--via-ir` does not change the selected MLIR backend.
+
+## Production and legacy-compatibility frontends
+
+`MLIRGenerator` also provides the typed first rung:
 
 ```
 Solidity AST -> sol dialect -> yul dialect -> evm dialect -> EVM assembly
 ```
 
-Over 195 contracts from solar's `tests/ui/codegen`:
+This route is used by `tools/sol2evm` and by semantic fixtures explicitly marked
+`compileViaYul: false`. It preserves legacy-only observable behavior without
+forcing the unfinished direct AST lowering to replace solc's production
+frontend for ordinary contracts. Frontend choice is an enum in the compiler
+API, not an environment-variable switch. Experimental analysis always uses its
+native strict-Yul producer because its AST intentionally lacks legacy type
+annotations.
 
-| Stage reached | Contracts |
-|---|---|
-| `bytecode` | 73 |
-| `evm` | 2 |
-| `yul` | 21 |
-| `sol` | 99 |
+Both routes share the same MLIR Yul-to-EVM conversion, object linker, memory
+frame policy, bounded inliner, and EVM assembly emitter. Runtime and creation
+objects, nested `new C` objects, immutables, `dataoffset`/`datasize`, library
+linking, and optimizer settings therefore go through the same backend.
 
-**A contract built this way now runs.** `SolToYul` emits an external
-dispatcher at module scope, which `YulToEVM` turns into the object's `@__entry`:
-the selector is read from calldata, matched against each public function whose
-ABI signature can be spelled, arguments are decoded straight out of calldata and
-the result returned; anything unmatched reverts. `Counter.sol` goes from 33
-bytes of unreachable function bodies to 204 bytes that deploy and answer -
-`number()` returns 0, then 41 after `setNumber(41)`, then 42 after
-`increment()`.
+### Full-corpus validation
 
-`test/sol_differential.py` checks this rung the way `deploy_differential.py`
-checks the other: both runtime objects installed at an address, every ABI
-selector called on each. Over the first 60 sources of solar's
-`tests/ui/codegen`, **21 contracts agree and 1 diverges**. It found a real
-defect on its first run - the dispatcher decoded arguments without checking
-that calldata was long enough, so a short call read zeros and answered instead
-of reverting the way solc does. That was 8 of the 9 divergences it reported.
+The complete in-repo semantic corpus is green on 2026-08-03. The primary
+current-EVM run is:
 
-Only single-word arguments and results are dispatched, because that is exactly
-the set needing no memory encoding. A function outside it is left undispatched
-rather than dispatched wrongly - unreachable, but never answering to a selector
-that means something else. There is still no constructor, so state variables
-start at zero and immutables do not work.
+```sh
+yes s | build_develop/test/tools/isoltest \
+  --mlir --no-smt --no-color -t 'semanticTests/*'
+```
 
-What stops the other 144, most frequent first:
+```text
+Semantic Test Summary: 1590/1661 tests successful (71 tests skipped).
+```
 
-| Blocker | Contracts |
-|---|---|
-| generated `sol` dialect does not parse or verify | 20 |
-| `solidity.inline_assembly` | 11 |
-| `solidity.member_access` | 8 |
-| `solidity.mapping_access` | 8 |
-| `solidity.string_literal` | 7 |
-| `solidity.abi_decode` | 5 |
-| `solidity.array_access` | 4 |
-| `solidity.emit` | 3 |
-| `struct_create`, `mapping_store`, `external_call`, `array_store`, `addmod`, `abi_encode`, `abi_encode_packed` | 2 each |
+There were zero failed tests, MLIR compilation failures, or unhandled
+exceptions. The 71 skipped cases are configuration exclusions made by the
+semantic harness; every test selected by this EVM/options run passed.
 
-`solidity.function_call` is done: the two ops differ only in how the callee is
-spelled, a plain string against a symbol reference, and everything is a word at
-the `yul` rung, so the result types come from the arity. It moved 18 contracts.
+The skipped set is covered by the matching configurations, rather than counted
+as success without execution:
 
-The round-trip failures started at 31 and are down to 20. They are a defect in
-what exists rather than an absence, and they had two causes. Ten were the
-driver's own fault - it registered only the `sol` dialect, while the generator
-also emits `scf` and `arith`. The rest are the generator building ill-typed IR
-after it drops a feature: the Solidity type still says array, but the dropped
-sub-expression left a plain word behind, so `solidity.array_length` fails to
-verify and the whole contract is lost rather than the one feature. Guarding that
-site fixed the largest group; the same shape remains in the boolean ops, the
-multi-value returns, and a few printed attributes.
+```text
+default:       1590/1661 successful, 71 skipped
+ABI encoder v1: 1614/1661 successful, 47 skipped
+Homestead:     1401/1661 successful, 260 skipped
+Shanghai-only selfdestruct fixtures: 2/2 successful
+@future-only fixture:                 1/1 successful
+```
+
+The union executes all **1634 standalone semantic fixture files**, with zero
+failures. The other 27 Solidity files below `semanticTests/` are imported
+helper sources and have no `// ----` test section. All 38 fixtures marked
+`compileViaYul: false` execute successfully in their compatible configuration
+through the direct typed-`sol` route.
+
+The MLIR-specific integration suite is green as well:
+
+```sh
+ctest --test-dir build_develop -L mlir --output-on-failure
+```
+
+It contains 20 registered tests, including **31/31 lit/FileCheck tests**, the
+real `solc --mlir-bin` CLI, reach gates, and deployed Yul/Solidity
+differentials. Tests that require JSON-RPC report a CTest skip when no node is
+available; the Osaka `CLZ` case similarly probes node opcode support before
+attempting a cross-backend execution comparison.
+
+The older 1788/2027 `sol2evm` number measured standalone reach of the direct
+AST-to-`sol` experiment, not the routed production compiler and not behavior of
+the semantic corpus. It remains useful when widening that optional frontend,
+but is no longer the project-level pass result. See
+`solc-riscv-mlir-tickets.md` beside the source tree for the current evidence and
+the historical ticket trail.

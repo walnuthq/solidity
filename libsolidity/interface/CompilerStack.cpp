@@ -792,6 +792,30 @@ bool CompilerStack::compile(State _stopAfter)
 	return true;
 }
 
+std::optional<std::string> CompilerStack::generateYulForMLIR(std::string const& _contractName)
+{
+	solAssert(m_stackState >= AnalysisSuccessful, "Yul generation requires analyzed sources.");
+	ContractDefinition const& definition = contractDefinition(_contractName);
+	try
+	{
+		generateIR(definition, false /* _unoptimizedOnly */);
+	}
+	catch (Error const& error)
+	{
+		reportCodeGenerationError(error, &definition);
+		return std::nullopt;
+	}
+	catch (UnimplementedFeatureError const& error)
+	{
+		reportUnimplementedFeatureError(error, &definition);
+		return std::nullopt;
+	}
+	Contract const& generated = contract(_contractName);
+	if (generated.yulIROptimized)
+		return generated.yulIROptimized;
+	return generated.yulIR;
+}
+
 void CompilerStack::link()
 {
 	solAssert(m_stackState >= CompilationSuccessful, "");

@@ -81,7 +81,8 @@ std::string quoted(std::string const& _text)
 std::shared_ptr<solidity::evmasm::Assembly> creationAssemblyOf(
 	std::string const& _name,
 	CompilerStack& _stack,
-	mlir::MLIRContext& _context);
+	mlir::MLIRContext& _context,
+	langutil::EVMVersion _evmVersion);
 
 /// The runtime half of another contract in the same source, assembled so it can
 /// be nested as a sub-object. Compiled from scratch rather than cached: a
@@ -90,53 +91,15 @@ std::shared_ptr<solidity::evmasm::Assembly> creationAssemblyOf(
 std::shared_ptr<solidity::evmasm::Assembly> runtimeAssemblyOf(
 	std::string const& _name,
 	CompilerStack& _stack,
-	mlir::MLIRContext& _context)
+	mlir::MLIRContext& _context,
+	langutil::EVMVersion _evmVersion)
 {
 	for (std::string const& candidate: _stack.contractNames())
 	{
 		if (candidate != _name && candidate.substr(candidate.rfind(':') + 1) != _name)
 			continue;
 
-		MLIRGenerator generator(_stack, langutil::EVMVersion{}, OptimiserSettings::minimal());
-		std::string const text = generator.generate(_stack.contractDefinition(candidate));
-		if (text.empty())
-			return nullptr;
-		mlir::OwningOpRef<mlir::ModuleOp> solModule
-			= mlir::parseSourceString<mlir::ModuleOp>(text, &_context);
-		if (!solModule)
-			return nullptr;
-
-		std::string error;
-		mlir::OwningOpRef<mlir::ModuleOp> yulModule = mlirgen::convertSolToYul(*solModule, error);
-		if (!yulModule)
-			return nullptr;
-		mlir::OwningOpRef<mlir::ModuleOp> evmModule = mlirgen::convertYulToEVM(*yulModule, error);
-		if (!evmModule)
-			return nullptr;
-
-		mlirgen::EVMAssemblyOptions options;
-		options.name = _name;
-		return mlirgen::emitEVMAssembly(*evmModule, options, error);
-	}
-	return nullptr;
-}
-
-
-std::shared_ptr<solidity::evmasm::Assembly> creationAssemblyOf(
-	std::string const& _name,
-	CompilerStack& _stack,
-	mlir::MLIRContext& _context)
-{
-	std::shared_ptr<solidity::evmasm::Assembly> runtime = runtimeAssemblyOf(_name, _stack, _context);
-	if (!runtime)
-		return nullptr;
-
-	for (std::string const& candidate: _stack.contractNames())
-	{
-		if (candidate != _name && candidate.substr(candidate.rfind(':') + 1) != _name)
-			continue;
-
-		MLIRGenerator generator(_stack, langutil::EVMVersion{}, OptimiserSettings::minimal());
+		MLIRGenerator generator(_stack, _evmVersion, OptimiserSettings::minimal());
 		std::string const text = generator.generate(_stack.contractDefinition(candidate));
 		if (text.empty())
 			return nullptr;
@@ -147,7 +110,50 @@ std::shared_ptr<solidity::evmasm::Assembly> creationAssemblyOf(
 
 		std::string error;
 		mlir::OwningOpRef<mlir::ModuleOp> yulModule
-			= mlirgen::convertSolToYul(*solModule, error, /*creation=*/true);
+			= mlirgen::convertSolToYul(*solModule, error, /*creation=*/false, _evmVersion);
+		if (!yulModule)
+			return nullptr;
+		mlir::OwningOpRef<mlir::ModuleOp> evmModule = mlirgen::convertYulToEVM(*yulModule, error);
+		if (!evmModule)
+			return nullptr;
+
+		mlirgen::EVMAssemblyOptions options;
+		options.name = _name;
+		options.evmVersion = _evmVersion;
+		return mlirgen::emitEVMAssembly(*evmModule, options, error);
+	}
+	return nullptr;
+}
+
+
+std::shared_ptr<solidity::evmasm::Assembly> creationAssemblyOf(
+	std::string const& _name,
+	CompilerStack& _stack,
+	mlir::MLIRContext& _context,
+	langutil::EVMVersion _evmVersion)
+{
+	std::shared_ptr<solidity::evmasm::Assembly> runtime
+		= runtimeAssemblyOf(_name, _stack, _context, _evmVersion);
+	if (!runtime)
+		return nullptr;
+
+	for (std::string const& candidate: _stack.contractNames())
+	{
+		if (candidate != _name && candidate.substr(candidate.rfind(':') + 1) != _name)
+			continue;
+
+		MLIRGenerator generator(_stack, _evmVersion, OptimiserSettings::minimal());
+		std::string const text = generator.generate(_stack.contractDefinition(candidate));
+		if (text.empty())
+			return nullptr;
+		mlir::OwningOpRef<mlir::ModuleOp> solModule
+			= mlir::parseSourceString<mlir::ModuleOp>(text, &_context);
+		if (!solModule)
+			return nullptr;
+
+		std::string error;
+		mlir::OwningOpRef<mlir::ModuleOp> yulModule
+			= mlirgen::convertSolToYul(*solModule, error, /*creation=*/true, _evmVersion);
 		if (!yulModule)
 			return nullptr;
 		mlir::OwningOpRef<mlir::ModuleOp> evmModule = mlirgen::convertYulToEVM(*yulModule, error);
@@ -157,6 +163,7 @@ std::shared_ptr<solidity::evmasm::Assembly> creationAssemblyOf(
 		mlirgen::EVMAssemblyOptions options;
 		options.name = _name + "_creation";
 		options.creation = true;
+		options.evmVersion = _evmVersion;
 		options.subObjects.push_back({"runtime", runtime, {}});
 		return mlirgen::emitEVMAssembly(*evmModule, options, error);
 	}
@@ -170,11 +177,25 @@ int main(int argc, char** argv)
 	std::string path;
 	std::string emit;   // sol | yul | evm: print that rung's IR and stop
 	bool printHex = false;
+	bool legacyCodegen = false;
+	langutil::EVMVersion evmVersion;
 	for (int i = 1; i < argc; ++i)
 	{
 		std::string const argument = argv[i];
 		if (argument == "--hex")
 			printHex = true;
+		else if (argument == "--legacy-codegen")
+			legacyCodegen = true;
+		else if (argument.rfind("--evm-version=", 0) == 0)
+		{
+			auto parsed = langutil::EVMVersion::fromString(argument.substr(14));
+			if (!parsed)
+			{
+				std::cerr << "unknown EVM version: " << argument.substr(14) << std::endl;
+				return 2;
+			}
+			evmVersion = *parsed;
+		}
 		else if (argument.rfind("--emit=", 0) == 0)
 			emit = argument.substr(7);
 		else if (path.empty())
@@ -182,7 +203,7 @@ int main(int argc, char** argv)
 	}
 	if (path.empty())
 	{
-		std::cerr << "usage: sol2evm <file.sol> [--hex]" << std::endl;
+		std::cerr << "usage: sol2evm <file.sol> [--hex] [--legacy-codegen] [--evm-version=VERSION]" << std::endl;
 		return 2;
 	}
 
@@ -197,6 +218,7 @@ int main(int argc, char** argv)
 
 	CompilerStack stack;
 	stack.setSources({{path, buffer.str()}});
+	stack.setEVMVersion(evmVersion);
 	stack.setOptimiserSettings(OptimiserSettings::minimal());
 	if (!stack.parseAndAnalyze())
 	{
@@ -221,7 +243,7 @@ int main(int argc, char** argv)
 		size_t byteCount = 0;
 
 		ContractDefinition const& contract = stack.contractDefinition(name);
-		MLIRGenerator generator(stack, langutil::EVMVersion{}, OptimiserSettings::minimal());
+		MLIRGenerator generator(stack, evmVersion, OptimiserSettings::minimal(), legacyCodegen);
 
 		std::string const text = generator.generate(contract);
 		if (emit == "sol")
@@ -244,7 +266,8 @@ int main(int argc, char** argv)
 			{
 				std::string error;
 				mlir::OwningOpRef<mlir::ModuleOp> yulModule
-					= mlirgen::convertSolToYul(*solModule, error);
+					= mlirgen::convertSolToYul(
+						*solModule, error, /*creation=*/false, evmVersion);
 				if (!yulModule)
 					detail = error;
 				else if (emit == "yul")
@@ -269,6 +292,7 @@ int main(int argc, char** argv)
 						stage = "evm";
 						mlirgen::EVMAssemblyOptions options;
 						options.name = name;
+						options.evmVersion = evmVersion;
 
 						// `type(C).runtimeCode` names another contract's code as
 						// data, so that contract has to be nested here or the
@@ -283,8 +307,8 @@ int main(int argc, char** argv)
 							std::string const contract
 								= wantsCreation ? object.substr(0, object.size() - suffix.size()) : object;
 							std::shared_ptr<evmasm::Assembly> code
-								= wantsCreation ? creationAssemblyOf(contract, stack, context)
-												: runtimeAssemblyOf(contract, stack, context);
+								= wantsCreation ? creationAssemblyOf(contract, stack, context, evmVersion)
+												: runtimeAssemblyOf(contract, stack, context, evmVersion);
 							if (code)
 								options.subObjects.push_back({object, code, {}});
 						}
@@ -302,7 +326,8 @@ int main(int argc, char** argv)
 							// has to carry that half as a nested object.
 							std::string creationError;
 							mlir::OwningOpRef<mlir::ModuleOp> creationYul
-								= mlirgen::convertSolToYul(*solModule, creationError, /*creation=*/true);
+								= mlirgen::convertSolToYul(
+									*solModule, creationError, /*creation=*/true, evmVersion);
 							// The creation half converts the same functions, so
 							// it names the same objects.
 							std::set<std::string> const creationReferenced
@@ -317,6 +342,7 @@ int main(int argc, char** argv)
 									mlirgen::EVMAssemblyOptions creationOptions;
 									creationOptions.name = name + "_creation";
 									creationOptions.creation = true;
+									creationOptions.evmVersion = evmVersion;
 									creationOptions.subObjects.push_back({"runtime", assembly, {}});
 									for (std::string const& object: creationReferenced)
 									{
@@ -329,8 +355,8 @@ int main(int argc, char** argv)
 											? object.substr(0, object.size() - suffix.size())
 											: object;
 										std::shared_ptr<evmasm::Assembly> code = wantsCreation
-											? creationAssemblyOf(contract, stack, context)
-											: runtimeAssemblyOf(contract, stack, context);
+											? creationAssemblyOf(contract, stack, context, evmVersion)
+											: runtimeAssemblyOf(contract, stack, context, evmVersion);
 										if (code)
 											creationOptions.subObjects.push_back({object, code, {}});
 									}

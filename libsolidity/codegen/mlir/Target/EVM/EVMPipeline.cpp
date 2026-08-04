@@ -31,6 +31,10 @@
 
 #include <libevmasm/Assembly.h>
 
+#include <boost/algorithm/string/predicate.hpp>
+
+#include <cstdlib>
+#include <iostream>
 #include <memory>
 #include <vector>
 
@@ -38,15 +42,28 @@ bool solidity::mlirgen::compileYulToEVMBytecode(
 	std::string const& _name,
 	std::string const& _yulSource,
 	langutil::EVMVersion _evmVersion,
+	frontend::OptimiserSettings const& _optimiserSettings,
 	solidity::bytes& _bytecode,
-	std::string& _error)
+	std::string& _error,
+	std::map<std::string, solidity::util::h160> const& _libraries)
 {
 	mlir::MLIRContext context;
 	context.disableMultithreading();
 
-	std::vector<ImportedObject> objects = importYulObjects(_name, _yulSource, context, _error);
+	std::vector<ImportedObject> objects = importYulObjects(_name, _yulSource, context, _error, _evmVersion);
 	if (objects.empty())
 		return false;
+	if (std::getenv("SOL_MLIR_DUMP_OBJECTS"))
+	{
+		std::cerr << "MLIR Yul object tree for " << _name << ":\n";
+		for (size_t index = 0; index < objects.size(); ++index)
+		{
+			std::cerr << "  [" << index << "] " << objects[index].name << " children:";
+			for (size_t child: objects[index].subObjects)
+				std::cerr << " [" << child << "] " << objects[child].name;
+			std::cerr << '\n';
+		}
+	}
 
 	// A nested object has to exist before the object naming it, so emission
 	// runs leaf-first and the root - the creation code - is finished last.
@@ -71,7 +88,7 @@ bool solidity::mlirgen::compileYulToEVMBytecode(
 
 		EVMAssemblyOptions options;
 		options.name = object.name;
-		options.creation = (current == 0);
+		options.creation = !boost::algorithm::ends_with(object.name, "_deployed");
 		options.evmVersion = _evmVersion;
 		for (size_t child: object.subObjects)
 		{
@@ -89,11 +106,27 @@ bool solidity::mlirgen::compileYulToEVMBytecode(
 			_error = "object " + object.name + ": " + _error;
 			return false;
 		}
+		if (std::getenv("SOL_MLIR_DUMP_OBJECTS"))
+			std::cerr << "  emitted [" << current << "] " << object.name << " subassemblies="
+				<< options.subObjects.size() << '\n';
 	}
 
 	try
 	{
-		_bytecode = emitted.front()->assemble().bytecode;
+		evmasm::Assembly::OptimiserSettings assemblySettings =
+			evmasm::Assembly::OptimiserSettings::translateSettings(_optimiserSettings);
+		// The MLIR emitter represents calls with explicit tag/jump blocks. Fold
+		// the profitable ones as a mandatory target cleanup; the remaining
+		// optimizer switches still follow the user's settings exactly.
+		assemblySettings.runInliner = true;
+		emitted.front()->optimise(assemblySettings);
+		if (std::getenv("SOL_MLIR_DUMP_OBJECTS"))
+			for (size_t index = 0; index < objects.size(); ++index)
+				std::cerr << "  assembled [" << index << "] " << objects[index].name << " bytes="
+					<< emitted[index]->assemble().bytecode.size() << '\n';
+		evmasm::LinkerObject linked = emitted.front()->assemble();
+		linked.link(_libraries);
+		_bytecode = std::move(linked.bytecode);
 	}
 	catch (std::exception const& _exception)
 	{

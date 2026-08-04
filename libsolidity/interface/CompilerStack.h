@@ -213,6 +213,7 @@ public:
 	/// Sets library addresses. Addresses are cleared iff @a _libraries is missing.
 	/// Must be set before parsing.
 	void setLibraries(std::map<std::string, util::h160> const& _libraries = {});
+	std::map<std::string, util::h160> const& libraries() const { return m_libraries; }
 
 	/// Changes the optimiser settings.
 	/// Must be set before parsing.
@@ -224,6 +225,7 @@ public:
 
 	/// Sets whether to strip revert strings, add additional strings or do nothing at all.
 	void setRevertStringBehaviour(RevertStrings _revertStrings);
+	RevertStrings revertStringBehaviour() const { return m_revertStrings; }
 
 	/// Sets the pipeline to go through the Yul IR or not.
 	/// Must be set before parsing.
@@ -291,6 +293,12 @@ public:
 	/// Compiles the source units that were previously added and parsed.
 	/// @returns false on error.
 	bool compile(State _stopAfter = State::CompilationSuccessful);
+
+	/// Generate the strict-Yul object tree for one analyzed contract without
+	/// running either legacy or via-IR bytecode generation. This is the bridge
+	/// used by backends that consume Yul themselves (notably the MLIR importer).
+	/// Returns optimized Yul when available and unoptimized Yul otherwise.
+	std::optional<std::string> generateYulForMLIR(std::string const& _contractName);
 
 	/// @returns the list of sources (paths) used
 	virtual std::vector<std::string> sourceNames() const override;

@@ -100,6 +100,11 @@ def Solidity_ArrayType : Solidity_Type<"Array", "array"> {
   let hasCustomAssemblyFormat = 1;
 }
 
+def Solidity_StructType : Solidity_Type<"Struct", "struct"> {
+  let summary = "Solidity struct type";
+  let hasCustomAssemblyFormat = 1;
+}
+
 // Type constraints
 def Solidity_AnyType : AnyTypeOf<[
   Solidity_UIntType,
@@ -109,7 +114,8 @@ def Solidity_AnyType : AnyTypeOf<[
   Solidity_BytesType,
   Solidity_DynamicBytesType,
   Solidity_StringType,
-  Solidity_ArrayType
+  Solidity_ArrayType,
+  Solidity_StructType
 ]>;
 
 //===----------------------------------------------------------------------===//
@@ -392,8 +398,9 @@ def Solidity_ReturnOp : Solidity_Op<"return", [Pure, Terminator]> {
 // Require operation
 def Solidity_RequireOp : Solidity_Op<"require"> {
   let summary = "Require condition check";
-  let arguments = (ins Solidity_BoolType:$condition, OptionalAttr<StrAttr>:$message);
-  let assemblyFormat = "$condition (`,` $message^)? attr-dict `:` type($condition)";
+  let arguments = (ins Solidity_BoolType:$condition,
+                       Optional<Solidity_AnyType>:$messageValue,
+                       OptionalAttr<StrAttr>:$message);
 }
 
 // Assert operation
@@ -408,6 +415,12 @@ def Solidity_RevertOp : Solidity_Op<"revert", [Terminator]> {
   let summary = "Revert transaction";
   let arguments = (ins OptionalAttr<StrAttr>:$reason);
   let assemblyFormat = "($reason^)? attr-dict";
+}
+
+def Solidity_RevertValueOp : Solidity_Op<"revert_value", [Terminator]> {
+  let summary = "Revert transaction with a runtime string value";
+  let arguments = (ins Solidity_AnyType:$reason);
+  let assemblyFormat = "$reason attr-dict `:` type($reason)";
 }
 
 // Constant operation
@@ -451,6 +464,31 @@ def Solidity_ConvertOp : Solidity_Op<"convert", [Pure]> {
 }
 
 // Array operations
+def Solidity_MemoryArrayCreateOp : Solidity_Op<"memory_array_create", [Pure]> {
+  let summary = "Allocate a dynamic array in memory";
+  let description = [{
+    Allocates a Solidity dynamic memory array, bytes value, or string with the
+    requested length. The result points at the length word, followed by the
+    zero-initialized element data.
+  }];
+  let arguments = (ins Solidity_AnyType:$length);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "$length attr-dict `:` type($length) `->` type($result)";
+}
+
+def Solidity_StorageToMemoryOp : Solidity_Op<"storage_to_memory", [Pure]> {
+  let summary = "Materialize a recursive storage value in memory";
+  let description = [{
+    The input is a storage base slot/reference, not the value held in its first
+    word. The result uses Solidity's recursive memory representation: dynamic
+    values have a length header, arrays use one word per element, and aggregate
+    elements are pointers.
+  }];
+  let arguments = (ins Solidity_AnyType:$source);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
+}
+
 def Solidity_ArrayAccessOp : Solidity_Op<"array_access", [Pure]> {
   let summary = "Access array element by index";
   let description = [{
@@ -459,6 +497,32 @@ def Solidity_ArrayAccessOp : Solidity_Op<"array_access", [Pure]> {
   let arguments = (ins Solidity_AnyType:$array, Solidity_AnyType:$index);
   let results = (outs Solidity_AnyType:$result);
   let assemblyFormat = "$array `[` $index `]` attr-dict `:` type($array) `,` type($index) `->` type($result)";
+}
+
+def Solidity_FixedBytesAccessOp : Solidity_Op<"fixed_bytes_access", [Pure]> {
+  let summary = "Access one byte of a left-aligned bytesN value";
+  let arguments = (ins Solidity_AnyType:$value, Solidity_AnyType:$index);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "$value `[` $index `]` attr-dict `:` type($value) `,` type($index) `->` type($result)";
+}
+
+def Solidity_MemoryClearOp : Solidity_Op<"memory_clear"> {
+  let summary = "Recursively zero a memory aggregate in place";
+  let arguments = (ins Solidity_AnyType:$value);
+  let assemblyFormat = "$value attr-dict `:` type($value)";
+}
+
+def Solidity_ArraySliceOp : Solidity_Op<"array_slice", [Pure]> {
+  let summary = "Create a calldata byte-array slice";
+  let arguments = (ins
+    Solidity_AnyType:$array,
+    Solidity_AnyType:$start,
+    Solidity_AnyType:$end,
+    UnitAttr:$hasStart,
+    UnitAttr:$hasEnd
+  );
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "$array `[` $start `:` $end `]` attr-dict `:` type($array) `,` type($start) `,` type($end) `->` type($result)";
 }
 
 def Solidity_ArrayStoreOp : Solidity_Op<"array_store"> {
@@ -477,6 +541,38 @@ def Solidity_ArrayPushOp : Solidity_Op<"array_push"> {
   }];
   let arguments = (ins Solidity_ArrayType:$array, Solidity_AnyType:$value);
   let assemblyFormat = "$array `,` $value attr-dict `:` type($array) `,` type($value)";
+}
+
+def Solidity_ArrayPushEmptyOp : Solidity_Op<"array_push_empty"> {
+  let summary = "Append a default-initialized element to a dynamic storage array";
+  let arguments = (ins Solidity_ArrayType:$array);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "$array attr-dict `:` type($array) `->` type($result)";
+}
+
+def Solidity_StorageBytesPushEmptyOp : Solidity_Op<"storage_bytes_push_empty"> {
+  let summary = "Append a zero byte to a dynamic storage byte array";
+  let arguments = (ins Solidity_AnyType:$bytes);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "$bytes attr-dict `:` type($bytes) `->` type($result)";
+}
+
+def Solidity_StorageBytesPushOp : Solidity_Op<"storage_bytes_push"> {
+  let summary = "Append one byte value to a dynamic storage byte array";
+  let arguments = (ins Solidity_AnyType:$bytes, Solidity_AnyType:$value);
+  let assemblyFormat = "$bytes `,` $value attr-dict `:` type($bytes) `,` type($value)";
+}
+
+def Solidity_StorageBytesPopOp : Solidity_Op<"storage_bytes_pop"> {
+  let summary = "Remove and clear the last byte of a dynamic storage byte array";
+  let arguments = (ins Solidity_AnyType:$bytes);
+  let assemblyFormat = "$bytes attr-dict `:` type($bytes)";
+}
+
+def Solidity_ArrayPopOp : Solidity_Op<"array_pop"> {
+  let summary = "Remove and clear the last element of a dynamic storage array";
+  let arguments = (ins Solidity_ArrayType:$array);
+  let assemblyFormat = "$array attr-dict `:` type($array)";
 }
 
 def Solidity_ArrayLengthOp : Solidity_Op<"array_length", [Pure]> {
@@ -545,6 +641,12 @@ def Solidity_StorageMemberStoreOp : Solidity_Op<"storage_member_store"> {
   let assemblyFormat = "$slot `,` $value $offset attr-dict `:` type($slot) `,` type($value)";
 }
 
+def Solidity_MemoryMemberStoreOp : Solidity_Op<"memory_member_store"> {
+  let summary = "Write a struct member through a memory pointer";
+  let arguments = (ins Solidity_AnyType:$object, Solidity_AnyType:$value, I64Attr:$fieldIndex);
+  let assemblyFormat = "$object `,` $value $fieldIndex attr-dict `:` type($object) `,` type($value)";
+}
+
 def Solidity_MemoryLengthOp : Solidity_Op<"memory_length", [Pure]> {
   let summary = "Length of a dynamic value held in memory";
   let description = [{
@@ -574,7 +676,7 @@ def Solidity_AddressCodeOp : Solidity_Op<"address_code", [Pure]> {
     Returns the contract code at the given address as a bytes array.
   }];
   let arguments = (ins Solidity_AddressType:$address);
-  let results = (outs Solidity_ArrayType:$code);
+	let results = (outs Solidity_DynamicBytesType:$code);
   let assemblyFormat = "$address attr-dict `:` type($address) `->` type($code)";
 }
 
@@ -612,6 +714,35 @@ def Solidity_ContinueOp : Solidity_Op<"continue", [Terminator]> {
     Continues to the next iteration of the current loop.
   }];
   let assemblyFormat = "attr-dict";
+}
+
+def Solidity_ControlTransferOp : Solidity_Op<"control_transfer", [Pure]> {
+  let summary = "Control transfer nested inside structured control flow";
+  let description = [{
+    SCF regions must end in scf.yield and therefore cannot contain Solidity's
+    function/loop terminators directly. This non-terminating marker records the
+    source transfer; sol-to-yul stops the arm at it and emits leave, break,
+    continue, or revert. The structural scf.yield remains after the marker for
+    MLIR verification only.
+  }];
+  let arguments = (ins StrAttr:$kind, Variadic<Solidity_AnyType>:$operands);
+}
+
+def Solidity_LoopPostOp : Solidity_Op<"loop_post", [Pure]> {
+  let summary = "Start of a loop's post-iteration region";
+  let description = [{
+    Marks the boundary between a structured loop body and the work that must
+    run after both fallthrough and `continue` (a for-loop update, or a
+    do-while condition). The operands are the current loop-carried values at
+    that boundary. This is erased while lowering to Yul's native post region.
+  }];
+  let arguments = (ins Variadic<Solidity_AnyType>:$operands);
+}
+
+def Solidity_LoopConditionOp : Solidity_Op<"loop_condition", [Pure]> {
+  let summary = "Post-tested loop continuation condition";
+  let arguments = (ins Solidity_BoolType:$condition);
+  let assemblyFormat = "$condition attr-dict `:` type($condition)";
 }
 
 // Logical operations (fixing the logical_not issue)
@@ -688,6 +819,17 @@ def Solidity_BlockhashOp : Solidity_Op<"blockhash", [Pure]> {
   let arguments = (ins Solidity_AnyType:$blockNumber);
   let results = (outs Solidity_BytesType:$result);
   let assemblyFormat = "$blockNumber attr-dict `:` type($blockNumber) `->` type($result)";
+}
+
+def Solidity_BlobHashOp : Solidity_Op<"blobhash", [Pure]> {
+  let summary = "Get transaction blob hash";
+  let description = [{
+    Returns the versioned hash of the requested transaction blob, or zero when
+    the index is outside the transaction's blob list.
+  }];
+  let arguments = (ins Solidity_AnyType:$index);
+  let results = (outs Solidity_BytesType:$result);
+  let assemblyFormat = "$index attr-dict `:` type($index) `->` type($result)";
 }
 
 // Hash functions
@@ -812,7 +954,7 @@ def Solidity_MsgDataOp : Solidity_Op<"msg_data", [Pure]> {
   let description = [{
     Returns the complete calldata (msg.data).
   }];
-  let results = (outs Solidity_ArrayType:$result);
+	let results = (outs Solidity_DynamicBytesType:$result);
   let assemblyFormat = "attr-dict `:` type($result)";
 }
 
@@ -896,6 +1038,19 @@ def Solidity_AbiEncodePackedOp : Solidity_Op<"abi_encode_packed", [Pure]> {
   let summary = "ABI encode packed arguments";
   let description = [{
     ABI-encodes the given arguments with tight packing. Equivalent to abi.encodePacked(...).
+  }];
+  let arguments = (ins Variadic<Solidity_AnyType>:$args);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "`(` $args `)` attr-dict `:` functional-type($args, $result)";
+}
+
+def Solidity_ConcatOp : Solidity_Op<"concat", [Pure]> {
+  let summary = "Concatenate string or bytes values";
+  let description = [{
+    Concatenates the byte-exact contents of string.concat(...) or
+    bytes.concat(...) into a fresh dynamic memory value. Dynamic arguments do
+    not include their length word, while bytesN arguments contribute exactly N
+    bytes in their left-aligned representation.
   }];
   let arguments = (ins Variadic<Solidity_AnyType>:$args);
   let results = (outs Solidity_AnyType:$result);
@@ -1013,12 +1168,14 @@ def Solidity_TransferOp : Solidity_Op<"transfer"> {
 def Solidity_LowLevelCallOp : Solidity_Op<"low_level_call"> {
   let summary = "Low-level call to address";
   let description = [{
-    Performs a low-level call to the given address with the specified value.
-    Returns a boolean indicating success. Equivalent to addr.call{value: amount}("").
+    Performs call, staticcall, or delegatecall with a dynamic bytes payload.
+    Returns Solidity's complete (success, returndata) pair without reverting on
+    callee failure.
   }];
-  let arguments = (ins Solidity_AddressType:$to, Solidity_AnyType:$value);
-  let results = (outs Solidity_BoolType:$success);
-  let assemblyFormat = "$to `,` $value attr-dict `:` type($to) `,` type($value)";
+  let arguments = (ins Solidity_AnyType:$to, Solidity_AnyType:$value,
+                       Solidity_AnyType:$data, StrAttr:$kind);
+  let results = (outs Solidity_BoolType:$success, Solidity_DynamicBytesType:$returndata);
+  let assemblyFormat = "$kind $to `,` $value `,` $data attr-dict `:` type($to) `,` type($value) `,` type($data) `->` type($success) `,` type($returndata)";
 }
 
 def Solidity_ExternalFunctionCallOp : Solidity_Op<"external_call"> {
@@ -1029,13 +1186,21 @@ def Solidity_ExternalFunctionCallOp : Solidity_Op<"external_call"> {
     checks success, and ABI-decodes return values.
   }];
   let arguments = (ins
-    Solidity_AnyType:$target,
-    I32Attr:$selector,
-    StrAttr:$signature,
-    Variadic<Solidity_AnyType>:$args
-  );
-  let results = (outs Variadic<Solidity_AnyType>:$results);
-  let assemblyFormat = "$target `(` $args `)` `selector` $selector `signature` $signature attr-dict `:` functional-type(operands, $results)";
+	Solidity_AnyType:$target,
+	I32Attr:$selector,
+	StrAttr:$signature,
+	BoolAttr:$is_static,
+	Variadic<Solidity_AnyType>:$args
+	);
+	let results = (outs Variadic<Solidity_AnyType>:$results);
+	let assemblyFormat = "$target `(` $args `)` `selector` $selector `signature` $signature `static` $is_static attr-dict `:` functional-type(operands, $results)";
+}
+
+def Solidity_ExternalFunctionRefOp : Solidity_Op<"external_function_ref", [Pure]> {
+  let summary = "Pack an external function address and selector into a value";
+  let arguments = (ins Solidity_AnyType:$target, I32Attr:$selector);
+  let results = (outs Solidity_AnyType:$result);
+  let assemblyFormat = "$target `selector` $selector attr-dict `:` type($target) `->` type($result)";
 }
 
 def Solidity_InlineAssemblyOp : Solidity_Op<"inline_assembly"> {

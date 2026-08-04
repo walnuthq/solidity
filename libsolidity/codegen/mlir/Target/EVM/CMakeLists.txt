@@ -15,6 +15,7 @@ if(MLIR_FOUND)
         YulASTImport
         YulToEVMConversion
         EVMMLIRDialect
+        MLIRAnalysis
         MLIRArithDialect
         MLIRControlFlowDialect
         MLIRFuncDialect

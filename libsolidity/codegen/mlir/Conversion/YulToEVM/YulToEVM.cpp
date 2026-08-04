@@ -56,12 +56,19 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/CallInterfaces.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Transforms/InliningUtils.h"
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/Inliner.h"
 #pragma GCC diagnostic pop
 
+#include <cstdlib>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -192,6 +199,8 @@ public:
 		}
 		if (failed(mlir::verify(*dst)))
 		{
+			if (std::getenv("SOL_MLIR_DUMP_INVALID"))
+				dst->print(llvm::errs());
 			_error = "converted module failed MLIR verification";
 			return nullptr;
 		}
@@ -641,6 +650,113 @@ private:
 	}
 };
 
+/// Inline single-use helpers and tiny helpers with at most three call sites.
+///
+/// This backend's outlined calling convention materializes a static frame,
+/// copies every argument/result through memory, and performs two jumps. When a
+/// helper has only one caller, keeping both that machinery and a separate copy
+/// of the body cannot reduce bytecode. Helpers with no more than two nontrivial
+/// operations also remain profitable at up to three sites. The unrestricted
+/// upstream inliner is deliberately too aggressive for solc-generated Yul, so
+/// these bounds are the backend-specific cost model.
+void inlineSingleUseFunctions(mlir::ModuleOp _module)
+{
+	for (;;)
+	{
+		std::map<std::string, mlir::func::FuncOp> functions;
+		std::map<std::string, std::vector<mlir::func::CallOp>> calls;
+		std::map<std::string, std::vector<std::string>> callees;
+		std::map<std::string, unsigned> nontrivialOpCounts;
+		std::set<std::string> functionsWithMachineTerminators;
+		for (mlir::func::FuncOp func: _module.getOps<mlir::func::FuncOp>())
+		{
+			std::string const functionName = func.getName().str();
+			functions.emplace(functionName, func);
+			func.walk([&](mlir::Operation* op) {
+				if (!llvm::isa<mlir::arith::ConstantOp, mlir::func::ReturnOp>(op))
+					++nontrivialOpCounts[functionName];
+				if (op->getDialect() && op->getDialect()->getNamespace() == "evm"
+					&& op->hasTrait<mlir::OpTrait::IsTerminator>())
+					functionsWithMachineTerminators.insert(functionName);
+				if (auto call = llvm::dyn_cast<mlir::func::CallOp>(op))
+				{
+					std::string const callee = call.getCallee().str();
+					calls[callee].push_back(call);
+					callees[functionName].push_back(callee);
+				}
+			});
+		}
+
+		auto reaches = [&](std::string const& from, std::string const& target) {
+			std::set<std::string> seen;
+			std::vector<std::string> worklist = callees[from];
+			while (!worklist.empty())
+			{
+				std::string current = std::move(worklist.back());
+				worklist.pop_back();
+				if (current == target)
+					return true;
+				if (!seen.insert(current).second)
+					continue;
+				for (std::string const& callee: callees[current])
+					worklist.push_back(callee);
+			}
+			return false;
+		};
+
+		mlir::func::CallOp candidate;
+		mlir::func::FuncOp callee;
+		bool eraseCallee = false;
+		for (auto const& [name, sites]: calls)
+		{
+			if (sites.empty() || sites.size() > 3)
+				continue;
+			auto found = functions.find(name);
+			if (found == functions.end() || found->second.getName() == "__entry")
+				continue;
+			if (sites.size() > 1 && nontrivialOpCounts[name] > 2)
+				continue;
+			if (functionsWithMachineTerminators.count(name))
+				continue;
+			mlir::func::FuncOp caller = sites.front()->getParentOfType<mlir::func::FuncOp>();
+			if (!caller || reaches(name, name) || reaches(name, caller.getName().str()))
+				continue;
+			candidate = sites.front();
+			callee = found->second;
+			eraseCallee = sites.size() == 1;
+			break;
+		}
+		if (!candidate)
+			return;
+
+		mlir::InlinerInterface interface(_module.getContext());
+		auto cloneCallback = [](
+			mlir::OpBuilder&,
+			mlir::Region* source,
+			mlir::Block* inlineBlock,
+			mlir::Block* postInsertBlock,
+			mlir::IRMapping& mapping,
+			bool clone) {
+			mlir::Region* destination = inlineBlock->getParent();
+			if (clone)
+				source->cloneInto(destination, postInsertBlock->getIterator(), mapping);
+			else
+				destination->getBlocks().splice(
+					postInsertBlock->getIterator(), source->getBlocks(), source->begin(), source->end());
+		};
+		if (mlir::failed(mlir::inlineCall(
+			interface,
+			cloneCallback,
+			mlir::CallOpInterface(candidate.getOperation()),
+			mlir::CallableOpInterface(callee.getOperation()),
+			&callee.getBody())))
+			return;
+		candidate.erase();
+		if (eraseCallee)
+			callee.erase();
+	}
+}
+
 } // anonymous namespace
 
 mlir::OwningOpRef<mlir::ModuleOp> solidity::mlirgen::convertYulToEVM(mlir::ModuleOp _module, std::string& _error)
@@ -668,12 +784,8 @@ mlir::OwningOpRef<mlir::ModuleOp> solidity::mlirgen::convertYulToEVM(mlir::Modul
 	// arriving from solc is already optimized, so this is about what the
 	// conversion itself introduced rather than a replacement for that.
 	mlir::PassManager manager(&ctx);
-	// Inlining is available - the evm dialect declares the interface and the
-	// func extension is registered above - but deliberately not run. A call is
-	// expensive here, yet the input has already been through solc's inliner,
-	// and inlining again on upstream's default threshold grew the semantic
-	// suite by a quarter, from 4177690 bytes to 5202861. Enabling it needs a
-	// cost model of this backend's own, not just the pass.
+	inlineSingleUseFunctions(*converted);
+	manager.addPass(mlir::createSymbolDCEPass());
 	manager.addPass(mlir::createCanonicalizerPass());
 	manager.addPass(mlir::createCSEPass());
 	if (mlir::failed(manager.run(*converted)))
@@ -681,5 +793,7 @@ mlir::OwningOpRef<mlir::ModuleOp> solidity::mlirgen::convertYulToEVM(mlir::Modul
 		_error = "optimization of the converted module failed";
 		return nullptr;
 	}
+	if (std::getenv("SOL_MLIR_DUMP_EVM"))
+		converted->print(llvm::errs());
 	return converted;
 }

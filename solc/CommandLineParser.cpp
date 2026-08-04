@@ -754,7 +754,7 @@ General Information)").c_str(),
 		(CompilerOutputs::componentName(&CompilerOutputs::irAstJson).c_str(), "(experimental) AST of Intermediate Representation (IR) of all contracts in a compact JSON format.")
 		(CompilerOutputs::componentName(&CompilerOutputs::irOptimized).c_str(), "Optimized Intermediate Representation (IR) of all contracts.")
 		(CompilerOutputs::componentName(&CompilerOutputs::irOptimizedAstJson).c_str(), "(experimental) AST of optimized Intermediate Representation (IR) of all contracts in a compact JSON format.")
-		(CompilerOutputs::componentName(&CompilerOutputs::mlirBinary).c_str(), "(experimental) Creation bytecode produced by the MLIR dialect ladder (yul -> evm -> EVM assembly) instead of the legacy backend. Requires --via-ir and an MLIR-enabled build.")
+		(CompilerOutputs::componentName(&CompilerOutputs::mlirBinary).c_str(), "(experimental) Creation bytecode produced directly from the Solidity AST by the full MLIR dialect ladder (sol -> yul -> evm -> EVM assembly). Requires an MLIR-enabled build.")
 		(CompilerOutputs::componentName(&CompilerOutputs::signatureHashes).c_str(), "Function signature hashes of the contracts.")
 		(CompilerOutputs::componentName(&CompilerOutputs::natspecUser).c_str(), "Natspec user documentation of all contracts.")
 		(CompilerOutputs::componentName(&CompilerOutputs::natspecDev).c_str(), "Natspec developer documentation of all contracts.")

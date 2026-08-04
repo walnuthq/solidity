@@ -12,6 +12,9 @@ config.name = "solc-mlir"
 config.test_format = lit.formats.ShTest(True)
 config.suffixes = [".sol", ".yul", ".mlir"]
 config.test_source_root = os.path.dirname(__file__)
+config.test_exec_root = os.environ.get(
+    "MLIR_LIT_OUTPUT_DIR", os.path.join(config.test_source_root, "Output")
+)
 
 tools = os.environ.get("MLIR_TOOL_DIR", "")
 filecheck = os.environ.get("FILECHECK", "FileCheck")

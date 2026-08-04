@@ -317,6 +317,15 @@ frontend::OptimiserSettings SemanticTest::optimizerSettingsFor(RequiresYulOptimi
 TestCase::TestResult SemanticTest::run(std::ostream& _stream, std::string const& _linePrefix, bool _formatted)
 {
 	TestResult result = TestResult::Success;
+	if (solidity::test::CommonOptions::get().useMLIR)
+	{
+		AnsiColorized(_stream, _formatted, {BOLD, CYAN}) << _linePrefix << "Running via MLIR: " << std::endl;
+		// Most cases exercise solc's production Solidity-to-Yul front end before
+		// entering MLIR. Tests explicitly marked compileViaYul:false retain the
+		// legacy code generator's observable compatibility semantics through the
+		// direct Solidity-AST -> sol dialect route.
+		return runTest(_stream, _linePrefix, _formatted, m_testCaseWantsYulRun);
+	}
 
 	if (m_testCaseWantsLegacyRun)
 		result = runTest(_stream, _linePrefix, _formatted, false /* _isYulRun */);
@@ -581,6 +590,12 @@ TestCase::TestResult SemanticTest::tryRunTestWithYulOptimizer(
 
 bool SemanticTest::checkGasCostExpectation(TestFunctionCall& io_test, bool _compileViaYul) const
 {
+	// The semantic expectations currently record gas only for the legacy, IR,
+	// and SSA-CFG backends. MLIR mode checks return data, failure status,
+	// storage-dependent call sequences and side effects, but has no historical
+	// gas baseline to compare against yet.
+	if (solidity::test::CommonOptions::get().useMLIR)
+		return true;
 	std::string setting = m_isSSACFGRun
 		? (m_optimiserSettings == OptimiserSettings::full() ? "ssaCFGOptimized"s : "ssaCFG"s)
 		: (_compileViaYul ? "ir"s : "legacy"s) +

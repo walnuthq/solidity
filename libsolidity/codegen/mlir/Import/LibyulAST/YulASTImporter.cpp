@@ -294,7 +294,11 @@ private:
 		for (size_t i = _call.arguments.size(); i > 0; --i)
 			args[i - 1] = importExpression(_call.arguments[i - 1]);
 
-		std::string opName = "yul." + name;
+		// Opcode 0x44 was named difficulty before Paris and prevrandao after
+		// Paris. The MLIR dialect uses the current spelling for the shared
+		// operation, while libyul deliberately exposes the versioned spelling.
+		std::string const dialectName = name == "difficulty" ? "prevrandao" : name;
+		std::string opName = "yul." + dialectName;
 		std::optional<mlir::RegisteredOperationName> registered =
 			mlir::RegisteredOperationName::lookup(opName, m_builder.getContext());
 		if (!registered)
@@ -626,9 +630,16 @@ solidity::mlirgen::importYulAST(yul::AST const& _ast, mlir::MLIRContext& _contex
 }
 
 mlir::OwningOpRef<mlir::ModuleOp> solidity::mlirgen::importYulSource(
-	std::string const& _sourceName, std::string const& _source, mlir::MLIRContext& _context, std::string& _error)
+	std::string const& _sourceName,
+	std::string const& _source,
+	mlir::MLIRContext& _context,
+	std::string& _error,
+	langutil::EVMVersion _evmVersion)
 {
-	yul::YulStack stack;
+	yul::YulStack stack(
+		_evmVersion,
+		frontend::OptimiserSettings::none(),
+		langutil::DebugInfoSelection::Default());
 	if (!stack.parseAndAnalyze(_sourceName, _source))
 	{
 		_error = "libyul failed to parse/analyze the source";
@@ -693,11 +704,18 @@ size_t collectObjects(
 } // anonymous namespace
 
 std::vector<solidity::mlirgen::ImportedObject> solidity::mlirgen::importYulObjects(
-	std::string const& _sourceName, std::string const& _source, mlir::MLIRContext& _context, std::string& _parseError)
+	std::string const& _sourceName,
+	std::string const& _source,
+	mlir::MLIRContext& _context,
+	std::string& _parseError,
+	langutil::EVMVersion _evmVersion)
 {
 	std::vector<ImportedObject> results;
 
-	yul::YulStack stack;
+	yul::YulStack stack(
+		_evmVersion,
+		frontend::OptimiserSettings::none(),
+		langutil::DebugInfoSelection::Default());
 	if (!stack.parseAndAnalyze(_sourceName, _source))
 	{
 		_parseError = "libyul failed to parse/analyze the source";

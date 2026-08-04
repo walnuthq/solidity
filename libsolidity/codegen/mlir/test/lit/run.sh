@@ -10,5 +10,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../../../../.." && pwd)"
 export MLIR_TOOL_DIR="${MLIR_TOOL_DIR:-$root/build/libsolidity/codegen/mlir/tools}"
 export FILECHECK="${FILECHECK:-$(command -v FileCheck || echo /opt/homebrew/opt/llvm/bin/FileCheck)}"
+export MLIR_LIT_OUTPUT_DIR="${MLIR_LIT_OUTPUT_DIR:-$(dirname "$MLIR_TOOL_DIR")/test/lit}"
+mkdir -p "$MLIR_LIT_OUTPUT_DIR"
 
 exec python3 -c "from lit.main import main; main()" "$@" "$(dirname "$0")"

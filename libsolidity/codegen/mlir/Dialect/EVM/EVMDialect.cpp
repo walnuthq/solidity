@@ -26,6 +26,7 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wsign-conversion"
 #pragma GCC diagnostic ignored "-Wconversion"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/Transforms/InliningUtils.h"
@@ -52,16 +53,19 @@ struct EVMInlinerInterface: public DialectInlinerInterface
 {
 	using DialectInlinerInterface::DialectInlinerInterface;
 
-	bool isLegalToInline(Operation*, Region*, bool, IRMapping&) const final { return true; }
+	bool isLegalToInline(Operation* op, Region*, bool, IRMapping&) const final
+	{
+		// EVM terminators halt the whole machine rather than return to the
+		// enclosing func region. The generic inliner consumes region
+		// terminators while wiring a continuation, which would turn a return or
+		// revert into fallthrough.
+		return !op->hasTrait<OpTrait::IsTerminator>();
+	}
 	bool isLegalToInline(Region*, Region*, bool, IRMapping&) const final { return true; }
 	bool isLegalToInline(Operation*, Operation*, bool) const final { return true; }
 
-	// Every terminator this dialect defines halts execution outright - stop,
-	// return, revert, invalid, selfdestruct. None of them returns to a caller,
-	// so an inlined copy needs neither a branch to the continuation nor values
-	// to hand back, and both hooks are deliberately empty. The base class
-	// declares them unreachable, which is what a function containing a `revert`
-	// used to trip over.
+	// These are defensive: the legality hook above rejects regions containing
+	// EVM terminators before either callback can be reached.
 	void handleTerminator(Operation*, Block*) const final {}
 	void handleTerminator(Operation*, ValueRange) const final {}
 };
@@ -75,4 +79,13 @@ void EVMDialect::initialize()
 #include "EVMOps.cpp.inc"
 		>();
 	addInterfaces<EVMInlinerInterface>();
+}
+
+mlir::Operation* EVMDialect::materializeConstant(
+	mlir::OpBuilder& _builder, mlir::Attribute _value, mlir::Type _type, mlir::Location _loc)
+{
+	auto integer = llvm::dyn_cast<mlir::IntegerAttr>(_value);
+	if (!integer || !_type.isSignlessInteger(256))
+		return nullptr;
+	return _builder.create<mlir::arith::ConstantOp>(_loc, _type, integer);
 }

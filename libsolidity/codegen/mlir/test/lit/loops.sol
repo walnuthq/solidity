@@ -16,6 +16,15 @@ contract Loops {
     function branch(bool c) external pure returns (uint256 x) {
         if (c) x = 1; else x = 2;
     }
+
+    // The literal initializer and increment remain uint8 at the declaration
+    // boundary, so the SCF region argument and yield have identical types.
+    function narrow() external pure returns (uint8) {
+        uint8 total = 0;
+        for (uint8 i = 0; i < 4; i++)
+            total += i;
+        return total;
+    }
 }
 
 // The two dialects disagree about where a loop's state lives. `scf.while`
@@ -53,3 +62,6 @@ contract Loops {
 // CHECK: yul.if
 // CHECK: yul.assign
 // CHECK: yul.var_load
+
+// CHECK-LABEL: sym_name = "Loops.narrow"
+// CHECK: yul.for

@@ -33,6 +33,7 @@
 #include "mlir/IR/OwningOpRef.h"
 #pragma GCC diagnostic pop
 
+#include <liblangutil/EVMVersion.h>
 #include <libsolutil/Common.h>
 
 #include <cstddef>
@@ -55,7 +56,11 @@ importYulAST(solidity::yul::AST const& _ast, mlir::MLIRContext& _context, std::s
 /// Convenience wrapper: parses and analyzes _source with libyul (strict
 /// assembly), then imports the resulting AST.
 mlir::OwningOpRef<mlir::ModuleOp> importYulSource(
-	std::string const& _sourceName, std::string const& _source, mlir::MLIRContext& _context, std::string& _error);
+	std::string const& _sourceName,
+	std::string const& _source,
+	mlir::MLIRContext& _context,
+	std::string& _error,
+	langutil::EVMVersion _evmVersion = {});
 
 /// A `data` segment of an object, addressable by `dataoffset`/`datasize`.
 struct ImportedDataSegment
@@ -81,7 +86,11 @@ struct ImportedObject
 /// the entry point for real-world via-ir output. On parse failure returns an
 /// empty vector and sets _parseError.
 std::vector<ImportedObject> importYulObjects(
-	std::string const& _sourceName, std::string const& _source, mlir::MLIRContext& _context, std::string& _parseError);
+	std::string const& _sourceName,
+	std::string const& _source,
+	mlir::MLIRContext& _context,
+	std::string& _parseError,
+	langutil::EVMVersion _evmVersion = {});
 
 } // namespace solidity::mlirgen
 

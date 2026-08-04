@@ -26,6 +26,7 @@
 #pragma GCC diagnostic ignored "-Wconversion"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/SmallString.h"
+#include "mlir/Analysis/Liveness.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -71,6 +72,7 @@ constexpr uint64_t kMaxUnrolledFrameWords = 64;
 
 /// Where solc's free memory area begins; below it is scratch and the free
 /// memory pointer.
+constexpr uint64_t kFreeMemoryPointer = 0x40;
 constexpr uint64_t kFreeMemoryStart = 0x80;
 
 /// How many slots the stack cache may hold. Past DUP16 a value is out of reach
@@ -94,6 +96,10 @@ struct Frame
 	std::vector<uint64_t> argSlots;
 	std::vector<uint64_t> resultSlots;
 	llvm::DenseMap<mlir::Value, uint64_t> valueSlots;
+	/// Slots whose values can survive across an edge that may re-enter this
+	/// function. Pre-MCOPY targets save this compact set instead of every SSA
+	/// temporary the function ever produced.
+	std::vector<uint64_t> recursiveSaveSlots;
 };
 
 class Emitter
@@ -181,10 +187,9 @@ private:
 	/// call into one of those has its frame saved and restored around the call.
 	void findRecursion()
 	{
-		std::map<std::string, std::vector<std::string>> callees;
 		for (mlir::func::FuncOp func: m_functions)
 		{
-			std::vector<std::string>& out = callees[func.getName().str()];
+			std::vector<std::string>& out = m_callees[func.getName().str()];
 			func.walk([&](mlir::func::CallOp _call) { out.push_back(_call.getCallee().str()); });
 		}
 
@@ -193,7 +198,7 @@ private:
 		{
 			std::string const start = func.getName().str();
 			std::set<std::string> seen;
-			std::vector<std::string> worklist = callees[start];
+			std::vector<std::string> worklist = m_callees[start];
 			while (!worklist.empty())
 			{
 				std::string const current = worklist.back();
@@ -205,9 +210,59 @@ private:
 				}
 				if (!m_byName.count(current) || !seen.insert(current).second)
 					continue;
-				for (std::string const& next: callees[current])
+				for (std::string const& next: m_callees[current])
 					worklist.push_back(next);
 			}
+		}
+	}
+
+	bool reaches(std::string const& _start, std::string const& _target) const
+	{
+		std::set<std::string> seen;
+		std::vector<std::string> worklist{_start};
+		while (!worklist.empty())
+		{
+			std::string const current = worklist.back();
+			worklist.pop_back();
+			if (current == _target)
+				return true;
+			if (!seen.insert(current).second)
+				continue;
+			auto const found = m_callees.find(current);
+			if (found != m_callees.end())
+				for (std::string const& next: found->second)
+					worklist.push_back(next);
+		}
+		return false;
+	}
+
+	/// A recursive activation only needs the values that remain live after the
+	/// call edge which can eventually re-enter it. Saving every assigned slot
+	/// made one 813-op math helper require MCOPY even though only a small live
+	/// frontier crosses its self-call.
+	void layoutRecursiveSaves()
+	{
+		for (mlir::func::FuncOp func: m_functions)
+		{
+			std::string const name = func.getName().str();
+			if (!m_recursive.count(name))
+				continue;
+
+			mlir::Liveness liveness(func);
+			std::set<uint64_t> slots;
+			func.walk([&](mlir::func::CallOp call) {
+				if (!reaches(call.getCallee().str(), name))
+					return;
+				Frame const& frame = m_frames.at(name);
+				for (auto const& [value, slot]: frame.valueSlots)
+				{
+					if (llvm::is_contained(call.getResults(), value))
+						continue;
+					if (!liveness.isDeadAfter(value, call))
+						slots.insert(slot);
+				}
+			});
+			m_frames.at(name).recursiveSaveSlots.assign(slots.begin(), slots.end());
 		}
 	}
 
@@ -269,7 +324,36 @@ private:
 		// frames still have to go somewhere cheap: a fallback that only has to
 		// answer within the 2300 gas a `send` forwards cannot afford to expand
 		// memory out to a fixed high address first.
-		m_frameBase = objectIgnoresMemory() ? kFreeMemoryStart : m_options.frameBase;
+		if (objectIgnoresMemory())
+		{
+			m_frameBase = kFreeMemoryStart;
+			return;
+		}
+		static std::set<std::string> const observesFrameCostOrCodeSize = {
+			"call", "callcode", "delegatecall", "staticcall", "codesize"};
+		bool requiresLowFrames = false;
+		for (mlir::func::FuncOp func: m_functions)
+			func.walk([&](mlir::Operation* op) {
+				if (op->getDialect() && op->getDialect()->getNamespace() == "evm"
+					&& observesFrameCostOrCodeSize.count(op->getName().stripDialect().str()))
+					requiresLowFrames = true;
+			});
+		if (!requiresLowFrames)
+		{
+			// Inline assembly without memoryguard may expose exact Solidity
+			// pointers, so moving the heap is observable. A one-megabyte frame
+			// origin preserves the canonical heap while staying above the large
+			// allocation corpus. Objects that observe code size or forward a gas
+			// stipend retain the compact relocated layout below.
+			m_frameBase = 0x100000;
+			return;
+		}
+		// A fixed high address is not a reservation: a sufficiently large
+		// Solidity allocation eventually reaches it and overwrites live SSA
+		// frames. Put the frames at the normal heap origin and move the standard
+		// free-memory initialization past them instead.
+		m_frameBase = kFreeMemoryStart;
+		m_relocatedFrames = true;
 	}
 
 	void layoutFrames()
@@ -312,6 +396,7 @@ private:
 			next += slot * kWord;
 			m_frames[func.getName().str()] = std::move(frame);
 		}
+		layoutRecursiveSaves();
 
 		// Saved frames of recursive activations grow upwards from just past the
 		// static frames, addressed through one pointer word.
@@ -436,6 +521,34 @@ private:
 			op(Instruction::POP);
 	}
 
+	/// Drops every cached word below the stack top while preserving that top
+	/// word. This lets a one-use result cross into a call or terminator without
+	/// the store/reload pair that a full cache flush would otherwise require.
+	void flushStackBelowTop()
+	{
+		if (m_stack.empty())
+			fail("cannot preserve the top of an empty stack");
+		while (m_stack.size() > 1)
+		{
+			emitSwap(1);
+			op(Instruction::POP);
+		}
+	}
+
+	bool consumeResidentAtBoundary(mlir::Value _value)
+	{
+		if (!m_stackResident)
+		{
+			flushStack();
+			return false;
+		}
+		if (m_stackResident != _value || m_stack.empty() || m_stack.back() != _value)
+			fail("unexpected stack-resident value at control-flow boundary");
+		m_stackResident = nullptr;
+		flushStackBelowTop();
+		return true;
+	}
+
 	/// Assembly tracks one net stack height across the whole item stream, which
 	/// only describes straight-line code: a function's return JUMP consumes an
 	/// address pushed by a caller that is somewhere else entirely in the
@@ -521,10 +634,16 @@ private:
 		if (!_result.hasOneUse())
 			return false;
 		mlir::Operation* user = *_result.getUsers().begin();
-		if (user != _definition.getNextNode() || !takesPlainOperands(*user))
+		if (user != _definition.getNextNode())
 			return false;
 		std::optional<unsigned> const index = operandIndex(*user, _result);
 		if (!index)
+			return false;
+		if (llvm::isa<mlir::func::CallOp, mlir::func::ReturnOp, mlir::cf::BranchOp>(user))
+			return true;
+		if (auto branch = llvm::dyn_cast<mlir::cf::CondBranchOp>(user))
+			return branch.getCondition() == _result && branch.getTrueDest() != branch.getFalseDest();
+		if (!takesPlainOperands(*user))
 			return false;
 		unsigned const count = user->getNumOperands();
 		return *index + 1 == count || (count == 2 && *index == 0);
@@ -570,6 +689,38 @@ private:
 
 		for (int i = count - 1; i >= 0; --i)
 			pushValue(_op.getOperand(static_cast<unsigned>(i)));
+	}
+
+	/// Before EIP-150 a CALL that asks for more gas than remains fails instead
+	/// of being capped. solc therefore emits `sub(gas(), reserve)` immediately
+	/// before the call. Spilling that SSA result into a frame and then loading
+	/// six other operands spends more than the reserve and turns every otherwise
+	/// valid Homestead external call into an out-of-gas failure. Recognize that
+	/// exact compiler idiom and rematerialize it after the other operands.
+	bool pushLegacyCallOperands(mlir::Operation& _op, llvm::StringRef _mnemonic)
+	{
+		if (m_options.evmVersion.canOverchargeGasForCall()
+			|| (_mnemonic != "call" && _mnemonic != "callcode" && _mnemonic != "delegatecall"))
+			return false;
+		if (_op.getNumOperands() < 1)
+			return false;
+
+		auto subtraction = _op.getOperand(0).getDefiningOp<mlir::arith::SubIOp>();
+		if (!subtraction || !subtraction.getLhs().getDefiningOp())
+			return false;
+		std::string producer = subtraction.getLhs().getDefiningOp()->getName().stripDialect().str();
+		if (producer != "gas")
+			return false;
+		std::optional<llvm::APInt> reserve = constantOf(subtraction.getRhs());
+		if (!reserve)
+			return false;
+
+		for (int i = static_cast<int>(_op.getNumOperands()) - 1; i >= 1; --i)
+			pushValue(_op.getOperand(static_cast<unsigned>(i)));
+		push(toU256(*reserve));
+		op(Instruction::GAS);
+		op(Instruction::SUB);
+		return true;
 	}
 
 	/// Commits the single result now on the stack: either kept there for the
@@ -650,6 +801,41 @@ private:
 				op(Instruction::ADD);
 				op(Instruction::MLOAD);            // value
 				push(u256(_frameAddress + offset)); // destination
+			}
+			op(Instruction::MSTORE);
+		}
+	}
+
+	/// Scatter/gather the live recursive frontier into a compact save record.
+	/// The generated sequence is deliberately bounded on targets without
+	/// MCOPY; newer targets retain the single-op full-frame copy above.
+	void copyFrameSlots(Frame const& _frame, bool _toSaveArea)
+	{
+		if (_frame.recursiveSaveSlots.size() > kMaxUnrolledFrameWords)
+			fail(
+				"recursive function needs a " + std::to_string(_frame.recursiveSaveSlots.size())
+				+ "-word live frame copy, which requires an EVM version with MCOPY");
+		for (auto const& [index, slot]: llvm::enumerate(_frame.recursiveSaveSlots))
+		{
+			uint64_t const saveOffset = static_cast<uint64_t>(index) * kWord;
+			uint64_t const frameAddress = _frame.base + slot * kWord;
+			if (_toSaveArea)
+			{
+				push(u256(frameAddress));
+				op(Instruction::MLOAD);
+				push(u256(saveOffset));
+				push(u256(m_savePointer));
+				op(Instruction::MLOAD);
+				op(Instruction::ADD);
+			}
+			else
+			{
+				push(u256(saveOffset));
+				push(u256(m_savePointer));
+				op(Instruction::MLOAD);
+				op(Instruction::ADD);
+				op(Instruction::MLOAD);
+				push(u256(frameAddress));
 			}
 			op(Instruction::MSTORE);
 		}
@@ -901,6 +1087,25 @@ private:
 	{
 		std::string mnemonic = _op.getName().stripDialect().str();
 
+		// Without memoryguard, solc initializes mload(0x40) to 0x80 directly.
+		// When frames reserve that prefix, make the allocator start immediately
+		// after them. Restrict this to the entry function's canonical initializer
+		// so an explicit assembly mstore(0x40, 0x80) elsewhere keeps its meaning.
+		if (mnemonic == "mstore" && m_relocatedFrames && isEntry(m_currentFunc)
+			&& _op.getNumOperands() == 2)
+		{
+			auto offset = constantOf(_op.getOperand(0));
+			auto value = constantOf(_op.getOperand(1));
+			if (offset && value && *offset == kFreeMemoryPointer && *value == kFreeMemoryStart)
+			{
+				flushStack();
+				push(u256(m_heapBase));
+				push(u256(kFreeMemoryPointer));
+				op(Instruction::MSTORE);
+				return;
+			}
+		}
+
 		if (mnemonic == "dataoffset" || mnemonic == "datasize")
 			return emitSegmentQuery(_op, mnemonic == "datasize");
 		if (mnemonic == "memoryguard")
@@ -949,7 +1154,8 @@ private:
 		if (it == c_instructions.end())
 			fail("no EVM opcode named '" + name + "' for op 'evm." + mnemonic + "'");
 
-		pushOperands(_op);
+		if (!pushLegacyCallOperands(_op, mnemonic))
+			pushOperands(_op);
 		op(it->second);
 
 		if (_op.getNumResults() == 1)
@@ -963,14 +1169,19 @@ private:
 	/// Every operand is read onto the stack before any slot is written. A
 	/// branch back to its own block passes the block's arguments as operands,
 	/// so storing eagerly would clobber a value a later operand still needs.
-	void passBlockArguments(std::vector<std::pair<mlir::Block*, mlir::ValueRange>> const& _edges)
+	void passBlockArguments(
+		mlir::Block* _target,
+		mlir::ValueRange _operands,
+		std::optional<unsigned> _residentOperand = std::nullopt)
 	{
 		std::vector<uint64_t> destinations;
-		for (auto const& [target, operands]: _edges)
-			for (unsigned i = 0; i < operands.size(); ++i)
+		if (_residentOperand)
+			destinations.push_back(addressOf(_target->getArgument(*_residentOperand)));
+		for (unsigned i = 0; i < _operands.size(); ++i)
+			if (!_residentOperand || i != *_residentOperand)
 			{
-				pushValue(operands[i]);
-				destinations.push_back(addressOf(target->getArgument(i)));
+				pushValue(_operands[i]);
+				destinations.push_back(addressOf(_target->getArgument(i)));
 			}
 		// The last value pushed is on top, so unwind in reverse.
 		for (size_t i = destinations.size(); i > 0; --i)
@@ -979,8 +1190,17 @@ private:
 
 	void emitBranch(mlir::cf::BranchOp _branch)
 	{
-		flushStack();
-		passBlockArguments({{_branch.getDest(), _branch.getDestOperands()}});
+		std::optional<unsigned> residentOperand;
+		if (m_stackResident)
+		{
+			residentOperand = operandIndex(*_branch.getOperation(), m_stackResident);
+			if (!residentOperand)
+				fail("stack-resident value is not a branch operand");
+			consumeResidentAtBoundary(m_stackResident);
+		}
+		else
+			flushStack();
+		passBlockArguments(_branch.getDest(), _branch.getDestOperands(), residentOperand);
 		if (_branch.getDest() == m_next)
 			return; // falls through into the next block
 		m_assembly->appendJump(m_blockTags.at(_branch.getDest()));
@@ -990,7 +1210,7 @@ private:
 	{
 		// JUMPI consumes only the condition, so anything cached underneath it
 		// would survive into the successor, which expects a bare stack.
-		flushStack();
+		bool const residentCondition = consumeResidentAtBoundary(_branch.getCondition());
 
 		// Canonicalization merges the arms of a diamond, which can leave both
 		// edges pointing at one block with different arguments. There is no
@@ -1001,11 +1221,32 @@ private:
 			return;
 		}
 
-		passBlockArguments(
-			{{_branch.getTrueDest(), _branch.getTrueDestOperands()},
-			 {_branch.getFalseDest(), _branch.getFalseDestOperands()}});
+		// Edge arguments are phi copies and therefore belong only to the edge
+		// that is actually taken. Writing both sets eagerly can overwrite the
+		// current block arguments before the condition's false continuation has
+		// consumed them (a nested loop whose true edge jumps back to its header is
+		// the minimal reproducer). Split argument-carrying edges through a local
+		// true-edge tag so each parallel copy executes on its own path.
+		if (!_branch.getTrueDestOperands().empty() || !_branch.getFalseDestOperands().empty())
+		{
+			AssemblyItem trueEdge = m_assembly->newTag();
+			if (!residentCondition)
+				pushValue(_branch.getCondition());
+			m_assembly->appendJumpI(trueEdge);
+			modelPop(1);
 
-		pushValue(_branch.getCondition());
+			passBlockArguments(_branch.getFalseDest(), _branch.getFalseDestOperands());
+			m_assembly->appendJump(m_blockTags.at(_branch.getFalseDest()));
+
+			m_assembly->append(trueEdge);
+			anchorStackHeight();
+			passBlockArguments(_branch.getTrueDest(), _branch.getTrueDestOperands());
+			m_assembly->appendJump(m_blockTags.at(_branch.getTrueDest()));
+			return;
+		}
+
+		if (!residentCondition)
+			pushValue(_branch.getCondition());
 		m_assembly->appendJumpI(m_blockTags.at(_branch.getTrueDest()));
 		modelPop(1); // JUMPI consumed the condition
 		if (_branch.getFalseDest() == m_next)
@@ -1050,7 +1291,16 @@ private:
 		// The callee runs with our stack underneath it and cannot be asked to
 		// preserve a cache it knows nothing about; dropping it here also keeps
 		// the depth of a call chain independent of what each frame had cached.
-		flushStack();
+		std::optional<unsigned> residentArgument;
+		if (m_stackResident)
+		{
+			residentArgument = operandIndex(*_call.getOperation(), m_stackResident);
+			if (!residentArgument)
+				fail("stack-resident value is not a call operand");
+			consumeResidentAtBoundary(m_stackResident);
+		}
+		else
+			flushStack();
 
 		std::string callee = _call.getCallee().str();
 		auto target = m_byName.find(callee);
@@ -1063,19 +1313,33 @@ private:
 
 		// A function that can re-enter itself would overwrite the live frame of
 		// the activation below it, so the caller banks it first.
-		bool const savesFrame = m_recursive.count(callee) != 0 && calleeFrame.size > 0;
+		bool const compactSave = !m_options.evmVersion.hasMcopy();
+		uint64_t const saveWords = compactSave
+			? static_cast<uint64_t>(calleeFrame.recursiveSaveSlots.size())
+			: calleeFrame.size;
+		bool const savesFrame = m_recursive.count(callee) != 0 && saveWords > 0;
 		if (savesFrame)
 		{
-			copyFrame(calleeFrame.base, calleeFrame.size, /*toSaveArea=*/true);
-			adjustSavePointer(calleeFrame.size * kWord, /*grow=*/true);
+			if (compactSave)
+				copyFrameSlots(calleeFrame, /*toSaveArea=*/true);
+			else
+				copyFrame(calleeFrame.base, calleeFrame.size, /*toSaveArea=*/true);
+			adjustSavePointer(saveWords * kWord, /*grow=*/true);
 		}
 
 		// In a self-call the argument slots being written belong to the frame
 		// the arguments are read from, so read every one before writing any.
+		std::vector<uint64_t> argumentDestinations;
+		if (residentArgument)
+			argumentDestinations.push_back(calleeFrame.base + calleeFrame.argSlots[*residentArgument] * kWord);
 		for (unsigned i = 0; i < _call.getNumOperands(); ++i)
-			pushValue(_call.getOperand(i));
-		for (unsigned i = _call.getNumOperands(); i > 0; --i)
-			storeToAddress(calleeFrame.base + calleeFrame.argSlots[i - 1] * kWord);
+			if (!residentArgument || i != *residentArgument)
+			{
+				pushValue(_call.getOperand(i));
+				argumentDestinations.push_back(calleeFrame.base + calleeFrame.argSlots[i] * kWord);
+			}
+		for (size_t i = argumentDestinations.size(); i > 0; --i)
+			storeToAddress(argumentDestinations[i - 1]);
 
 		AssemblyItem returnTag = m_assembly->newTag();
 		m_assembly->append(returnTag.pushTag());
@@ -1095,22 +1359,47 @@ private:
 
 		if (savesFrame)
 		{
-			adjustSavePointer(calleeFrame.size * kWord, /*grow=*/false);
-			copyFrame(calleeFrame.base, calleeFrame.size, /*toSaveArea=*/false);
+			adjustSavePointer(saveWords * kWord, /*grow=*/false);
+			if (compactSave)
+				copyFrameSlots(calleeFrame, /*toSaveArea=*/false);
+			else
+				copyFrame(calleeFrame.base, calleeFrame.size, /*toSaveArea=*/false);
 		}
 
-		for (unsigned i = _call.getNumResults(); i > 0; --i)
-			storeResult(_call.getResult(i - 1));
+		if (_call.getNumResults() == 1 && canStayOnStack(_call.getResult(0), *_call.getOperation()))
+		{
+			m_stack.back() = _call.getResult(0);
+			m_stackResident = _call.getResult(0);
+		}
+		else
+			for (unsigned i = _call.getNumResults(); i > 0; --i)
+				storeResult(_call.getResult(i - 1));
 	}
 
 	void emitReturn(mlir::func::ReturnOp _return)
 	{
-		flushStack();
+		std::optional<unsigned> residentResult;
+		if (m_stackResident)
+		{
+			residentResult = operandIndex(*_return.getOperation(), m_stackResident);
+			if (!residentResult)
+				fail("stack-resident value is not a return operand");
+			consumeResidentAtBoundary(m_stackResident);
+		}
+		else
+			flushStack();
+
+		std::vector<uint64_t> resultDestinations;
+		if (residentResult)
+			resultDestinations.push_back(m_frame->base + m_frame->resultSlots[*residentResult] * kWord);
 		for (unsigned i = 0; i < _return.getNumOperands(); ++i)
+			if (!residentResult || i != *residentResult)
 		{
 			pushValue(_return.getOperand(i));
-			storeToAddress(m_frame->base + m_frame->resultSlots[i] * kWord);
+			resultDestinations.push_back(m_frame->base + m_frame->resultSlots[i] * kWord);
 		}
+		for (size_t i = resultDestinations.size(); i > 0; --i)
+			storeToAddress(resultDestinations[i - 1]);
 
 		// The object entry is not called, so there is no return address to
 		// jump back to - falling off the end of the object code halts.
@@ -1125,6 +1414,7 @@ private:
 	std::vector<mlir::func::FuncOp> m_functions;
 	std::map<std::string, mlir::func::FuncOp> m_byName;
 	std::map<std::string, Frame> m_frames;
+	std::map<std::string, std::vector<std::string>> m_callees;
 	std::map<std::string, AssemblyItem> m_functionTags;
 	std::map<mlir::Block*, AssemblyItem> m_blockTags;
 	std::map<std::string, SubAssemblyID> m_subObjects;

@@ -619,7 +619,7 @@ def Yul_FuncCallOp : Yul_Op<"func_call"> {
 // Structured control flow (ADR-004)
 //===----------------------------------------------------------------------===//
 
-def Yul_IfOp : Yul_Op<"if", [RecursiveMemoryEffects, NoTerminator]> {
+def Yul_IfOp : Yul_Op<"if", [RecursiveMemoryEffects, NoTerminator, SymbolTable]> {
   let summary = "Yul if statement (no else branch, per Yul grammar)";
   let description = [{
     Executes the body when the condition word is non-zero. Yul has no else
@@ -684,6 +684,7 @@ def Yul_LeaveOp : Yul_Op<"leave", [Terminator]> {
 def Yul_FuncOp : Yul_Op<"func", [
     IsolatedFromAbove,
     Symbol,
+    SymbolTable,
     NoTerminator
   ]> {
   let summary = "Yul function definition";

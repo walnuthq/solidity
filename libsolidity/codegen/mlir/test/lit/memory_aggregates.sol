@@ -18,16 +18,27 @@ contract Memory {
         P memory p = P(3, 4);
         return p.b;
     }
+
+    function freshArray() external pure returns (uint256) {
+        uint256[] memory values = new uint256[](3);
+        return values.length + values[1];
+    }
+
+    function freshBytes() external pure returns (bytes32) {
+        bytes memory value = new bytes(3);
+        return keccak256(value);
+    }
 }
 
 // A fixed memory array owns the words it addresses - zero is not a pointer, and
 // leaving one there put the elements over the free memory pointer at 0x40.
-// The four words are written on declaration, `values[2] = 5` writes a fifth
-// time, and `delete` writes four more - rather than yielding a zero and
-// dropping it, which is what made every delete a no-op that looked like it
-// worked.
+// Allocation advances the free-memory pointer into fresh zeroed memory,
+// `values[2] = 5` writes the element, and `delete` writes all four elements -
+// rather than yielding a zero and dropping it, which is what made every delete
+// a no-op that looked like it worked. The bounds-check panic contributes two
+// more stores before the following load.
 // CHECK-LABEL: sym_name = "Memory.fixedArray"
-// CHECK-COUNT-9: yul.mstore
+// CHECK-COUNT-8: yul.mstore
 
 // No length word in front of a fixed array, so the index is scaled straight off
 // the pointer.
@@ -38,3 +49,17 @@ contract Memory {
 // CHECK: yul.mstore
 // CHECK: yul.mstore
 // CHECK: yul.mload
+
+// A dynamic word array owns a length word and one word per element. Fresh EVM
+// memory supplies the zero initialization.
+// CHECK-LABEL: sym_name = "Memory.freshArray"
+// CHECK: yul.mul
+// CHECK: yul.mstore
+// CHECK: yul.mload
+
+// Dynamic bytes use the same length-prefixed shape but round their byte-sized
+// payload up to a whole memory word.
+// CHECK-LABEL: sym_name = "Memory.freshBytes"
+// CHECK: yul.and
+// CHECK: yul.mstore
+// CHECK: yul.keccak256

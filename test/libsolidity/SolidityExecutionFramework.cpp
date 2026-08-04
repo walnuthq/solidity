@@ -29,6 +29,10 @@
 #include <liblangutil/Exceptions.h>
 #include <liblangutil/SourceReferenceFormatter.h>
 
+#ifdef SOLIDITY_HAS_MLIR
+#include <libsolidity/codegen/mlir/SolidityPipeline.h>
+#endif
+
 #include <boost/test/framework.hpp>
 
 #include <cstdlib>
@@ -67,7 +71,9 @@ bytes SolidityExecutionFramework::multiSourceCompileContract(
 	}
 	m_compiler.setMetadataHash(m_metadataHash);
 
-	if (!m_compiler.compile())
+	bool const useMLIR = solidity::test::CommonOptions::get().useMLIR;
+	bool const compilerSucceeded = useMLIR ? m_compiler.parseAndAnalyze() : m_compiler.compile();
+	if (!compilerSucceeded)
 	{
 		// The testing framework expects an exception for
 		// "unimplemented" yul IR generation.
@@ -80,6 +86,31 @@ bytes SolidityExecutionFramework::multiSourceCompileContract(
 		BOOST_ERROR("Compiling contract failed");
 	}
 	std::string contractName(_contractName.empty() ? m_compiler.lastContractName(_mainSourceName) : _contractName);
+	if (useMLIR)
+	{
+#ifdef SOLIDITY_HAS_MLIR
+		bytes bytecode;
+		std::string error;
+		if (!mlirgen::compileSolidityToEVMBytecode(
+			m_compiler,
+			contractName,
+			m_evmVersion,
+			m_optimiserSettings,
+			m_compileViaYul
+				? mlirgen::SolidityMLIRFrontend::YulIR
+				: mlirgen::SolidityMLIRFrontend::LegacySolidity,
+			bytecode,
+			error))
+		{
+			BOOST_ERROR("MLIR compilation failed: " + error);
+			return {};
+		}
+		return bytecode;
+#else
+		BOOST_ERROR("This test binary was built without MLIR support");
+		return {};
+#endif
+	}
 	evmasm::LinkerObject obj = m_compiler.object(contractName);
 	BOOST_REQUIRE(obj.linkReferences.empty());
 	if (m_showMetadata)

@@ -45,7 +45,7 @@
 #include <libevmasm/Disassemble.h>
 
 #ifdef SOLIDITY_HAS_MLIR
-#include <libsolidity/codegen/mlir/Target/EVM/EVMPipeline.h>
+#include <libsolidity/codegen/mlir/SolidityPipeline.h>
 #endif
 
 #include <liblangutil/Exceptions.h>
@@ -153,6 +153,7 @@ static bool needsHumanTargetedStdout(CommandLineOptions const& _options)
 		_options.compiler.outputs.yulCFGJson ||
 		_options.compiler.outputs.binary ||
 		_options.compiler.outputs.binaryRuntime ||
+		_options.compiler.outputs.mlirBinary ||
 		_options.compiler.outputs.ethdebugResources ||
 		_options.compiler.outputs.ethdebugCompilation ||
 		_options.compiler.outputs.ethdebugProgram ||
@@ -334,13 +335,16 @@ void CommandLineInterface::handleMLIRBinary([[maybe_unused]] std::string const& 
 		return;
 
 #ifdef SOLIDITY_HAS_MLIR
-	std::optional<std::string> const& ir = m_compiler->yulIROptimized(_contractName);
-	if (!ir || ir->empty())
-		solThrow(CommandLineExecutionError, "--mlir-bin requires --via-ir, which produces the Yul the ladder consumes.");
-
 	bytes bytecode;
 	std::string error;
-	if (!mlirgen::compileYulToEVMBytecode(_contractName, *ir, m_options.output.evmVersion, bytecode, error))
+	if (!mlirgen::compileSolidityToEVMBytecode(
+		*m_compiler,
+		_contractName,
+		m_options.output.evmVersion,
+		m_options.optimiserSettings(),
+		mlirgen::SolidityMLIRFrontend::YulIR,
+		bytecode,
+		error))
 		solThrow(CommandLineExecutionError, "MLIR pipeline failed for " + _contractName + ": " + error);
 
 	std::string const hex = util::toHex(bytecode);
@@ -982,9 +986,7 @@ void CommandLineInterface::compile()
 		pipelineConfig.irOptimization =
 			m_options.compiler.outputs.irOptimized ||
 			m_options.compiler.outputs.irOptimizedAstJson ||
-			m_options.compiler.outputs.yulCFGJson ||
-			// The MLIR ladder consumes the optimized IR as its input.
-			m_options.compiler.outputs.mlirBinary;
+			m_options.compiler.outputs.yulCFGJson;
 		pipelineConfig.irCodegen =
 			pipelineConfig.irOptimization ||
 			m_options.compiler.outputs.ir ||

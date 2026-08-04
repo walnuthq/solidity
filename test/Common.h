@@ -66,6 +66,9 @@ struct CommonOptions
 	bool useABIEncoderV1 = false;
 	bool showMessages = false;
 	bool showMetadata = false;
+	/// Compile semantic tests through the Solidity AST -> MLIR -> EVM
+	/// pipeline. Other test suites ignore this backend selection.
+	bool useMLIR = false;
 	size_t batches = 1;
 	size_t selectedBatch = 0;
 

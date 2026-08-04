@@ -54,6 +54,7 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 def EVM_Dialect : Dialect {
   let name = "evm";
   let summary = "Machine-level EVM semantics";
+  let hasConstantMaterializer = 1;
   let description = [{
     Machine-level EVM ops with EVM-exact semantics over signless i256 words,
     designed to compose with upstream arith/cf/func. The hub of the solc

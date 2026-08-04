@@ -29,8 +29,11 @@
 #include "mlir/IR/TypeUtilities.h"
 
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/Support/raw_ostream.h"
 #pragma GCC diagnostic pop
+
+#include <tuple>
 
 using namespace mlir;
 using namespace mlir::solidity;
@@ -113,6 +116,47 @@ struct ArrayTypeStorage: public mlir::TypeStorage
 	int64_t size;
 };
 
+struct StructTypeStorage: public mlir::TypeStorage
+{
+	StructTypeStorage(
+		mlir::ArrayRef<mlir::Type> fieldTypes,
+		mlir::ArrayRef<int64_t> fieldSlots,
+		mlir::ArrayRef<int64_t> fieldByteOffsets):
+		fieldTypes(fieldTypes), fieldSlots(fieldSlots), fieldByteOffsets(fieldByteOffsets)
+	{}
+
+	using KeyTy = std::tuple<
+		mlir::ArrayRef<mlir::Type>, mlir::ArrayRef<int64_t>, mlir::ArrayRef<int64_t>>;
+
+	bool operator==(KeyTy key) const
+	{
+		return std::get<0>(key) == fieldTypes
+			&& std::get<1>(key) == fieldSlots
+			&& std::get<2>(key) == fieldByteOffsets;
+	}
+
+	static llvm::hash_code hashKey(KeyTy key)
+	{
+		return llvm::hash_combine(
+			llvm::hash_combine_range(std::get<0>(key).begin(), std::get<0>(key).end()),
+			llvm::hash_combine_range(std::get<1>(key).begin(), std::get<1>(key).end()),
+			llvm::hash_combine_range(std::get<2>(key).begin(), std::get<2>(key).end()));
+	}
+
+	static StructTypeStorage* construct(mlir::TypeStorageAllocator& allocator, KeyTy key)
+	{
+		return new (allocator.allocate<StructTypeStorage>())
+			StructTypeStorage(
+				allocator.copyInto(std::get<0>(key)),
+				allocator.copyInto(std::get<1>(key)),
+				allocator.copyInto(std::get<2>(key)));
+	}
+
+	mlir::ArrayRef<mlir::Type> fieldTypes;
+	mlir::ArrayRef<int64_t> fieldSlots;
+	mlir::ArrayRef<int64_t> fieldByteOffsets;
+};
+
 } // namespace detail
 } // namespace solidity
 } // namespace mlir
@@ -150,6 +194,21 @@ mlir::Type ArrayType::getElementType() const { return getImpl()->elementType; }
 
 int64_t ArrayType::getSize() const { return getImpl()->size; }
 
+StructType StructType::get(
+	mlir::MLIRContext* context,
+	mlir::ArrayRef<mlir::Type> fieldTypes,
+	mlir::ArrayRef<int64_t> fieldSlots,
+	mlir::ArrayRef<int64_t> fieldByteOffsets)
+{
+	return Base::get(context, fieldTypes, fieldSlots, fieldByteOffsets);
+}
+
+mlir::ArrayRef<mlir::Type> StructType::getFieldTypes() const { return getImpl()->fieldTypes; }
+
+mlir::ArrayRef<int64_t> StructType::getFieldSlots() const { return getImpl()->fieldSlots; }
+
+mlir::ArrayRef<int64_t> StructType::getFieldByteOffsets() const { return getImpl()->fieldByteOffsets; }
+
 //===----------------------------------------------------------------------===//
 // Dialect Definition
 //===----------------------------------------------------------------------===//
@@ -158,7 +217,8 @@ SolidityDialect::SolidityDialect(mlir::MLIRContext* context)
 	: mlir::Dialect(getDialectNamespace(), context, mlir::TypeID::get<SolidityDialect>())
 {
 	// Register Solidity types
-	addTypes<UIntType, IntType, AddressType, BoolType, BytesType, DynamicBytesType, StringType, ArrayType>();
+	addTypes<UIntType, IntType, AddressType, BoolType, BytesType, DynamicBytesType, StringType, ArrayType,
+		StructType>();
 
 	// Register operations generated from TableGen
 	addOperations<
@@ -269,6 +329,48 @@ mlir::Type SolidityDialect::parseType(mlir::DialectAsmParser& parser) const
 		return ArrayType::get(elementType, size);
 	}
 
+	// Parse struct<FieldType, ...>
+	if (keyword == "struct")
+	{
+		if (parser.parseLess())
+			return Type();
+		mlir::SmallVector<mlir::Type, 4> fieldTypes;
+		if (parser.parseOptionalGreater().failed())
+		{
+			do
+			{
+				mlir::Type fieldType;
+				if (parser.parseType(fieldType))
+					return Type();
+				fieldTypes.push_back(fieldType);
+			}
+			while (parser.parseOptionalComma().succeeded());
+			if (parser.parseGreater())
+				return Type();
+		}
+		mlir::SmallVector<int64_t, 4> fieldSlots;
+		mlir::SmallVector<int64_t, 4> fieldByteOffsets;
+		if (parser.parseOptionalLSquare().succeeded())
+		{
+			if (parser.parseOptionalRSquare().failed())
+			{
+				do
+				{
+					int64_t slot = 0;
+					int64_t byteOffset = 0;
+					if (parser.parseInteger(slot) || parser.parseColon() || parser.parseInteger(byteOffset))
+						return Type();
+					fieldSlots.push_back(slot);
+					fieldByteOffsets.push_back(byteOffset);
+				}
+				while (parser.parseOptionalComma().succeeded());
+				if (parser.parseRSquare())
+					return Type();
+			}
+		}
+		return StructType::get(getContext(), fieldTypes, fieldSlots, fieldByteOffsets);
+	}
+
 	parser.emitError(parser.getNameLoc(), "unknown Solidity type: ") << keyword;
 	return Type();
 }
@@ -290,6 +392,25 @@ void SolidityDialect::printType(mlir::Type type, mlir::DialectAsmPrinter& os) co
 				os << "array<";
 				os.printType(t.getElementType());
 				os << ", " << t.getSize() << ">";
+			})
+		.Case<StructType>(
+			[&](StructType t)
+			{
+				os << "struct<";
+				llvm::interleaveComma(t.getFieldTypes(), os, [&](mlir::Type field) { os.printType(field); });
+				os << ">";
+				if (t.getFieldSlots().size() == t.getFieldTypes().size()
+					&& t.getFieldByteOffsets().size() == t.getFieldTypes().size())
+				{
+					os << "[";
+					for (size_t index = 0; index < t.getFieldTypes().size(); ++index)
+					{
+						if (index)
+							os << ",";
+						os << t.getFieldSlots()[index] << ":" << t.getFieldByteOffsets()[index];
+					}
+					os << "]";
+				}
 			})
 		.Default([&](Type) { llvm::errs() << "unknown type\n"; });
 }

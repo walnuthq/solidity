@@ -176,6 +176,8 @@ if(MLIR_FOUND)
     list(APPEND sources
         codegen/mlir/MLIRGenerator.cpp
         codegen/mlir/MLIRGenerator.h
+        codegen/mlir/SolidityPipeline.cpp
+        codegen/mlir/SolidityPipeline.h
     )
 endif()
 
@@ -187,11 +189,24 @@ target_link_libraries(solidity PUBLIC yul evmasm langutil smtutil solutil Boost:
 # solc itself can offer it as a backend; the RISC-V side stays standalone.
 if(MLIR_FOUND)
     add_subdirectory(codegen/mlir)
-    target_link_libraries(solidity PUBLIC EVMAsmTarget YulToEVMConversion YulASTImport SolidityDialect)
+    target_link_libraries(solidity PUBLIC
+        EVMAsmTarget
+        SolToYulConversion
+        YulToEVMConversion
+        YulASTImport
+        SolidityDialect
+    )
+    target_link_libraries(solidity PRIVATE
+        MLIRArithDialect
+        MLIRControlFlowDialect
+        MLIRFuncDialect
+        MLIRSCFDialect
+    )
     target_include_directories(solidity PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/codegen/mlir)
     # LLVM and MLIR headers do not satisfy this project's warning settings.
     set_source_files_properties(
         codegen/mlir/MLIRGenerator.cpp
+        codegen/mlir/SolidityPipeline.cpp
         PROPERTIES COMPILE_FLAGS "-Wno-error -w"
     )
 endif()

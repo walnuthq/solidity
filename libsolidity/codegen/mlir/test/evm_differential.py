@@ -86,6 +86,16 @@ class Evm:
             slots.append(value.stdout.strip())
         return status, slots
 
+    def supports_clz(self):
+        # CLZ is an Osaka opcode (0x1e). solc can assemble it before the RPC
+        # node used by this harness has upgraded, in which case comparing an
+        # invalid-opcode revert with the MLIR backend's compatible lowering is
+        # an environment mismatch rather than a compiler divergence.
+        probe = "60011e5f5260205ff3"  # return(clz(1))
+        address = self.deploy(probe)
+        call = run(["cast", "call", address, "0x", "--rpc-url", self.rpc])
+        return call.returncode == 0 and call.stdout.strip().lower().endswith("ff")
+
 
 def rpc_reachable(url):
     """CTest convention: 77 means skip. A missing node is not a failure."""
@@ -121,10 +131,18 @@ def main():
         return 2
 
     evm = Evm(args.rpc)
+    node_supports_clz = evm.supports_clz()
     results = []
     passed = failed = skipped = 0
 
     for path in inputs:
+        if "clz(" in path.read_text() and not node_supports_clz:
+            detail = "the JSON-RPC node does not execute the Osaka CLZ opcode"
+            print(f"SKIP  {path.name}: {detail}")
+            skipped += 1
+            results.append({"test": path.name, "outcome": "skip", "detail": detail})
+            continue
+
         reference, reference_error = reference_bytecode(args.solc, path)
         if reference is None:
             print(f"SKIP  {path.name}: reference backend rejected it ({reference_error})")

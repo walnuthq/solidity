@@ -37,6 +37,7 @@ if(MLIR_FOUND)
     )
 
     target_link_libraries(EVMMLIRDialect PUBLIC
+        MLIRArithDialect
         MLIRTransforms
         MLIRIR
         MLIRSupport

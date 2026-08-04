@@ -27,8 +27,11 @@
 #define SOLIDITY_CODEGEN_MLIR_TARGET_EVM_PIPELINE_H
 
 #include <liblangutil/EVMVersion.h>
+#include <libsolidity/interface/OptimiserSettings.h>
 #include <libsolutil/Common.h>
+#include <libsolutil/FixedHash.h>
 
+#include <map>
 #include <string>
 
 namespace solidity::mlirgen
@@ -42,8 +45,10 @@ bool compileYulToEVMBytecode(
 	std::string const& _name,
 	std::string const& _yulSource,
 	langutil::EVMVersion _evmVersion,
+	frontend::OptimiserSettings const& _optimiserSettings,
 	solidity::bytes& _bytecode,
-	std::string& _error);
+	std::string& _error,
+	std::map<std::string, solidity::util::h160> const& _libraries = {});
 
 } // namespace solidity::mlirgen
 

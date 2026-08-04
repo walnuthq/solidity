@@ -81,6 +81,7 @@ struct UIntTypeStorage;
 struct IntTypeStorage;
 struct BytesTypeStorage;
 struct ArrayTypeStorage;
+struct StructTypeStorage;
 } // namespace detail
 
 /// Unsigned integer type
@@ -171,6 +172,26 @@ public:
 	mlir::Type getElementType() const;
 	int64_t getSize() const;
 	bool isDynamicallySized() const { return getSize() == -1; }
+};
+
+/// Struct type. Values are memory pointers; field types describe the recursive
+/// memory/ABI shape while nominal source-level identity is irrelevant after
+/// semantic analysis.
+class StructType: public mlir::Type::TypeBase<StructType, mlir::Type, detail::StructTypeStorage>
+{
+public:
+	using Base::Base;
+	static constexpr llvm::StringLiteral name = "solidity.struct";
+
+	static StructType get(
+		mlir::MLIRContext* context,
+		mlir::ArrayRef<mlir::Type> fieldTypes,
+		mlir::ArrayRef<int64_t> fieldSlots = {},
+		mlir::ArrayRef<int64_t> fieldByteOffsets = {});
+
+	mlir::ArrayRef<mlir::Type> getFieldTypes() const;
+	mlir::ArrayRef<int64_t> getFieldSlots() const;
+	mlir::ArrayRef<int64_t> getFieldByteOffsets() const;
 };
 
 //===----------------------------------------------------------------------===//

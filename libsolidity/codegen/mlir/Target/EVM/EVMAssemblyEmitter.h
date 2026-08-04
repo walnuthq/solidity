@@ -43,15 +43,18 @@
  *
  * Arguments and results are passed in the callee's frame; the return address
  * is the only value passed on the stack. Because frames are addressed
- * absolutely, two live activations of one function would alias, so recursion
- * is detected up front and rejected rather than miscompiled.
+ * absolutely, two live activations of one function would otherwise alias.
+ * Recursion is detected up front: Cancun-and-newer targets bank the complete
+ * frame with MCOPY, while older targets bank the liveness-derived frontier
+ * that actually survives across a recursive edge.
  *
  * KNOWN DIVERGENCES (must be lifted before this is consensus-usable)
  *
  *  - MSIZE observes the frame region, so a contract that branches on MSIZE
  *    sees a different value than under the legacy backend.
- *  - The frame base is fixed rather than negotiated with `memoryguard`, so a
- *    contract whose heap grows past it would collide.
+ *  - Recursive objects retain a fixed high frame/save region because their
+ *    save stack has no static bound, so an exceptionally large contract heap
+ *    can still collide with that region.
  */
 
 #ifndef SOLIDITY_CODEGEN_MLIR_TARGET_EVM_ASSEMBLY_EMITTER_H

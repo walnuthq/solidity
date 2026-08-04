@@ -68,7 +68,8 @@ public:
 	MLIRGenerator(
 		CompilerStack const& _compilerStack,
 		langutil::EVMVersion _evmVersion,
-		OptimiserSettings const& _optimiserSettings);
+		OptimiserSettings const& _optimiserSettings,
+		bool _legacyCodegen = false);
 
 	~MLIRGenerator() override;
 
