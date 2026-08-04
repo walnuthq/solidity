@@ -1,0 +1,6 @@
+{
+  "name": "seed-memory-array-eight-edge-cases",
+  "source": "../SeedRuntime.sol",
+  "contract": "RuntimeSeedMemoryArray",
+  "matrix": "runtime-seeds-v1"
+}

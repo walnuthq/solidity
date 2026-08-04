@@ -1,0 +1,11 @@
+{
+  "name": "micro-arithmetic-hot",
+  "source": "../MicroRuntime.sol",
+  "contract": "RuntimeArithmetic",
+  "steps": [
+    {"label": "compute-10", "kind": "tx", "signature": "compute(uint256,uint256,uint256)", "args": ["100", "3", "10"]},
+    {"label": "compute-50", "kind": "tx", "signature": "compute(uint256,uint256,uint256)", "args": ["100", "3", "50"]},
+    {"label": "compute-100", "kind": "tx", "signature": "compute(uint256,uint256,uint256)", "args": ["777", "9", "100"]},
+    {"label": "value", "kind": "call", "signature": "value()", "args": []}
+  ]
+}

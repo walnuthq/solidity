@@ -1,0 +1,27 @@
+{
+  "name": "large-multisig-daily-limit-rollover",
+  "repository_source": "test/compilationTests/MultiSigWallet/MultiSigWalletWithDailyLimit.sol",
+  "repository_base_path": "test/compilationTests/MultiSigWallet",
+  "contract": "MultiSigWalletWithDailyLimit",
+  "constructor": {
+    "types": ["address[]", "uint256", "uint256"],
+    "args": [["$account0", "$account1"], "2", "500"]
+  },
+  "watch": ["$account3"],
+  "steps": [
+    {"label": "daily-limit", "kind": "call", "signature": "dailyLimit()", "args": []},
+    {"label": "fund-wallet", "kind": "tx", "from": "$account2", "data": "0x", "value": "1000"},
+    {"label": "within-limit-executes", "kind": "tx", "from": "$account0", "signature": "submitTransaction(address,uint256,bytes)", "args": ["$account3", "200", "0x"]},
+    {"label": "spent-first-day", "kind": "call", "signature": "spentToday()", "args": []},
+    {"label": "remaining-first-day", "kind": "call", "signature": "calcMaxWithdraw()", "args": []},
+    {"label": "over-limit-stays-pending", "kind": "tx", "from": "$account0", "signature": "submitTransaction(address,uint256,bytes)", "args": ["$account3", "400", "0x"]},
+    {"label": "pending-second-transaction", "kind": "call", "signature": "transactions(uint256)", "args": ["1"]},
+    {"label": "next-day", "kind": "time", "timestamp": 90000},
+    {"label": "execute-after-rollover", "kind": "tx", "from": "$account4", "signature": "executeTransaction(uint256)", "args": ["1"]},
+    {"label": "executed-second-transaction", "kind": "call", "signature": "transactions(uint256)", "args": ["1"]},
+    {"label": "spent-next-day", "kind": "call", "signature": "spentToday()", "args": []},
+    {"label": "remaining-next-day", "kind": "call", "signature": "calcMaxWithdraw()", "args": []},
+    {"label": "pending-count", "kind": "call", "signature": "getTransactionCount(bool,bool)", "args": [true, false]},
+    {"label": "executed-count", "kind": "call", "signature": "getTransactionCount(bool,bool)", "args": [false, true]}
+  ]
+}

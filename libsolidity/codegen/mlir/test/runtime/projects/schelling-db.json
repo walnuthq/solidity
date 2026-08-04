@@ -1,0 +1,23 @@
+{
+  "name": "project-corion-schelling-db",
+  "repository_source": "test/compilationTests/corion/schelling.sol",
+  "repository_base_path": "test/compilationTests/corion",
+  "contract": "schellingDB",
+  "steps": [
+    {"label": "claim-owner", "kind": "tx", "signature": "replaceOwner(address)", "args": ["$account0"]},
+    {"label": "unauthorized-funds", "kind": "tx", "from": "$account1", "signature": "setFunds(address,uint256)", "args": ["$account2", "999"]},
+    {"label": "set-funds", "kind": "tx", "signature": "setFunds(address,uint256)", "args": ["$account2", "123"]},
+    {"label": "push-round", "kind": "tx", "signature": "pushRound(uint256,uint256,uint256,uint256,bool)", "args": ["11", "12", "13", "14", true]},
+    {"label": "set-voter", "kind": "tx", "signature": "setVoter(address,uint256,bytes32,uint8,bool,uint256)", "args": ["$account3", "2", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "2", true, "77"]},
+    {"label": "set-expansion", "kind": "tx", "signature": "setSchellingExpansion(uint256,uint256)", "args": ["2", "555"]},
+    {"label": "set-current", "kind": "tx", "signature": "setCurrentSchellingRound(uint256)", "args": ["2"]},
+    {"label": "funds", "kind": "call", "signature": "getFunds(address)", "args": ["$account2"]},
+    {"label": "round", "kind": "call", "signature": "getRound(uint256)", "args": ["2"]},
+    {"label": "voter", "kind": "call", "signature": "getVoter(address)", "args": ["$account3"]},
+    {"label": "expansion", "kind": "call", "signature": "getSchellingExpansion(uint256)", "args": ["2"]},
+    {"label": "current", "kind": "call", "signature": "getCurrentSchellingRound()", "args": []},
+    {"label": "replace-owner", "kind": "tx", "signature": "replaceOwner(address)", "args": ["$account1"]},
+    {"label": "new-owner-funds", "kind": "tx", "from": "$account1", "signature": "setFunds(address,uint256)", "args": ["$account2", "456"]},
+    {"label": "final-funds", "kind": "call", "signature": "getFunds(address)", "args": ["$account2"]}
+  ]
+}

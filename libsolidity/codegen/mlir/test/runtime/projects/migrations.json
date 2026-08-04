@@ -1,0 +1,13 @@
+{
+  "name": "project-gnosis-migrations",
+  "repository_source": "test/compilationTests/gnosis/Migrations.sol",
+  "contract": "Migrations",
+  "steps": [
+    {"label": "initial-owner", "kind": "call", "signature": "owner()", "args": []},
+    {"label": "set-completed", "kind": "tx", "signature": "setCompleted(uint256)", "args": ["7"]},
+    {"label": "unauthorized-set-is-noop", "kind": "tx", "from": "$account1", "signature": "setCompleted(uint256)", "args": ["99"]},
+    {"label": "completed-after-noop", "kind": "call", "signature": "last_completed_migration()", "args": []},
+    {"label": "upgrade-eoa", "kind": "tx", "signature": "upgrade(address)", "args": ["$account4"]},
+    {"label": "final-completed", "kind": "call", "signature": "last_completed_migration()", "args": []}
+  ]
+}

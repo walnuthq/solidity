@@ -1,0 +1,6 @@
+{
+  "name": "seed-branch-eight-edge-cases",
+  "source": "../SeedRuntime.sol",
+  "contract": "RuntimeSeedBranch",
+  "matrix": "runtime-seeds-v1"
+}

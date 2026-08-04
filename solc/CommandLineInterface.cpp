@@ -335,6 +335,13 @@ void CommandLineInterface::handleMLIRBinary([[maybe_unused]] std::string const& 
 		return;
 
 #ifdef SOLIDITY_HAS_MLIR
+	// The normal bytecode outputs leave abstract contracts and interfaces
+	// empty. Imported project closures commonly contain both, so --mlir-bin
+	// must not turn those non-deployable declarations into a whole-command
+	// failure while compiling the concrete contracts beside them.
+	if (!m_compiler->contractDefinition(_contractName).canBeDeployed())
+		return;
+
 	bytes bytecode;
 	std::string error;
 	if (!mlirgen::compileSolidityToEVMBytecode(

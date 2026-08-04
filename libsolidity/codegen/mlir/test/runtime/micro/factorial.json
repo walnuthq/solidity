@@ -1,0 +1,14 @@
+{
+  "name": "micro-factorial-hot",
+  "source": "../MicroRuntime.sol",
+  "contract": "RuntimeFactorial",
+  "steps": [
+    {"label": "factorial-5", "kind": "tx", "signature": "computeFactorial(uint256)", "args": ["5"]},
+    {"label": "factorial-10", "kind": "tx", "signature": "computeFactorial(uint256)", "args": ["10"]},
+    {"label": "factorial-20", "kind": "tx", "signature": "computeFactorial(uint256)", "args": ["20"]},
+    {"label": "factorial-30", "kind": "tx", "signature": "computeFactorial(uint256)", "args": ["30"]},
+    {"label": "factorial-40", "kind": "tx", "signature": "computeFactorial(uint256)", "args": ["40"]},
+    {"label": "factorial-50", "kind": "tx", "signature": "computeFactorial(uint256)", "args": ["50"]},
+    {"label": "result", "kind": "call", "signature": "getResult()", "args": []}
+  ]
+}

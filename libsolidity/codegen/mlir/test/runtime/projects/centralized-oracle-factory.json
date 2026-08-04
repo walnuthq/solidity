@@ -1,0 +1,21 @@
+{
+  "name": "project-gnosis-centralized-oracle-factory-cold-path",
+  "repository_source": "test/compilationTests/gnosis/Oracles/CentralizedOracleFactory.sol",
+  "contract": "CentralizedOracleFactory",
+  "steps": [
+    {
+      "label": "create-oracle",
+      "kind": "tx",
+      "signature": "createCentralizedOracle(bytes)",
+      "args": ["0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d"],
+      "capture": {"alias": "$oracle", "type": "address", "word": 0},
+      "watch": ["$oracle"]
+    },
+    {"label": "child-owner", "kind": "call", "to": "$oracle", "signature": "owner()", "args": []},
+    {"label": "child-ipfs", "kind": "call", "to": "$oracle", "signature": "ipfsHash()", "args": []},
+    {"label": "child-replace-owner", "kind": "tx", "to": "$oracle", "signature": "replaceOwner(address)", "args": ["$account1"], "watch": ["$oracle"]},
+    {"label": "child-set-outcome", "kind": "tx", "from": "$account1", "to": "$oracle", "signature": "setOutcome(int256)", "args": ["23"], "watch": ["$oracle"]},
+    {"label": "child-outcome", "kind": "call", "to": "$oracle", "signature": "getOutcome()", "args": []},
+    {"label": "child-is-set", "kind": "call", "to": "$oracle", "signature": "isOutcomeSet()", "args": []}
+  ]
+}

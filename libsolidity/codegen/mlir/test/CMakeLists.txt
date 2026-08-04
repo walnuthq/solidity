@@ -3,9 +3,9 @@
 #
 # Two kinds, answering different questions. The lit suite pins the shape of each
 # lowering and needs nothing but the tools. The differential harnesses execute
-# what was compiled and compare it against solc, so they need a JSON-RPC node;
-# without one they report themselves skipped rather than failed, because a
-# machine with no anvil is not a broken build.
+# what was compiled and compare it against solc. The focused tests use an
+# existing JSON-RPC node and skip when it is unavailable; the bounded stateful
+# suite starts its own disposable Anvil node.
 
 if(MLIR_FOUND)
     find_package(Python3 COMPONENTS Interpreter)
@@ -57,6 +57,7 @@ if(MLIR_FOUND)
                 --solc ${solcBinary}
                 --sol2evm ${mlirToolDir}/sol2evm
                 --source ${mlirTestDir}/lit/create_contract.sol
+                --abstract-source ${mlirTestDir}/abstract_contract.sol
         )
         set_tests_properties(mlir-solc-integration PROPERTIES LABELS mlir)
 
@@ -252,6 +253,28 @@ if(MLIR_FOUND)
         set_tests_properties(mlir-deploy-differential PROPERTIES
             SKIP_RETURN_CODE 77
             LABELS mlir
+        )
+
+        # Runtime semantics, not just selector probes: run deterministic
+        # stateful workloads through production solc --mlir-bin and the via-IR
+        # reference from identical snapshots, then compare return/revert data,
+        # receipts, logs, storage roots, balances, and nested contract calls.
+        add_test(
+            NAME mlir-runtime-differential
+            COMMAND ${Python3_EXECUTABLE} ${mlirTestDir}/runtime_differential.py
+                --solc ${solcBinary}
+                --workloads ${mlirTestDir}/runtime
+                --spawn-anvil
+                --evm-version cancun
+                --repository-root ${CMAKE_SOURCE_DIR}
+                --failure-dir ${CMAKE_CURRENT_BINARY_DIR}/runtime-failures
+                --report-json ${CMAKE_CURRENT_BINARY_DIR}/runtime-report.json
+        )
+        set_tests_properties(mlir-runtime-differential PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 600
+            RUN_SERIAL TRUE
+            LABELS "mlir;runtime"
         )
     endif()
 endif()

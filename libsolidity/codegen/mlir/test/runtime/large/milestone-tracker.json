@@ -1,0 +1,32 @@
+{
+  "name": "large-milestone-roles-proposal-and-cancellation",
+  "repository_source": "test/compilationTests/milestonetracker/MilestoneTracker.sol",
+  "repository_base_path": "test/compilationTests/milestonetracker",
+  "contract": "MilestoneTracker",
+  "constructor": {
+    "types": ["address", "address", "address"],
+    "args": ["$account0", "$account1", "$account2"]
+  },
+  "steps": [
+    {"label": "arbitrator", "kind": "call", "signature": "arbitrator()", "args": []},
+    {"label": "donor", "kind": "call", "signature": "donor()", "args": []},
+    {"label": "recipient", "kind": "call", "signature": "recipient()", "args": []},
+    {"label": "no-milestones", "kind": "call", "signature": "numberOfMilestones()", "args": []},
+    {"label": "outsider-propose-reverts", "kind": "tx", "from": "$account3", "signature": "proposeMilestones(bytes)", "args": ["0xc20180"]},
+    {"label": "recipient-proposes", "kind": "tx", "from": "$account2", "signature": "proposeMilestones(bytes)", "args": ["0xf842a0010305080d1522375990e9e3775dbbf16d3c23355697a4c478a86f812d88a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"]},
+    {"label": "changing", "kind": "call", "signature": "changingMilestones()", "args": []},
+    {"label": "proposal-bytes", "kind": "call", "signature": "proposedMilestones()", "args": []},
+    {"label": "bad-proposal-hash-reverts", "kind": "tx", "from": "$account1", "signature": "acceptProposedMilestones(bytes32)", "args": ["0x0000000000000000000000000000000000000000000000000000000000000000"]},
+    {"label": "donor-unpropose-reverts", "kind": "tx", "from": "$account1", "signature": "unproposeMilestones()", "args": []},
+    {"label": "recipient-unproposes", "kind": "tx", "from": "$account2", "signature": "unproposeMilestones()", "args": []},
+    {"label": "not-changing", "kind": "call", "signature": "changingMilestones()", "args": []},
+    {"label": "change-recipient", "kind": "tx", "from": "$account2", "signature": "changeRecipient(address)", "args": ["$account3"]},
+    {"label": "old-recipient-reverts", "kind": "tx", "from": "$account2", "signature": "changeRecipient(address)", "args": ["$account4"]},
+    {"label": "new-recipient-proposes", "kind": "tx", "from": "$account3", "signature": "proposeMilestones(bytes)", "args": ["0xc20180"]},
+    {"label": "arbitrator-cancels", "kind": "tx", "from": "$account0", "signature": "arbitrateCancelCampaign()", "args": []},
+    {"label": "unpropose-after-cancel-reverts", "kind": "tx", "from": "$account3", "signature": "unproposeMilestones()", "args": []},
+    {"label": "campaign-canceled", "kind": "call", "signature": "campaignCanceled()", "args": []},
+    {"label": "proposal-remains-pending", "kind": "call", "signature": "changingMilestones()", "args": []},
+    {"label": "final-recipient", "kind": "call", "signature": "recipient()", "args": []}
+  ]
+}

@@ -1,0 +1,85 @@
+{
+  "name": "stateful-storage-calls-and-creation",
+  "source": "StatefulRuntime.sol",
+  "contract": "StatefulRuntime",
+  "constructor": {
+    "types": [],
+    "args": [],
+    "value": "100000"
+  },
+  "steps": [
+    {
+      "label": "initial-observation",
+      "kind": "call",
+      "signature": "observe(uint256)",
+      "args": ["0"]
+    },
+    {
+      "label": "setup",
+      "kind": "tx",
+      "signature": "setup(uint256)",
+      "args": ["17"],
+      "value": "1000"
+    },
+    {
+      "label": "mutate-short-bytes",
+      "kind": "tx",
+      "signature": "mutate(uint256,uint256,bytes)",
+      "args": ["1", "5", "0xdeadbeef"],
+      "value": "1234"
+    },
+    {
+      "label": "mutate-word-tail",
+      "kind": "tx",
+      "signature": "mutate(uint256,uint256,bytes)",
+      "args": [
+        "1",
+        "9",
+        "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+      ]
+    },
+    {
+      "label": "branch-and-loop",
+      "kind": "tx",
+      "signature": "branch(uint256)",
+      "args": ["11"]
+    },
+    {
+      "label": "create-child",
+      "kind": "tx",
+      "signature": "createChild(uint256)",
+      "args": ["41"],
+      "value": "1000000"
+    },
+    {
+      "label": "external-child-call",
+      "kind": "tx",
+      "signature": "bumpChild(uint256)",
+      "args": ["7"]
+    },
+    {
+      "label": "receive-value",
+      "kind": "tx",
+      "data": "0x",
+      "value": "777"
+    },
+    {
+      "label": "final-observation",
+      "kind": "call",
+      "signature": "observe(uint256)",
+      "args": ["1"]
+    },
+    {
+      "label": "custom-error-revert",
+      "kind": "tx",
+      "signature": "intentionalRevert(uint256)",
+      "args": ["1"]
+    },
+    {
+      "label": "string-revert",
+      "kind": "call",
+      "signature": "intentionalRevert(uint256)",
+      "args": ["2"]
+    }
+  ]
+}

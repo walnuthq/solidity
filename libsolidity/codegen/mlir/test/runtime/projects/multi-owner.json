@@ -1,0 +1,25 @@
+{
+  "name": "project-corion-multi-owner",
+  "repository_source": "test/compilationTests/corion/multiOwner.sol",
+  "repository_base_path": "test/compilationTests/corion",
+  "contract": "multiOwner",
+  "constructor": {
+    "types": ["address[]"],
+    "args": [["$account0", "$account1", "$account2", "$account3"]]
+  },
+  "steps": [
+    {"label": "initial-count", "kind": "call", "signature": "ownerCount()", "args": []},
+    {"label": "initial-threshold", "kind": "call", "signature": "ownersForChange()", "args": []},
+    {"label": "non-owner-vote-reverts", "kind": "tx", "from": "$account4", "signature": "insertOwner(address)", "args": ["$account4"]},
+    {"label": "insert-vote-one", "kind": "tx", "signature": "insertOwner(address)", "args": ["$account4"]},
+    {"label": "insert-vote-two", "kind": "tx", "from": "$account1", "signature": "insertOwner(address)", "args": ["$account4"]},
+    {"label": "insert-vote-three", "kind": "tx", "from": "$account2", "signature": "insertOwner(address)", "args": ["$account4"]},
+    {"label": "new-owner", "kind": "call", "signature": "owners(address)", "args": ["$account4"]},
+    {"label": "count-after-insert", "kind": "call", "signature": "ownerCount()", "args": []},
+    {"label": "drop-vote-one", "kind": "tx", "signature": "dropOwner(address)", "args": ["$account3"]},
+    {"label": "drop-vote-two", "kind": "tx", "from": "$account1", "signature": "dropOwner(address)", "args": ["$account3"]},
+    {"label": "drop-vote-three", "kind": "tx", "from": "$account2", "signature": "dropOwner(address)", "args": ["$account3"]},
+    {"label": "dropped-owner", "kind": "call", "signature": "owners(address)", "args": ["$account3"]},
+    {"label": "final-count", "kind": "call", "signature": "ownerCount()", "args": []}
+  ]
+}

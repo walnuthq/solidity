@@ -1,0 +1,22 @@
+{
+  "name": "project-gnosis-difficulty-oracle-factory-cold-path",
+  "evm_version": "london",
+  "repository_source": "test/compilationTests/gnosis/Oracles/DifficultyOracleFactory.sol",
+  "contract": "DifficultyOracleFactory",
+  "steps": [
+    {
+      "label": "create-oracle",
+      "kind": "tx",
+      "signature": "createDifficultyOracle(uint256)",
+      "args": ["20"],
+      "capture": {"alias": "$oracle", "type": "address", "word": 0},
+      "watch": ["$oracle"]
+    },
+    {"label": "child-target", "kind": "call", "to": "$oracle", "signature": "blockNumber()", "args": []},
+    {"label": "child-premature-revert", "kind": "tx", "to": "$oracle", "signature": "setOutcome()", "args": [], "watch": ["$oracle"]},
+    {"label": "reach-child-target", "kind": "mine", "blocks": 18},
+    {"label": "child-set-outcome", "kind": "tx", "from": "$account2", "to": "$oracle", "signature": "setOutcome()", "args": [], "watch": ["$oracle"]},
+    {"label": "child-is-set", "kind": "call", "to": "$oracle", "signature": "isOutcomeSet()", "args": []},
+    {"label": "child-outcome", "kind": "call", "to": "$oracle", "signature": "getOutcome()", "args": []}
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "project-gnosis-difficulty-oracle",
+  "evm_version": "london",
+  "repository_source": "test/compilationTests/gnosis/Oracles/DifficultyOracle.sol",
+  "contract": "DifficultyOracle",
+  "constructor": {"types": ["uint256"], "args": ["6"]},
+  "steps": [
+    {"label": "target-block", "kind": "call", "signature": "blockNumber()", "args": []},
+    {"label": "premature-outcome-reverts", "kind": "tx", "signature": "setOutcome()", "args": []},
+    {"label": "reach-target-block", "kind": "mine", "blocks": 4},
+    {"label": "set-difficulty", "kind": "tx", "signature": "setOutcome()", "args": []},
+    {"label": "outcome-is-set", "kind": "call", "signature": "isOutcomeSet()", "args": []},
+    {"label": "difficulty", "kind": "call", "signature": "difficulty()", "args": []},
+    {"label": "outcome", "kind": "call", "signature": "getOutcome()", "args": []},
+    {"label": "second-set-reverts", "kind": "tx", "from": "$account1", "signature": "setOutcome()", "args": []}
+  ]
+}

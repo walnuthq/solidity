@@ -1,0 +1,18 @@
+{
+  "name": "project-multisig-test-token",
+  "repository_source": "test/compilationTests/MultiSigWallet/TestToken.sol",
+  "repository_base_path": "test/compilationTests/MultiSigWallet",
+  "contract": "TestToken",
+  "steps": [
+    {"label": "issue-sender", "kind": "tx", "signature": "issueTokens(address,uint256)", "args": ["$account0", "1000"]},
+    {"label": "transfer-account1", "kind": "tx", "signature": "transfer(address,uint256)", "args": ["$account1", "125"]},
+    {"label": "approve-account2", "kind": "tx", "signature": "approve(address,uint256)", "args": ["$account2", "250"]},
+    {"label": "transfer-from-account2", "kind": "tx", "from": "$account2", "signature": "transferFrom(address,address,uint256)", "args": ["$account0", "$account3", "90"]},
+    {"label": "overdraw-reverts", "kind": "tx", "from": "$account1", "signature": "transfer(address,uint256)", "args": ["$account3", "9999"]},
+    {"label": "sender-balance", "kind": "call", "signature": "balanceOf(address)", "args": ["$account0"]},
+    {"label": "account1-balance", "kind": "call", "signature": "balanceOf(address)", "args": ["$account1"]},
+    {"label": "account3-balance", "kind": "call", "signature": "balanceOf(address)", "args": ["$account3"]},
+    {"label": "allowance", "kind": "call", "signature": "allowance(address,address)", "args": ["$account0", "$account2"]},
+    {"label": "total-supply", "kind": "call", "signature": "totalSupply()", "args": []}
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "name": "dynamic-abi-and-revert-data",
+  "source": "AbiRuntime.sol",
+  "contract": "AbiRuntime",
+  "steps": [
+    {
+      "label": "read-empty",
+      "kind": "call",
+      "signature": "read(bytes32)",
+      "args": ["0x1111111111111111111111111111111111111111111111111111111111111111"]
+    },
+    {
+      "label": "store-short",
+      "kind": "tx",
+      "signature": "store(bytes32,bytes)",
+      "args": [
+        "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "0x010203"
+      ]
+    },
+    {
+      "label": "dynamic-array-and-string",
+      "kind": "tx",
+      "signature": "accumulate(uint256[],string)",
+      "args": [["0", "1", "2", "255", "256", "4294967295"], "mlir-runtime"]
+    },
+    {
+      "label": "read-populated",
+      "kind": "call",
+      "signature": "read(bytes32)",
+      "args": ["0x1111111111111111111111111111111111111111111111111111111111111111"]
+    },
+    {
+      "label": "store-word-tail",
+      "kind": "tx",
+      "signature": "store(bytes32,bytes)",
+      "args": [
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      ]
+    },
+    {
+      "label": "digest-word-tail",
+      "kind": "call",
+      "signature": "digest(bytes32)",
+      "args": ["0x2222222222222222222222222222222222222222222222222222222222222222"]
+    },
+    {
+      "label": "empty-array-unicode-string",
+      "kind": "tx",
+      "signature": "accumulate(uint256[],string)",
+      "args": [[], "edge-✓"]
+    },
+    {
+      "label": "custom-error-call",
+      "kind": "call",
+      "signature": "failIfMissing(bytes32)",
+      "args": ["0x3333333333333333333333333333333333333333333333333333333333333333"]
+    },
+    {
+      "label": "custom-error-transaction",
+      "kind": "tx",
+      "signature": "failIfMissing(bytes32)",
+      "args": ["0x3333333333333333333333333333333333333333333333333333333333333333"]
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "name": "project-gnosis-centralized-oracle",
+  "repository_source": "test/compilationTests/gnosis/Oracles/CentralizedOracle.sol",
+  "contract": "CentralizedOracle",
+  "constructor": {
+    "types": ["address", "bytes"],
+    "args": ["$account0", "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d"]
+  },
+  "steps": [
+    {"label": "initial-owner", "kind": "call", "signature": "owner()", "args": []},
+    {"label": "initial-ipfs", "kind": "call", "signature": "ipfsHash()", "args": []},
+    {"label": "unauthorized-replace", "kind": "tx", "from": "$account2", "signature": "replaceOwner(address)", "args": ["$account1"]},
+    {"label": "replace-owner", "kind": "tx", "signature": "replaceOwner(address)", "args": ["$account1"]},
+    {"label": "old-owner-rejected", "kind": "tx", "signature": "setOutcome(int256)", "args": ["-7"]},
+    {"label": "new-owner-sets-negative", "kind": "tx", "from": "$account1", "signature": "setOutcome(int256)", "args": ["-7"]},
+    {"label": "second-outcome-reverts", "kind": "tx", "from": "$account1", "signature": "setOutcome(int256)", "args": ["4"]},
+    {"label": "outcome-is-set", "kind": "call", "signature": "isOutcomeSet()", "args": []},
+    {"label": "negative-outcome", "kind": "call", "signature": "getOutcome()", "args": []}
+  ]
+}

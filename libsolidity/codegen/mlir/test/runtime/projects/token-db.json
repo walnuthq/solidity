@@ -1,0 +1,20 @@
+{
+  "name": "project-corion-token-db",
+  "repository_source": "test/compilationTests/corion/tokenDB.sol",
+  "repository_base_path": "test/compilationTests/corion",
+  "contract": "tokenDB",
+  "steps": [
+    {"label": "claim-owner", "kind": "tx", "signature": "replaceOwner(address)", "args": ["$account0"]},
+    {"label": "unauthorized-increase", "kind": "tx", "from": "$account1", "signature": "increase(address,uint256)", "args": ["$account1", "999"]},
+    {"label": "increase", "kind": "tx", "signature": "increase(address,uint256)", "args": ["$account1", "100"]},
+    {"label": "decrease", "kind": "tx", "signature": "decrease(address,uint256)", "args": ["$account1", "20"]},
+    {"label": "set-allowance", "kind": "tx", "signature": "setAllowance(address,address,uint256,uint256)", "args": ["$account1", "$account2", "55", "7"]},
+    {"label": "balance", "kind": "call", "signature": "balanceOf(address)", "args": ["$account1"]},
+    {"label": "supply", "kind": "call", "signature": "totalSupply()", "args": []},
+    {"label": "allowance", "kind": "call", "signature": "getAllowance(address,address)", "args": ["$account1", "$account2"]},
+    {"label": "replace-owner", "kind": "tx", "signature": "replaceOwner(address)", "args": ["$account1"]},
+    {"label": "old-owner-rejected", "kind": "tx", "signature": "increase(address,uint256)", "args": ["$account1", "10"]},
+    {"label": "new-owner-increase", "kind": "tx", "from": "$account1", "signature": "increase(address,uint256)", "args": ["$account1", "10"]},
+    {"label": "final-balance", "kind": "call", "signature": "balanceOf(address)", "args": ["$account1"]}
+  ]
+}

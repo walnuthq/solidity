@@ -1,0 +1,6 @@
+{
+  "name": "seed-storage-loop-eight-edge-cases",
+  "source": "../SeedRuntime.sol",
+  "contract": "RuntimeSeedStorageLoop",
+  "matrix": "runtime-seeds-v1"
+}

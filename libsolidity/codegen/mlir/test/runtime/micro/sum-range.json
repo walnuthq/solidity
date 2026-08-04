@@ -1,0 +1,12 @@
+{
+  "name": "micro-sum-range-hot",
+  "source": "../MicroRuntime.sol",
+  "contract": "RuntimeSumRange",
+  "steps": [
+    {"label": "sum-1-10", "kind": "tx", "signature": "sumRange(uint256,uint256)", "args": ["1", "10"]},
+    {"label": "sum-1-50", "kind": "tx", "signature": "sumRange(uint256,uint256)", "args": ["1", "50"]},
+    {"label": "sum-1-100", "kind": "tx", "signature": "sumRange(uint256,uint256)", "args": ["1", "100"]},
+    {"label": "sum-10-200", "kind": "tx", "signature": "sumRange(uint256,uint256)", "args": ["10", "200"]},
+    {"label": "total", "kind": "call", "signature": "total()", "args": []}
+  ]
+}

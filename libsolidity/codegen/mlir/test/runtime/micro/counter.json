@@ -1,0 +1,13 @@
+{
+  "name": "micro-counter-hot",
+  "source": "../MicroRuntime.sol",
+  "contract": "RuntimeCounter",
+  "steps": [
+    {"label": "increment-10", "kind": "tx", "signature": "increment(uint256)", "args": ["10"]},
+    {"label": "reset", "kind": "tx", "signature": "reset()", "args": []},
+    {"label": "increment-50", "kind": "tx", "signature": "increment(uint256)", "args": ["50"]},
+    {"label": "reset-again", "kind": "tx", "signature": "reset()", "args": []},
+    {"label": "increment-100", "kind": "tx", "signature": "increment(uint256)", "args": ["100"]},
+    {"label": "count", "kind": "call", "signature": "count()", "args": []}
+  ]
+}

@@ -282,11 +282,74 @@ The MLIR-specific integration suite is green as well:
 ctest --test-dir build_develop -L mlir --output-on-failure
 ```
 
-It contains 20 registered tests, including **31/31 lit/FileCheck tests**, the
-real `solc --mlir-bin` CLI, reach gates, and deployed Yul/Solidity
-differentials. Tests that require JSON-RPC report a CTest skip when no node is
-available; the Osaka `CLZ` case similarly probes node opcode support before
-attempting a cross-backend execution comparison.
+It contains 21 registered tests, including **31/31 lit/FileCheck tests**, the
+real `solc --mlir-bin` CLI, reach gates, deployed Yul/Solidity differentials,
+and the stateful runtime differential below. Focused tests that require an
+existing JSON-RPC endpoint report a CTest skip when no node is available; the
+stateful test starts a disposable Anvil instance itself. The Osaka `CLZ` case
+similarly probes node opcode support before attempting a cross-backend
+execution comparison.
+
+### Stateful runtime differential
+
+`runtime_differential.py` is the independent execution harness for the
+production compiler path. It compiles every workload twice—reference
+`solc --via-ir` and `solc --mlir-bin`—then starts each version from the same EVM
+snapshot and executes the same ordered call/transaction sequence. It compares
+deployment success, return and revert data, receipt status, event logs, storage
+roots, balances, nonces, value transfer, child creation, and external child
+calls. Compiler timing, bytecode size, and gas are reported separately and do
+not participate in the correctness comparison.
+
+```sh
+python3 libsolidity/codegen/mlir/test/runtime_differential.py \
+  --solc build_develop/solc/solc \
+  --workloads libsolidity/codegen/mlir/test/runtime \
+  --spawn-anvil --evm-version cancun \
+  --report-json build_develop/libsolidity/codegen/mlir/test/runtime-report.json
+```
+
+The deterministic gate is **26/26 workloads passing** over **371 ordered
+runtime steps**: 225 transactions (206 successful and 19 deliberate reverts),
+143 calls, two block advances, and one time advance. Each workload also deploys
+both backends from the same snapshot.
+
+| Group | Workloads | Runtime steps | What it exercises |
+|---|---:|---:|---|
+| core stateful | 2 | 20 | dynamic ABI, storage, events, value, reverts, `CREATE`, and child calls |
+| hot micro | 4 | 22 | arithmetic, factorial, counter, and range loops |
+| fixed edge seeds | 8 | 192 | branches, bytes, mappings, memory arrays, and storage loops across eight fixed inputs each |
+| real projects | 9 | 87 | Gnosis, Corion, and multisig contracts already present in `test/compilationTests` |
+| large state machines | 3 | 50 | multisig quorum/value transfer, daily-limit rollover, and milestone roles/cancellation |
+
+The default is Cancun. Two historical Gnosis difficulty-oracle workloads are
+compiled and executed on London: after Paris the `DIFFICULTY` opcode exposes
+`prevrandao`, whose random value is not snapshot-replayable in Anvil. The
+runner groups workloads by revision and starts an isolated matching node for
+each group.
+
+The same run records a performance probe separately from correctness. These
+are min/median/max ratios across this single run, not a statistically stable
+benchmark:
+
+| Metric | MLIR/reference ratio |
+|---|---:|
+| runtime bytecode size | 1.50x / 1.75x / 2.04x |
+| deployment gas | 1.24x / 1.43x / 1.91x |
+| transaction gas | 1.003x / 1.014x / 1.358x |
+
+A semantic differential failure writes a JSON artifact containing the source,
+workload, EVM revision, and both observations. Single-source fixture failures
+can be reproduced with:
+
+```sh
+python3 libsolidity/codegen/mlir/test/runtime_differential.py \
+  --solc build_develop/solc/solc \
+  --replay path/to/runtime-failure.json --spawn-anvil
+```
+
+Generated contracts, ABI fuzz vectors, multi-source failure packaging, and
+automatic reduction are intentionally deferred to the fuzzing phase.
 
 The older 1788/2027 `sol2evm` number measured standalone reach of the direct
 AST-to-`sol` experiment, not the routed production compiler and not behavior of

@@ -1,0 +1,29 @@
+{
+  "name": "large-multisig-quorum-and-value-transfer",
+  "repository_source": "test/compilationTests/MultiSigWallet/MultiSigWallet.sol",
+  "repository_base_path": "test/compilationTests/MultiSigWallet",
+  "contract": "MultiSigWallet",
+  "constructor": {
+    "types": ["address[]", "uint256"],
+    "args": [["$account0", "$account1"], "2"]
+  },
+  "watch": ["$account3"],
+  "steps": [
+    {"label": "owners", "kind": "call", "signature": "getOwners()", "args": []},
+    {"label": "required", "kind": "call", "signature": "required()", "args": []},
+    {"label": "fund-wallet", "kind": "tx", "from": "$account2", "data": "0x", "value": "1000"},
+    {"label": "submit-transfer", "kind": "tx", "from": "$account0", "signature": "submitTransaction(address,uint256,bytes)", "args": ["$account3", "250", "0x"]},
+    {"label": "one-confirmation", "kind": "call", "signature": "getConfirmationCount(uint256)", "args": ["0"]},
+    {"label": "not-confirmed", "kind": "call", "signature": "isConfirmed(uint256)", "args": ["0"]},
+    {"label": "pending-transaction", "kind": "call", "signature": "transactions(uint256)", "args": ["0"]},
+    {"label": "revoke", "kind": "tx", "from": "$account0", "signature": "revokeConfirmation(uint256)", "args": ["0"]},
+    {"label": "zero-confirmations", "kind": "call", "signature": "getConfirmationCount(uint256)", "args": ["0"]},
+    {"label": "confirm-again", "kind": "tx", "from": "$account0", "signature": "confirmTransaction(uint256)", "args": ["0"]},
+    {"label": "reach-quorum", "kind": "tx", "from": "$account1", "signature": "confirmTransaction(uint256)", "args": ["0"]},
+    {"label": "executed-transaction", "kind": "call", "signature": "transactions(uint256)", "args": ["0"]},
+    {"label": "executed-count", "kind": "call", "signature": "getTransactionCount(bool,bool)", "args": [false, true]},
+    {"label": "confirmations", "kind": "call", "signature": "getConfirmations(uint256)", "args": ["0"]},
+    {"label": "transaction-ids", "kind": "call", "signature": "getTransactionIds(uint256,uint256,bool,bool)", "args": ["0", "1", false, true]},
+    {"label": "non-owner-confirm-reverts", "kind": "tx", "from": "$account4", "signature": "confirmTransaction(uint256)", "args": ["0"]}
+  ]
+}

@@ -51,6 +51,7 @@ def main():
     parser.add_argument("--solc", required=True)
     parser.add_argument("--sol2evm", required=True)
     parser.add_argument("--source", required=True)
+    parser.add_argument("--abstract-source", required=True)
     args = parser.parse_args()
 
     source = str(pathlib.Path(args.source).resolve())
@@ -75,9 +76,18 @@ def main():
             f"sol2evm: {sorted(standalone)}"
         )
 
+    abstract_source = str(pathlib.Path(args.abstract_source).resolve())
+    abstract_import = solc_bytecode(run([args.solc, "--mlir-bin", abstract_source]))
+    if abstract_import.keys() != {"ConcreteRuntime"}:
+        raise RuntimeError(
+            "--mlir-bin must skip non-deployable declarations in a project closure; "
+            f"emitted {sorted(abstract_import)}"
+        )
+
     print(
         "solc reached the production Yul-IR -> MLIR backend and the typed-sol "
-        f"compatibility route compiled {len(direct)} contract(s)"
+        f"compatibility route compiled {len(direct)} contract(s); abstract "
+        "project declarations were skipped"
     )
     return 0
 
