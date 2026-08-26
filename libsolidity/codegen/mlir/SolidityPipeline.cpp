@@ -261,11 +261,9 @@ bool compileSolidityToEVMBytecode(
 	std::string& _error)
 {
 	_error.clear();
-	// Experimental Solidity uses a distinct type-inference graph and leaves
-	// legacy AST Type pointers null by design. Its native front end already
-	// produces strict Yul; import that object tree into the yul dialect so the
-	// remainder is still the real MLIR -> evm -> assembly pipeline.
-	if (_compilerStack.isExperimentalAnalysis() || _frontend == SolidityMLIRFrontend::YulIR)
+	// The YulIR frontend imports solc's strict-Yul object tree into the yul
+	// dialect so the remainder is still the real MLIR -> evm -> assembly pipeline.
+	if (_frontend == SolidityMLIRFrontend::YulIR)
 	{
 		std::optional<std::string> yul = _compilerStack.generateYulForMLIR(_contractName);
 		if (!yul)
