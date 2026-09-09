@@ -431,7 +431,7 @@ BOOST_AUTO_TEST_CASE(ethdebug_program_last_instruction_with_immediate_arguments)
 		assembly.append(AssemblyItem{0x11223344});
 		LinkerObject output = assembly.assemble();
 
-		Json const program = ethdebug::program("", 0, assembly, output);
+		Json const program = evmasm::ethdebug::program("", 0, assembly, output);
 		BOOST_REQUIRE(program["instructions"].size() == 1);
 		BOOST_REQUIRE(program["instructions"][0]["operation"]["mnemonic"] == "PUSH4");
 		BOOST_REQUIRE(program["instructions"][0]["operation"]["arguments"][0] == "0x11223344");
@@ -442,7 +442,7 @@ BOOST_AUTO_TEST_CASE(ethdebug_program_last_instruction_with_immediate_arguments)
 		assembly.append(AssemblyItem{0x1122334455});
 		LinkerObject output = assembly.assemble();
 
-		Json const program = ethdebug::program("", 0, assembly, output);
+		Json const program = evmasm::ethdebug::program("", 0, assembly, output);
 		BOOST_REQUIRE(program["instructions"].size() == 2);
 		BOOST_REQUIRE(program["instructions"][0]["operation"]["mnemonic"] == "PUSH0");
 		BOOST_REQUIRE(!program["instructions"][0]["operation"].contains("arguments"));
@@ -453,7 +453,7 @@ BOOST_AUTO_TEST_CASE(ethdebug_program_last_instruction_with_immediate_arguments)
 
 BOOST_AUTO_TEST_CASE(ethdebug_resources)
 {
-	Json const resources = ethdebug::resources(
+	Json const resources = evmasm::ethdebug::resources(
 		{
 			{.id = 0, .path = "sourceA", .contents = "contentsA", .language = "Solidity"},
 			{.id = 1, .path = "sourceB", .contents = "contentsB", .language = "Yul"}
@@ -462,7 +462,7 @@ BOOST_AUTO_TEST_CASE(ethdebug_resources)
 	);
 	std::string const compilationID = resources["compilation"]["id"];
 	BOOST_REQUIRE(compilationID.substr(0, 5) == "solc-");
-	std::string const repeatedCompilationID = ethdebug::resources(
+	std::string const repeatedCompilationID = evmasm::ethdebug::resources(
 		{
 			{.id = 0, .path = "sourceA", .contents = "contentsA", .language = "Solidity"},
 			{.id = 1, .path = "sourceB", .contents = "contentsB", .language = "Yul"}
@@ -470,7 +470,7 @@ BOOST_AUTO_TEST_CASE(ethdebug_resources)
 		"version1"
 	)["compilation"]["id"];
 	BOOST_REQUIRE(compilationID == repeatedCompilationID);
-	std::string const changedCompilationID = ethdebug::resources(
+	std::string const changedCompilationID = evmasm::ethdebug::resources(
 		{
 			{.id = 0, .path = "sourceA", .contents = "changedContentsA", .language = "Solidity"},
 			{.id = 1, .path = "sourceB", .contents = "contentsB", .language = "Yul"}
