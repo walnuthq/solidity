@@ -1,0 +1,5 @@
+{"format": "solidity-ethdebug-semantic-data", "version": 1, "scopes": {"-0": {"0": {"variableDefinitions": []}}}}
+// ====
+// document: sidecar
+// ----
+// Error: sidecar.scopes has the key "-0", which is not a decimal integer.

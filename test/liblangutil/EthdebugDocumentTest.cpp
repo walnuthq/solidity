@@ -19,6 +19,7 @@
 #include <test/liblangutil/EthdebugDocumentTest.h>
 
 #include <liblangutil/EthdebugSchema.h>
+#include <liblangutil/SemanticDebugDataSerialization.h>
 
 #include <libsolutil/JSON.h>
 
@@ -38,7 +39,7 @@ EthdebugDocumentTest::EthdebugDocumentTest(std::string const& _filename):
 {
 	m_source = m_reader.source();
 	m_expectation = m_reader.simpleExpectations();
-	m_document = m_reader.enumSetting<Document>("document", {{"resources", Document::Resources}}, "resources");
+	m_document = m_reader.enumSetting<Document>("document", {{"resources", Document::Resources}, {"sidecar", Document::Sidecar}}, "resources");
 	if (!_filename.ends_with(".ethdebugjson"))
 		BOOST_THROW_EXCEPTION(std::runtime_error("Not an ethdebug document test: \"" + _filename + "\". Expected extension: .ethdebugjson."));
 }
@@ -71,6 +72,9 @@ frontend::test::TestCase::TestResult EthdebugDocumentTest::run(std::ostream& _st
 			output = Json{{"types", serialized["types"]}, {"pointers", serialized["pointers"]}};
 			break;
 		}
+		case Document::Sidecar:
+			output = semanticDebugDataToJson(semanticDebugDataFromJson(input));
+			break;
 		}
 		m_obtainedResult = util::jsonPrint(output, util::JsonFormat{util::JsonFormat::Pretty, 4}) + "\n";
 	}

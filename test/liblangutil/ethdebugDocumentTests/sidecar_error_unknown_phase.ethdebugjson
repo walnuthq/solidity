@@ -1,0 +1,5 @@
+{"format": "solidity-ethdebug-semantic-data", "version": 1, "scopes": {"1": {"0": {"variableDefinitions": [{"phase": "gone"}]}}}}
+// ====
+// document: sidecar
+// ----
+// Error: sidecar.scopes.1.0.variableDefinitions[0].phase has the unknown value "gone".

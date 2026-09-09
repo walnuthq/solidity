@@ -1,0 +1,5 @@
+{"format": "solidity-ethdebug-semantic-data", "version": 1, "scopes": {"1": {"0": {"variableDefinitions": [], "variableUpdates": [{"variableASTID": 3}]}}}}
+// ====
+// document: sidecar
+// ----
+// Error: sidecar.scopes.1.0.variableUpdates[0] must change the phase or the pointer.
