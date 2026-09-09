@@ -408,6 +408,43 @@ class StandardJSONOutputTest(EthdebugTestCase):
                         composed = kind in ("struct", "array", "mapping") or dynamic
                         self.assertEqual(type_id in pointers, composed)
 
+    def test_program_contexts_list_the_storage_variables(self):
+        """The program-level context names the storage variables of the contract with their
+        types and a closed pointer: a region for a value type and for a mapping's base slot,
+        the template of the type with the slot bound for any other type."""
+        self.templates = self.resources["pointers"]
+        layouts = {"storage": "storageLayout", "transient": "transientStorageLayout"}
+        for output_selection in PROGRAM_OUTPUTS:
+            for source_name, contract_name, program in ethdebug_programs(self.solc_output, output_selection):
+                contract_output = self.solc_output["contracts"][source_name][contract_name]
+                layout_variables = {
+                    variable["label"]: (location, variable)
+                    for location, layout_output in layouts.items()
+                    for variable in contract_output[layout_output]["storage"]
+                }
+                context_variables = {
+                    variable["identifier"]: variable
+                    for variable in program.get("context", {}).get("variables", [])
+                }
+                with self.subTest(output=output_selection, contract=contract_name):
+                    self.assertEqual(set(context_variables), set(layout_variables))
+                    for label, (location, layout_variable) in layout_variables.items():
+                        variable = context_variables[label]
+                        type_id = escaped_type_id(layout_variable["type"])
+                        self.assertEqual(variable["type"], {"id": type_id})
+                        self.assertIn(type_id, self.resources["types"])
+                        pointer = variable["pointer"]
+                        self.assertPointerIsClosed(pointer, set(), region_names(pointer))
+                        kind = self.resources["types"][type_id]["kind"]
+                        if kind != "mapping" and type_id in self.templates:
+                            self.assertEqual(int(pointer["define"]["slot"], 16), int(layout_variable["slot"]))
+                            self.assertEqual(pointer["in"], {"template": type_id})
+                        else:
+                            # A value type, or a mapping represented by its base slot.
+                            self.assertEqual(pointer["location"], location)
+                            self.assertEqual(int(pointer["slot"], 16), int(layout_variable["slot"]))
+                            self.assertRegionCoversLayoutOffset(pointer, layout_variable["offset"])
+
 
 class ResourcesTestSourcesTest(EthdebugTestCase):
     """The resources of the isoltest cases under ethdebugTests/resources/."""

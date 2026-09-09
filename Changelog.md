@@ -7,6 +7,7 @@ Compiler Features:
 * Standard JSON Interface: Selecting an ethdebug output no longer implicitly enables the `ethdebug` and `ast-id` components of `settings.debug.debugInfo`; without `ethdebug` in the selection the `evm.bytecode.ethdebug` and `evm.deployedBytecode.ethdebug` outputs carry no semantic debug info.
 * Yul Optimizer: Improve performance of `DataFlowAnalyzer` using flat hash containers.
 * ethdebug: Populate the type and pointer tables of `ethdebug/format/info/resources` with the type documents of every type a contract's state variables, functions and modifiers reference and with a pointer template for every struct, array and mapping type of its state variables (experimental).
+* ethdebug: Publish the state variables in storage and transient storage in the program-level context of the `ethdebug/format/program` outputs, with their declaration, type reference and pointer (experimental).
 
 Bugfixes:
 * Parser: Fix inverted version pragma range comparison for components in the range [2**31, 2**32).

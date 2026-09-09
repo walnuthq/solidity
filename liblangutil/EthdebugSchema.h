@@ -25,6 +25,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -504,8 +505,11 @@ struct Context
 	{
 		std::optional<std::string> identifier;
 		std::optional<materials::SourceRange> declaration;
-		// TODO: type
-		// TODO: pointer according to ethdebug/format/spec/pointer
+		/// The variable's type, usually a reference into the type resources.
+		std::optional<Type::Specifier> type;
+		/// Where the value lives. Omitted for a variable whose pointer is a
+		/// template expecting parameters, which stays in the pointer resources.
+		std::optional<Pointer> pointer;
 	};
 
 	std::optional<materials::SourceRange> code;
@@ -632,6 +636,14 @@ Pointer::Template templateFromJson(Json const& _json, std::string_view _path, Po
 /// Whether @a _pointer, including the templates it defines locally,
 /// contains a compiler-internal expression such as YulLocal.
 bool hasInternalExpression(Pointer const& _pointer);
+
+/// The names @a _pointer reads and nothing inside it binds: Yul locals and
+/// variables that no scope definition, list index or template parameter
+/// binds. Template references are followed through the templates blocks
+/// enclosing them and through @a _templates, with the template's own
+/// parameters bound; a reference to an unknown template contributes
+/// nothing, and neither does a template that references itself.
+std::set<std::string> freeNames(Pointer const& _pointer, std::map<std::string, Pointer::Template> const& _templates);
 
 namespace info
 {

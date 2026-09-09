@@ -147,3 +147,6 @@ The Programs
 A program (schema ``ethdebug/format/program``) describes one bytecode: the creation bytecode or the runtime bytecode of a contract.
 It names the ``contract`` and the source range of its definition, states the ``environment`` the bytecode runs in, ``create`` or ``call``, and lists its ``instructions``.
 Every instruction carries its byte ``offset`` in the bytecode, the ``operation`` with the ``mnemonic`` of the opcode and the ``arguments`` of a push, and, where the compiler knows it, a ``context`` with the source range of the code the instruction was generated from.
+
+The program of a contract with state variables in storage or transient storage also carries a program-level ``context`` listing them as ``variables``.
+Every such variable names its ``identifier`` and the source range of its ``declaration``, refers to its ``type`` by identifier into the type table and carries its ``pointer``: a single region for a value type, a reference to the template of its type with ``slot`` bound to the variable's slot for a struct, an array, ``bytes`` or ``string``, and the region of its base slot for a mapping, whose entries the mapping's template locates once a key is bound.

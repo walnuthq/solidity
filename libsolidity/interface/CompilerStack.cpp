@@ -1224,8 +1224,18 @@ Json CompilerStack::ethdebug(Contract const& _contract, bool _runtime) const
 	if (!assembly)
 		return {};
 
-	solAssert(sourceIndices().contains(_contract.contract->sourceUnitName()));
-	return evmasm::ethdebug::program(_contract.contract->name(), sourceIndices()[_contract.contract->sourceUnitName()], *assembly, object);
+	std::map<std::string, unsigned> const sourceIndexMap = sourceIndices();
+	solAssert(sourceIndexMap.contains(_contract.contract->sourceUnitName()));
+	return evmasm::ethdebug::program(
+		_contract.contract->name(),
+		sourceIndexMap.at(_contract.contract->sourceUnitName()),
+		*assembly,
+		object,
+		ethdebug::programContext(
+			ethdebug::stateVariableScope(*_contract.contract, sourceIndexMap),
+			ethdebug::resources(*_contract.contract, sourceIndexMap)
+		)
+	);
 }
 
 bytes CompilerStack::cborMetadata(std::string const& _contractName, bool _forIR) const
