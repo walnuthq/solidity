@@ -1,0 +1,5 @@
+{"format": "solidity-ethdebug-semantic-data", "version": 2, "scopes": {}}
+// ====
+// document: sidecar
+// ----
+// Error: Unsupported semantic debug data format version 2.

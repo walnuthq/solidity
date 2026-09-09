@@ -1,0 +1,5 @@
+{"format": "solidity-ethdebug-semantic-data", "version": 1}
+// ====
+// document: sidecar
+// ----
+// Error: sidecar.scopes is required.
