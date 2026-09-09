@@ -10,7 +10,7 @@ This page is aimed at compiler developers.
 It describes how the compiler derives the :ref:`ethdebug output <ethdebug>` from its analysis results: how each type of the language maps to the type schema and what the pointers of the state variables look like for each kind of type and location.
 The debug info that is passed from the Solidity frontend through Yul is specified in :doc:`ethdebug_internal_debug_info`.
 
-The documents are modelled as data structures in ``libevmasm/EthdebugSchema.h``, one per schema, and serialized to JSON from there.
+The documents are modelled as data structures in ``liblangutil/EthdebugSchema.h``, one per schema, and serialized to JSON from there.
 The constructors of the parts assert the constraints of the schemas, so that the compiler cannot assemble a document that does not serialize.
 The frontend side, ``libsolidity/interface/Ethdebug.cpp``, builds the type documents and the pointer templates of a contract from its AST and types.
 
