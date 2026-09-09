@@ -1,0 +1,5 @@
+{"format": "solidity-ethdebug-semantic-data", "version": 1, "resources": {"pointers": {"p": {"expect": [], "for": {"location": "stack", "slot": {"$$yulLocal": "x"}}}}}, "scopes": {}}
+// ====
+// document: sidecar
+// ----
+// Error: sidecar.resources.pointers.p.for.slot uses the compiler-internal expression key "$$yulLocal", which is not accepted here.

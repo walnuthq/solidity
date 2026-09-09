@@ -1,0 +1,5 @@
+{"format": "something-else", "version": 1, "scopes": {}}
+// ====
+// document: sidecar
+// ----
+// Error: Unsupported semantic debug data format "something-else".

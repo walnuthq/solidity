@@ -1,0 +1,5 @@
+{"format": "solidity-ethdebug-semantic-data", "version": 1, "scopes": {"1": {"0": {"variableDefinitions": [{"phase": "computed", "pointer": {"location": "stack", "slot": 0}}]}}}}
+// ====
+// document: sidecar
+// ----
+// Error: sidecar.scopes.1.0.variableDefinitions[0] is computed but has a pointer.
