@@ -153,8 +153,9 @@ The scope record therefore carries declaration identity, type, and initial recov
      - Identity of the source-language declaration.
        Synthetic bindings may omit it.
    * - ``declarationSourceRange``
-     - optional ``SourceLocation``
-     - Source range of the declaration.
+     - optional ethdebug ``materials::SourceRange``
+     - Source range of the declaration: the numeric source ID of the ``ethdebug.compilation`` record with the byte offset and length.
+       ``SourceLocation`` identifies sources by name, which the sidecar never uses as an ID.
    * - ``typeID``
      - optional string
      - Key of the variable's document in ``ethdebug.resources.types``.

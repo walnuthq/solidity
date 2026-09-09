@@ -303,6 +303,13 @@ struct Pointer
 	/// @returns whether @a _text names a region: an identifier or `$this`.
 	static bool isRegionReference(std::string_view _text);
 
+	/// What a reader accepts beyond ethdebug/format.
+	struct ReadOptions
+	{
+		/// Accept the compiler-internal YulLocal expression.
+		bool internalExpressions = false;
+	};
+
 	/// An unsigned number or `0x`-prefixed hex string.
 	struct Literal
 	{
@@ -374,10 +381,23 @@ struct Pointer
 		std::shared_ptr<Expression const> operand;
 	};
 
+	/// Compiler-internal, not part of ethdebug/format: a generated Yul local
+	/// standing in for a stack depth that is only known once Yul has been
+	/// compiled to EVM. Written as `{ "$$yulLocal": <name> }`, with the `$$`
+	/// prefix that the format's own expressions cannot use, in the compiler's
+	/// sidecar only; public output rejects it (see hasInternalExpression).
+	struct YulLocal
+	{
+		/// @a _name must not be empty.
+		explicit YulLocal(std::string _name);
+
+		std::string name;
+	};
+
 	/// ethdebug/format/pointer/expression
 	struct Expression
 	{
-		std::variant<Literal, Variable, Constant, Lookup, Read, Arithmetic, Keccak256, Concat, Resize> value;
+		std::variant<Literal, Variable, Constant, Lookup, Read, Arithmetic, Keccak256, Concat, Resize, YulLocal> value;
 	};
 
 	enum class Location { Stack, Memory, Storage, Calldata, Returndata, Transient, Code };
@@ -605,16 +625,20 @@ SourceRange sourceRangeFromJson(Json const& _json, std::string_view _path);
 Type typeFromJson(Json const& _json, std::string_view _path);
 Type::Wrapper wrapperFromJson(Json const& _json, std::string_view _path);
 
-Pointer::Expression expressionFromJson(Json const& _json, std::string_view _path);
-Pointer pointerFromJson(Json const& _json, std::string_view _path);
-Pointer::Template templateFromJson(Json const& _json, std::string_view _path);
+Pointer::Expression expressionFromJson(Json const& _json, std::string_view _path, Pointer::ReadOptions _options = {});
+Pointer pointerFromJson(Json const& _json, std::string_view _path, Pointer::ReadOptions _options = {});
+Pointer::Template templateFromJson(Json const& _json, std::string_view _path, Pointer::ReadOptions _options = {});
+
+/// Whether @a _pointer, including the templates it defines locally,
+/// contains a compiler-internal expression such as YulLocal.
+bool hasInternalExpression(Pointer const& _pointer);
 
 namespace info
 {
 /// The type table of a resources object, keyed by type ID.
 std::map<std::string, Type> typesFromJson(Json const& _json, std::string_view _path);
 /// The pointer table of a resources object, keyed by template name.
-std::map<std::string, Pointer::Template> pointersFromJson(Json const& _json, std::string_view _path);
+std::map<std::string, Pointer::Template> pointersFromJson(Json const& _json, std::string_view _path, Pointer::ReadOptions _options = {});
 }
 
 }

@@ -1,0 +1,5 @@
+{"format": "solidity-ethdebug-semantic-data", "version": 1, "scopes": {"99999999999999999999": {"0": {"variableDefinitions": []}}}}
+// ====
+// document: sidecar
+// ----
+// Error: sidecar.scopes has the key "99999999999999999999", which is out of range.

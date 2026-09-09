@@ -36,7 +36,8 @@ namespace solidity::langutil::test
 ///
 /// Available settings:
 /// - document: The document kind. `resources` (the default) reads the `types`
-///     and `pointers` tables of ethdebug/format/info/resources.
+///     and `pointers` tables of ethdebug/format/info/resources; `sidecar` reads
+///     the semantic debug info sidecar.
 class EthdebugDocumentTest: public frontend::test::TestCase
 {
 public:
@@ -49,7 +50,7 @@ public:
 	TestResult run(std::ostream& _stream, std::string const& _linePrefix = "", bool const _formatted = false) override;
 
 private:
-	enum class Document { Resources };
+	enum class Document { Resources, Sidecar };
 
 	Document m_document = Document::Resources;
 };

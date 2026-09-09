@@ -1,0 +1,5 @@
+{"format": "solidity-ethdebug-semantic-data", "version": 1, "scopes": {"1": {"0": {"variableDefinitions": [{"phase": "materialized"}]}}}}
+// ====
+// document: sidecar
+// ----
+// Error: sidecar.scopes.1.0.variableDefinitions[0] is materialized but has no pointer.
