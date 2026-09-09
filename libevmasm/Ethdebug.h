@@ -21,13 +21,16 @@
 #include <libsolutil/JSON.h>
 
 #include <libevmasm/Assembly.h>
-#include <libevmasm/EthdebugSchema.h>
+#include <liblangutil/EthdebugSchema.h>
 #include <libevmasm/LinkerObject.h>
 
 #include <map>
 
 namespace solidity::evmasm::ethdebug
 {
+
+// The schema structures live in liblangutil, next to the debug data that carries them.
+namespace schema = langutil::ethdebug::schema;
 
 struct Source
 {

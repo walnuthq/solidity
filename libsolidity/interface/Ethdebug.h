@@ -24,7 +24,7 @@
 
 #include <libsolidity/ast/ASTForward.h>
 
-#include <libevmasm/EthdebugSchema.h>
+#include <liblangutil/EthdebugSchema.h>
 
 #include <map>
 #include <string>
@@ -37,13 +37,13 @@ struct Resources
 {
 	/// Type documents keyed by the compiler's type identifier. Composed types
 	/// reference their component types by that identifier.
-	std::map<std::string, evmasm::ethdebug::schema::Type> types;
+	std::map<std::string, langutil::ethdebug::schema::Type> types;
 	/// The pointer template of every struct, array and mapping type the state
 	/// variables have or are composed of, keyed by the compiler's type
 	/// identifier: the layout of a value of the type from a base slot, which
 	/// the template expects as `slot`. A mapping's template expects `key` as
 	/// well. Value types have no template; they are single regions.
-	std::map<std::string, evmasm::ethdebug::schema::Pointer::Template> pointers;
+	std::map<std::string, langutil::ethdebug::schema::Pointer::Template> pointers;
 
 	/// Adds the tables of @a _other, replacing entries with the same key.
 	void merge(Resources _other);
