@@ -24,6 +24,8 @@
 #include <libsolutil/Numeric.h>
 #include <libsolutil/Visitor.h>
 
+#include <range/v3/algorithm/any_of.hpp>
+
 #include <cctype>
 #include <string_view>
 
@@ -108,6 +110,11 @@ schema::Pointer::Resize::Resize(std::optional<unsigned> _size, std::shared_ptr<E
 {
 	solAssert(!size || *size > 0, "Resize expression needs a positive byte width.");
 	solAssert(operand, "Resize expression without an operand.");
+}
+
+schema::Pointer::YulLocal::YulLocal(std::string _name): name(std::move(_name))
+{
+	solAssert(!name.empty(), "Yul local expression without a name.");
 }
 
 schema::Pointer::Region::Region(
@@ -457,7 +464,8 @@ void schema::to_json(Json& _json, Pointer::Expression const& _expression)
 				_json = Json{{"$sized" + std::to_string(*_resize.size), *_resize.operand}};
 			else
 				_json = Json{{"$wordsized", *_resize.operand}};
-		}
+		},
+		[&](Pointer::YulLocal const& _yulLocal) { _json = Json{{"$$yulLocal", _yulLocal.name}}; }
 	}, _expression.value);
 }
 
@@ -626,6 +634,7 @@ void schema::info::to_json(Json& _json, Resources const& _resources)
 	for (auto const& [name, pointerTemplate]: _resources.pointers)
 	{
 		solAssert(Pointer::isIdentifier(name), "Pointer template name \"" + name + "\" is not an identifier.");
+		solAssert(!hasInternalExpression(*pointerTemplate.body), "Pointer template \"" + name + "\" contains a compiler-internal expression.");
 		_json["pointers"][name] = pointerTemplate;
 	}
 }
@@ -914,9 +923,10 @@ schema::Type typeFromJson(Json const& _json, std::string_view _path, size_t _dep
 	invalid(member(_path, "kind") + " has the unknown value \"" + kind + "\".");
 }
 
-schema::Pointer::Expression expressionFromJson(Json const& _json, std::string_view _path, size_t _depth);
-schema::Pointer pointerFromJson(Json const& _json, std::string_view _path, size_t _depth);
-schema::Pointer::Template templateFromJson(Json const& _json, std::string_view _path, size_t _depth);
+using ReadOptions = schema::Pointer::ReadOptions;
+schema::Pointer::Expression expressionFromJson(Json const& _json, std::string_view _path, size_t _depth, ReadOptions _options);
+schema::Pointer pointerFromJson(Json const& _json, std::string_view _path, size_t _depth, ReadOptions _options);
+schema::Pointer::Template templateFromJson(Json const& _json, std::string_view _path, size_t _depth, ReadOptions _options);
 
 std::string regionReferenceFromJson(Json const& _json, std::string_view _path)
 {
@@ -926,18 +936,18 @@ std::string regionReferenceFromJson(Json const& _json, std::string_view _path)
 	return reference;
 }
 
-schema::Pointer::Operands operandsFromJson(Json const& _json, std::string_view _path, size_t _depth, std::optional<size_t> _arity)
+schema::Pointer::Operands operandsFromJson(Json const& _json, std::string_view _path, size_t _depth, std::optional<size_t> _arity, ReadOptions _options)
 {
 	util::requireArray(_json, _path);
 	if (_arity && _json.size() != *_arity)
 		invalid(std::string(_path) + " must have exactly " + std::to_string(*_arity) + " operands.");
 	schema::Pointer::Operands operands;
 	for (size_t index = 0; index < _json.size(); ++index)
-		operands.emplace_back(expressionFromJson(_json.at(index), element(_path, index), _depth + 1));
+		operands.emplace_back(expressionFromJson(_json.at(index), element(_path, index), _depth + 1, _options));
 	return operands;
 }
 
-schema::Pointer::Expression expressionFromJson(Json const& _json, std::string_view _path, size_t _depth)
+schema::Pointer::Expression expressionFromJson(Json const& _json, std::string_view _path, size_t _depth, ReadOptions _options)
 {
 	using Pointer = schema::Pointer;
 	using Expression = Pointer::Expression;
@@ -960,7 +970,7 @@ schema::Pointer::Expression expressionFromJson(Json const& _json, std::string_vi
 	std::string const valuePath = member(_path, key);
 
 	auto const arithmetic = [&](Pointer::Arithmetic::Operator _operator, std::optional<size_t> _arity) {
-		return Expression{Pointer::Arithmetic{_operator, operandsFromJson(value, valuePath, _depth, _arity)}};
+		return Expression{Pointer::Arithmetic{_operator, operandsFromJson(value, valuePath, _depth, _arity, _options)}};
 	};
 	if (key == ".slot")
 		return Expression{Pointer::Lookup{Pointer::Lookup::Property::Slot, regionReferenceFromJson(value, valuePath)}};
@@ -981,11 +991,11 @@ schema::Pointer::Expression expressionFromJson(Json const& _json, std::string_vi
 	if (key == "$remainder")
 		return arithmetic(Pointer::Arithmetic::Operator::Remainder, 2);
 	if (key == "$keccak256")
-		return Expression{Pointer::Keccak256{operandsFromJson(value, valuePath, _depth, std::nullopt)}};
+		return Expression{Pointer::Keccak256{operandsFromJson(value, valuePath, _depth, std::nullopt, _options)}};
 	if (key == "$concat")
-		return Expression{Pointer::Concat{operandsFromJson(value, valuePath, _depth, std::nullopt)}};
+		return Expression{Pointer::Concat{operandsFromJson(value, valuePath, _depth, std::nullopt, _options)}};
 	if (key == "$wordsized")
-		return Expression{Pointer::Resize{std::nullopt, std::make_shared<Expression const>(expressionFromJson(value, valuePath, _depth + 1))}};
+		return Expression{Pointer::Resize{std::nullopt, std::make_shared<Expression const>(expressionFromJson(value, valuePath, _depth + 1, _options))}};
 	if (key.starts_with("$sized"))
 	{
 		std::string const width = key.substr(6);
@@ -1000,19 +1010,28 @@ schema::Pointer::Expression expressionFromJson(Json const& _json, std::string_vi
 		{
 			invalid(std::string(_path) + " has the malformed resize key \"" + key + "\".");
 		}
-		return Expression{Pointer::Resize{size, std::make_shared<Expression const>(expressionFromJson(value, valuePath, _depth + 1))}};
+		return Expression{Pointer::Resize{size, std::make_shared<Expression const>(expressionFromJson(value, valuePath, _depth + 1, _options))}};
 	}
+	if (key == "$$yulLocal" && _options.internalExpressions)
+	{
+		std::string name = util::valueOfType<std::string>(value, valuePath);
+		if (name.empty())
+			invalid(valuePath + " must name a Yul variable.");
+		return Expression{Pointer::YulLocal{std::move(name)}};
+	}
+	if (key.starts_with("$$"))
+		invalid(std::string(_path) + " uses the compiler-internal expression key \"" + key + "\", which is not accepted here.");
 	invalid(std::string(_path) + " has the unknown expression key \"" + key + "\".");
 }
 
-std::optional<schema::Pointer::Expression> optionalExpression(Json const& _json, std::string_view _name, std::string_view _path, size_t _depth)
+std::optional<schema::Pointer::Expression> optionalExpression(Json const& _json, std::string_view _name, std::string_view _path, size_t _depth, ReadOptions _options)
 {
 	if (Json const* value = util::optionalMember(_json, _name, _path))
-		return expressionFromJson(*value, member(_path, _name), _depth + 1);
+		return expressionFromJson(*value, member(_path, _name), _depth + 1, _options);
 	return std::nullopt;
 }
 
-schema::Pointer::Region regionFromJson(Json const& _json, std::string_view _path, size_t _depth)
+schema::Pointer::Region regionFromJson(Json const& _json, std::string_view _path, size_t _depth, ReadOptions _options)
 {
 	using Location = schema::Pointer::Location;
 	util::requireOnlyMembers(_json, {"name", "location", "slot", "offset", "length"}, _path);
@@ -1038,9 +1057,9 @@ schema::Pointer::Region regionFromJson(Json const& _json, std::string_view _path
 		location = Location::Code;
 	else
 		invalid(member(_path, "location") + " has the unknown value \"" + locationName + "\".");
-	std::optional<schema::Pointer::Expression> slot = optionalExpression(_json, "slot", _path, _depth);
-	std::optional<schema::Pointer::Expression> offset = optionalExpression(_json, "offset", _path, _depth);
-	std::optional<schema::Pointer::Expression> length = optionalExpression(_json, "length", _path, _depth);
+	std::optional<schema::Pointer::Expression> slot = optionalExpression(_json, "slot", _path, _depth, _options);
+	std::optional<schema::Pointer::Expression> offset = optionalExpression(_json, "offset", _path, _depth, _options);
+	std::optional<schema::Pointer::Expression> length = optionalExpression(_json, "length", _path, _depth, _options);
 	// Word-oriented locations address by slot, byte-oriented ones by offset and length.
 	if (wordOriented && !slot)
 		invalid(std::string(_path) + " must address its slot.");
@@ -1049,17 +1068,17 @@ schema::Pointer::Region regionFromJson(Json const& _json, std::string_view _path
 	return schema::Pointer::Region{std::move(name), location, std::move(slot), std::move(offset), std::move(length)};
 }
 
-schema::Pointer pointerFromJson(Json const& _json, std::string_view _path, size_t _depth)
+schema::Pointer pointerFromJson(Json const& _json, std::string_view _path, size_t _depth, ReadOptions _options)
 {
 	using Pointer = schema::Pointer;
 	requireDepth(_depth, _path);
 	util::requireObject(_json, _path);
 	auto const subPointer = [&](Json const& _sub, std::string const& _subPath) {
-		return std::make_shared<Pointer const>(pointerFromJson(_sub, _subPath, _depth + 1));
+		return std::make_shared<Pointer const>(pointerFromJson(_sub, _subPath, _depth + 1, _options));
 	};
 
 	if (_json.contains("location"))
-		return Pointer{regionFromJson(_json, _path, _depth)};
+		return Pointer{regionFromJson(_json, _path, _depth, _options)};
 	if (_json.contains("group"))
 	{
 		util::requireOnlyMembers(_json, {"group"}, _path);
@@ -1068,7 +1087,7 @@ schema::Pointer pointerFromJson(Json const& _json, std::string_view _path, size_
 			invalid(member(_path, "group") + " must have at least one member.");
 		std::vector<Pointer> groupMembers;
 		for (size_t index = 0; index < members.size(); ++index)
-			groupMembers.emplace_back(pointerFromJson(members.at(index), element(member(_path, "group"), index), _depth + 1));
+			groupMembers.emplace_back(pointerFromJson(members.at(index), element(member(_path, "group"), index), _depth + 1, _options));
 		return Pointer{Pointer::Group{std::move(groupMembers)}};
 	}
 	if (_json.contains("list"))
@@ -1078,7 +1097,7 @@ schema::Pointer pointerFromJson(Json const& _json, std::string_view _path, size_
 		Json const& list = _json.at("list");
 		util::requireOnlyMembers(list, {"count", "each", "is"}, listPath);
 		return Pointer{Pointer::List{
-			expressionFromJson(util::requiredMember(list, "count", listPath), member(listPath, "count"), _depth + 1),
+			expressionFromJson(util::requiredMember(list, "count", listPath), member(listPath, "count"), _depth + 1, _options),
 			identifierFromJson(util::requiredMember(list, "each", listPath), member(listPath, "each")),
 			subPointer(util::requiredMember(list, "is", listPath), member(listPath, "is"))
 		}};
@@ -1087,7 +1106,7 @@ schema::Pointer pointerFromJson(Json const& _json, std::string_view _path, size_
 	{
 		util::requireOnlyMembers(_json, {"if", "then", "else"}, _path);
 		Pointer::Conditional conditional{
-			expressionFromJson(_json.at("if"), member(_path, "if"), _depth + 1),
+			expressionFromJson(_json.at("if"), member(_path, "if"), _depth + 1, _options),
 			subPointer(util::requiredMember(_json, "then", _path), member(_path, "then")),
 			nullptr
 		};
@@ -1114,13 +1133,13 @@ schema::Pointer pointerFromJson(Json const& _json, std::string_view _path, size_
 			for (auto const& [name, value]: define.items())
 			{
 				requireIdentifierKey(name, member(path, "define"));
-				definitions.emplace_back(name, expressionFromJson(value, member(member(path, "define"), name), depth + 1));
+				definitions.emplace_back(name, expressionFromJson(value, member(member(path, "define"), name), depth + 1, _options));
 			}
 			current = &util::requiredMember(*current, "in", path);
 			path = member(path, "in");
 			++depth;
 		}
-		return Pointer{Pointer::Scope{std::move(definitions), std::make_shared<Pointer const>(pointerFromJson(*current, path, depth))}};
+		return Pointer{Pointer::Scope{std::move(definitions), std::make_shared<Pointer const>(pointerFromJson(*current, path, depth, _options))}};
 	}
 	if (_json.contains("template"))
 	{
@@ -1146,14 +1165,14 @@ schema::Pointer pointerFromJson(Json const& _json, std::string_view _path, size_
 		for (auto const& [templateName, definition]: definitions.items())
 		{
 			requireIdentifierKey(templateName, member(_path, "templates"));
-			templates.emplace_back(templateName, templateFromJson(definition, member(member(_path, "templates"), templateName), _depth + 1));
+			templates.emplace_back(templateName, templateFromJson(definition, member(member(_path, "templates"), templateName), _depth + 1, _options));
 		}
 		return Pointer{Pointer::Templates{std::move(templates), subPointer(util::requiredMember(_json, "in", _path), member(_path, "in"))}};
 	}
 	invalid(std::string(_path) + " is not a pointer: expected one of location, group, list, if, define, template or templates.");
 }
 
-schema::Pointer::Template templateFromJson(Json const& _json, std::string_view _path, size_t _depth)
+schema::Pointer::Template templateFromJson(Json const& _json, std::string_view _path, size_t _depth, ReadOptions _options)
 {
 	requireDepth(_depth, _path);
 	util::requireOnlyMembers(_json, {"expect", "for"}, _path);
@@ -1163,7 +1182,7 @@ schema::Pointer::Template templateFromJson(Json const& _json, std::string_view _
 		expect.emplace_back(identifierFromJson(expectJson.at(index), element(member(_path, "expect"), index)));
 	return schema::Pointer::Template{
 		std::move(expect),
-		std::make_shared<schema::Pointer const>(pointerFromJson(util::requiredMember(_json, "for", _path), member(_path, "for"), _depth + 1))
+		std::make_shared<schema::Pointer const>(pointerFromJson(util::requiredMember(_json, "for", _path), member(_path, "for"), _depth + 1, _options))
 	};
 }
 
@@ -1226,19 +1245,71 @@ schema::Type::Wrapper schema::wrapperFromJson(Json const& _json, std::string_vie
 	return ::wrapperFromJson(_json, _path, 0);
 }
 
-schema::Pointer::Expression schema::expressionFromJson(Json const& _json, std::string_view _path)
+schema::Pointer::Expression schema::expressionFromJson(Json const& _json, std::string_view _path, Pointer::ReadOptions _options)
 {
-	return ::expressionFromJson(_json, _path, 0);
+	return ::expressionFromJson(_json, _path, 0, _options);
 }
 
-schema::Pointer schema::pointerFromJson(Json const& _json, std::string_view _path)
+schema::Pointer schema::pointerFromJson(Json const& _json, std::string_view _path, Pointer::ReadOptions _options)
 {
-	return ::pointerFromJson(_json, _path, 0);
+	return ::pointerFromJson(_json, _path, 0, _options);
 }
 
-schema::Pointer::Template schema::templateFromJson(Json const& _json, std::string_view _path)
+schema::Pointer::Template schema::templateFromJson(Json const& _json, std::string_view _path, Pointer::ReadOptions _options)
 {
-	return ::templateFromJson(_json, _path, 0);
+	return ::templateFromJson(_json, _path, 0, _options);
+}
+
+namespace
+{
+
+bool hasInternalExpression(schema::Pointer::Expression const& _expression)
+{
+	using Pointer = schema::Pointer;
+	auto const anyOperand = [](Pointer::Operands const& _operands) {
+		return ranges::any_of(_operands, [](Pointer::Expression const& _operand) { return hasInternalExpression(_operand); });
+	};
+	return std::visit(util::GenericVisitor{
+		[](Pointer::YulLocal const&) { return true; },
+		[&](Pointer::Arithmetic const& _arithmetic) { return anyOperand(_arithmetic.operands); },
+		[&](Pointer::Keccak256 const& _keccak256) { return anyOperand(_keccak256.operands); },
+		[&](Pointer::Concat const& _concat) { return anyOperand(_concat.operands); },
+		[](Pointer::Resize const& _resize) { return hasInternalExpression(*_resize.operand); },
+		[](auto const&) { return false; }
+	}, _expression.value);
+}
+
+bool hasInternalExpression(std::optional<schema::Pointer::Expression> const& _expression)
+{
+	return _expression && hasInternalExpression(*_expression);
+}
+
+}
+
+bool schema::hasInternalExpression(Pointer const& _pointer)
+{
+	auto const inSubPointer = [](std::shared_ptr<Pointer const> const& _sub) { return _sub && hasInternalExpression(*_sub); };
+	return std::visit(util::GenericVisitor{
+		[](Pointer::Region const& _region)
+		{
+			return ::hasInternalExpression(_region.slot) || ::hasInternalExpression(_region.offset) || ::hasInternalExpression(_region.length);
+		},
+		[](Pointer::Group const& _group) { return ranges::any_of(_group.members, [](Pointer const& _member) { return hasInternalExpression(_member); }); },
+		[&](Pointer::List const& _list) { return ::hasInternalExpression(_list.count) || inSubPointer(_list.is); },
+		[&](Pointer::Conditional const& _conditional)
+		{
+			return ::hasInternalExpression(_conditional.condition) || inSubPointer(_conditional.then) || inSubPointer(_conditional.otherwise);
+		},
+		[&](Pointer::Scope const& _scope)
+		{
+			return ranges::any_of(_scope.definitions, [](auto const& _definition) { return ::hasInternalExpression(_definition.second); }) || inSubPointer(_scope.in);
+		},
+		[](Pointer::TemplateReference const&) { return false; },
+		[&](Pointer::Templates const& _templates)
+		{
+			return ranges::any_of(_templates.templates, [](auto const& _template) { return hasInternalExpression(*_template.second.body); }) || inSubPointer(_templates.in);
+		}
+	}, _pointer.value);
 }
 
 std::map<std::string, schema::Type> schema::info::typesFromJson(Json const& _json, std::string_view _path)
@@ -1250,14 +1321,14 @@ std::map<std::string, schema::Type> schema::info::typesFromJson(Json const& _jso
 	return types;
 }
 
-std::map<std::string, schema::Pointer::Template> schema::info::pointersFromJson(Json const& _json, std::string_view _path)
+std::map<std::string, schema::Pointer::Template> schema::info::pointersFromJson(Json const& _json, std::string_view _path, Pointer::ReadOptions _options)
 {
 	util::requireObject(_json, _path);
 	std::map<std::string, Pointer::Template> pointers;
 	for (auto const& [name, definition]: _json.items())
 	{
 		requireIdentifierKey(name, _path);
-		pointers.emplace(name, ::templateFromJson(definition, member(_path, name), 0));
+		pointers.emplace(name, ::templateFromJson(definition, member(_path, name), 0, _options));
 	}
 	return pointers;
 }
