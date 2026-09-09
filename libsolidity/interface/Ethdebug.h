@@ -25,8 +25,10 @@
 #include <libsolidity/ast/ASTForward.h>
 
 #include <liblangutil/EthdebugSchema.h>
+#include <liblangutil/SemanticDebugData.h>
 
 #include <map>
+#include <optional>
 #include <string>
 
 namespace solidity::frontend::ethdebug
@@ -53,5 +55,25 @@ struct Resources
 /// variables. @a _sourceIndices maps source unit names to the source IDs of
 /// the ethdebug compilation record, which definition locations refer to.
 Resources resources(ContractDefinition const& _contract, std::map<std::string, unsigned> const& _sourceIndices);
+
+/// The scope record of @a _contract's state variables in storage and
+/// transient storage: each materialized through a reference to its pointer
+/// template in resources(), with its declaration and type reference.
+langutil::SemanticDebugScope stateVariableScope(
+	ContractDefinition const& _contract,
+	std::map<std::string, unsigned> const& _sourceIndices
+);
+
+/// The program-level context of ethdebug/format/program: every materialized
+/// variable of @a _scope whose pointer is closed, i.e. reads no name that is
+/// not bound within it, with its declaration, type reference and, when the
+/// pointer template expects no parameters, the pointer itself. A template
+/// that expects parameters, such as mapping keys, stays in the resources for
+/// the consumer to instantiate; the variable is listed without a pointer.
+/// @returns nothing when no variable qualifies.
+std::optional<langutil::ethdebug::schema::program::Context> programContext(
+	langutil::SemanticDebugScope const& _scope,
+	Resources const& _resources
+);
 
 }

@@ -21,6 +21,8 @@
 #include <libsolidity/ast/AST.h>
 #include <libsolidity/ast/Types.h>
 
+#include <liblangutil/SemanticDebugData.h>
+
 #include <libsolutil/Numeric.h>
 
 #include <memory>
@@ -700,6 +702,92 @@ void ethdebug::Resources::merge(Resources _other)
 		types.insert_or_assign(id, std::move(document));
 	for (auto& [name, pointerTemplate]: _other.pointers)
 		pointers.insert_or_assign(name, std::move(pointerTemplate));
+}
+
+langutil::SemanticDebugScope ethdebug::stateVariableScope(
+	ContractDefinition const& _contract,
+	std::map<std::string, unsigned> const& _sourceIndices
+)
+{
+	TypeRegistry types{_sourceIndices};
+	auto const* typeType = dynamic_cast<TypeType const*>(_contract.type());
+	solAssert(typeType, "Contract TypeType expected.");
+	auto const* contractType = dynamic_cast<ContractType const*>(typeType->actualType());
+	solAssert(contractType, "Contract type expected.");
+
+	langutil::SemanticDebugScope scope;
+	auto const addStateVariables = [&](DataLocation _dataLocation, schema::Pointer::Location _location) {
+		for (auto const& [variable, slot, offset]: contractType->linearizedStateVariables(_dataLocation))
+		{
+			if (variable->name().empty())
+				continue;
+			langutil::SemanticDebugVariable record;
+			record.identifier = identifier(variable->name());
+			record.declarationASTID = variable->id();
+			record.declarationSourceRange = types.sourceRange(variable->location());
+			if (variable->annotation().type && types.registerType(*variable->annotation().type))
+				record.typeID = variable->annotation().type->identifier();
+			record.phase = langutil::SemanticDebugVariablePhase::Materialized;
+			record.pointer = schema::Pointer{schema::Pointer::TemplateReference{templateName(_contract, *variable, _location)}};
+			scope.variableDefinitions.emplace_back(std::move(record));
+		}
+	};
+	addStateVariables(DataLocation::Storage, schema::Pointer::Location::Storage);
+	addStateVariables(DataLocation::Transient, schema::Pointer::Location::Transient);
+	return scope;
+}
+
+std::optional<schema::program::Context> ethdebug::programContext(
+	langutil::SemanticDebugScope const& _scope,
+	Resources const& _resources
+)
+{
+	std::vector<schema::program::Context::Variable> variables;
+	for (langutil::SemanticDebugVariable const& variable: _scope.variableDefinitions)
+	{
+		if (variable.phase != langutil::SemanticDebugVariablePhase::Materialized || !variable.pointer)
+			continue;
+		// A pointer that reads a generated Yul local, or a variable that
+		// nothing binds, is only meaningful once the Yul-to-EVM transform has
+		// resolved it; the program-level context carries closed pointers.
+		if (!schema::freeNames(*variable.pointer, _resources.pointers).empty())
+			continue;
+
+		// A template reference is resolved against the resources and its body
+		// inlined: the context variable's own identifier names the value, so
+		// the reference's renaming of regions does not apply.
+		schema::Pointer const* pointer = &*variable.pointer;
+		std::vector<std::string> const* expectedParameters = nullptr;
+		if (auto const* reference = std::get_if<schema::Pointer::TemplateReference>(&pointer->value))
+		{
+			auto const it = _resources.pointers.find(reference->name);
+			if (it == _resources.pointers.end())
+				continue;
+			pointer = it->second.body.get();
+			expectedParameters = &it->second.expect;
+		}
+
+		schema::program::Context::Variable contextVariable;
+		contextVariable.identifier = variable.identifier;
+		contextVariable.declaration = variable.declarationSourceRange;
+		if (variable.typeID)
+			contextVariable.type = schema::Type::Specifier{schema::Type::Reference{schema::materials::ID{*variable.typeID}}};
+		if (!expectedParameters || expectedParameters->empty())
+		{
+			contextVariable.pointer = *pointer;
+			// The context variable's identifier already names it; a bare
+			// top-level region does not need an extra name.
+			if (auto* region = std::get_if<schema::Pointer::Region>(&contextVariable.pointer->value))
+				region->name = std::nullopt;
+		}
+		variables.emplace_back(std::move(contextVariable));
+	}
+
+	if (variables.empty())
+		return std::nullopt;
+	schema::program::Context context;
+	context.variables = std::move(variables);
+	return context;
 }
 
 ethdebug::Resources ethdebug::resources(ContractDefinition const& _contract, std::map<std::string, unsigned> const& _sourceIndices)

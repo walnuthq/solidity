@@ -155,6 +155,12 @@ TYPE_ID_PATTERNS = {
 }
 
 
+def escaped_type_id(rich_identifier):
+    """The ethdebug type identifier of a type the storage layout names by its rich identifier,
+    e.g. `t_enum(Color)7` for `t_enum$_Color_$7` (Type::escapeIdentifier())."""
+    return rich_identifier.replace("(", "$_").replace(")", "_$").replace(",", "_$_")
+
+
 def classify_type_id(type_id):
     for kind, pattern in TYPE_ID_PATTERNS.items():
         match = pattern.match(type_id)
@@ -396,6 +402,40 @@ class StandardJSONOutputTest(EthdebugTestCase):
                                 any(name.startswith(variable["label"]) for name in region_names(pointer)),
                                 f"No region of {template_name} is named after {variable['label']}",
                             )
+
+    def test_program_contexts_list_the_storage_variables(self):
+        """The program-level context names the storage variables of the contract with their
+        types and, unless the pointer template expects parameters, a closed pointer."""
+        layouts = {"storage": "storageLayout", "transient": "transientStorageLayout"}
+        for output_selection in PROGRAM_OUTPUTS:
+            for source_name, contract_name, program in ethdebug_programs(self.solc_output, output_selection):
+                contract_output = self.solc_output["contracts"][source_name][contract_name]
+                layout_variables = {
+                    variable["label"]: (location, variable)
+                    for location, layout_output in layouts.items()
+                    for variable in contract_output[layout_output]["storage"]
+                }
+                context_variables = {
+                    variable["identifier"]: variable
+                    for variable in program.get("context", {}).get("variables", [])
+                }
+                with self.subTest(output=output_selection, contract=contract_name):
+                    self.assertEqual(set(context_variables), set(layout_variables))
+                    for label, (location, layout_variable) in layout_variables.items():
+                        variable = context_variables[label]
+                        type_id = escaped_type_id(layout_variable["type"])
+                        self.assertEqual(variable["type"], {"id": type_id})
+                        self.assertIn(type_id, self.resources["types"])
+                        if layout_variable["type"].startswith("t_mapping"):
+                            # The template expects the keys, so there is no closed pointer to inline.
+                            self.assertNotIn("pointer", variable)
+                            continue
+                        pointer = variable["pointer"]
+                        self.assertPointerIsClosed(pointer, set(), region_names(pointer))
+                        if "location" in pointer:
+                            self.assertEqual(pointer["location"], location)
+                            self.assertEqual(int(pointer["slot"], 16), int(layout_variable["slot"]))
+                            self.assertRegionCoversLayoutOffset(pointer, layout_variable["offset"])
 
 
 class ResourcesTestSourcesTest(EthdebugTestCase):
