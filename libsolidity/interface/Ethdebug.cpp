@@ -767,6 +767,19 @@ Pointer stateVariablePointer(
 	return valueRegion(_type, _location, literal(_slot), _layoutOffset, std::nullopt);
 }
 
+/// The region of the code holding the value of an immutable variable of type
+/// @a _type whose copy starts at byte @a _codeOffset. A copy is a word holding
+/// the value as it is on the stack, so the value takes the leading bytes of
+/// the word if its type is left-aligned and the trailing ones otherwise.
+Pointer immutableRegion(Type const& _type, size_t _codeOffset)
+{
+	solAssert(_type.isValueType() && _type.sizeOnStack() == 1, "An immutable is a single word.");
+	u256 const byteLength = _type.storageBytes();
+	solAssert(byteLength > 0 && byteLength <= 32);
+	u256 const offset = _type.leftAligned() ? u256(_codeOffset) : u256(_codeOffset) + 32 - byteLength;
+	return {schema::Pointer::Region{std::nullopt, schema::Pointer::Location::Code, std::nullopt, literal(offset), literal(byteLength)}};
+}
+
 void registerCallableTypes(TypeRegistry& _types, CallableDeclaration const& _callable)
 {
 	for (ASTPointer<VariableDeclaration> const& parameter: _callable.parameters())
@@ -791,7 +804,8 @@ void ethdebug::Resources::merge(Resources _other)
 
 langutil::SemanticDebugScope ethdebug::stateVariableScope(
 	ContractDefinition const& _contract,
-	std::map<std::string, unsigned> const& _sourceIndices
+	std::map<std::string, unsigned> const& _sourceIndices,
+	std::map<int64_t, size_t> const& _immutableOffsets
 )
 {
 	TypeRegistry types{_sourceIndices};
@@ -819,6 +833,21 @@ langutil::SemanticDebugScope ethdebug::stateVariableScope(
 	};
 	addStateVariables(DataLocation::Storage, schema::Pointer::Location::Storage);
 	addStateVariables(DataLocation::Transient, schema::Pointer::Location::Transient);
+
+	// An immutable that the code never reads has no copy in it.
+	for (VariableDeclaration const* variable: contractType->immutableVariables())
+		if (auto const codeOffset = _immutableOffsets.find(variable->id()); codeOffset != _immutableOffsets.end())
+		{
+			langutil::SemanticDebugVariable record;
+			record.identifier = identifier(variable->name());
+			record.declarationASTID = variable->id();
+			record.declarationSourceRange = types.sourceRange(variable->location());
+			if (variable->annotation().type && types.registerType(*variable->annotation().type))
+				record.typeID = variable->annotation().type->identifier();
+			record.phase = langutil::SemanticDebugVariablePhase::Materialized;
+			record.pointer = immutableRegion(*variable->annotation().type, codeOffset->second);
+			scope.variableDefinitions.emplace_back(std::move(record));
+		}
 	return scope;
 }
 
@@ -881,6 +910,9 @@ ethdebug::Resources ethdebug::resources(ContractDefinition const& _contract, std
 	};
 	addStateVariables(DataLocation::Storage);
 	addStateVariables(DataLocation::Transient);
+	// Immutables are of value types and need no template.
+	for (VariableDeclaration const* variable: contractType->immutableVariables())
+		types.registerType(*variable->annotation().type);
 
 	// Inherited functions and modifiers are compiled into the most derived
 	// contract, so every linearized base contract contributes its types.

@@ -166,6 +166,26 @@ def pointer_expression_names(expression):
     return (variables, regions)
 
 
+def immutable_names(solc_output):
+    """The names of the immutable variables by the AST IDs of their declarations, which
+    `immutableReferences` is keyed by."""
+    names = {}
+
+    def visit(node):
+        if isinstance(node, dict):
+            if node.get("nodeType") == "VariableDeclaration" and node.get("mutability") == "immutable":
+                names[str(node["id"])] = node["name"]
+            for value in node.values():
+                visit(value)
+        elif isinstance(node, list):
+            for value in node:
+                visit(value)
+
+    for source in solc_output["sources"].values():
+        visit(source["ast"])
+    return names
+
+
 def region_names(pointer):
     names = set()
     if isinstance(pointer, dict):
@@ -432,6 +452,7 @@ class EthdebugSchemaConformityTest(EthdebugTestCase):
                 context_variables = {
                     variable["identifier"]: variable
                     for variable in program.get("context", {}).get("variables", [])
+                    if variable["pointer"].get("location") != "code"
                 }
                 with self.subTest(output=output_selection, contract=contract_name):
                     self.assertEqual(set(context_variables), set(layout_variables))
@@ -451,6 +472,40 @@ class EthdebugSchemaConformityTest(EthdebugTestCase):
                             self.assertEqual(pointer["location"], location)
                             self.assertEqual(int(pointer["slot"], 16), int(layout_variable["slot"]))
                             self.assertRegionCoversLayoutOffset(pointer, layout_variable["offset"])
+
+    def test_runtime_program_contexts_list_the_read_immutables(self):
+        """The context of a runtime program names the immutables the code reads, each with
+        a region within one of the copies of its value in the code. The creation code holds
+        no copies."""
+        names = immutable_names(self.solc_output)
+        self.assertGreater(len(names), 0)
+        for (output_selection, environment) in PROGRAM_OUTPUTS.items():
+            for (source_name, contract_name, program) in ethdebug_programs(self.solc_output, output_selection):
+                contract_output = self.solc_output["contracts"][source_name][contract_name]
+                copies = {}
+                if environment == "call":
+                    copies = {
+                        names[ast_id]: references
+                        for (ast_id, references) in contract_output["evm"]["deployedBytecode"]["immutableReferences"].items()
+                        if ast_id in names
+                    }
+                code_variables = {
+                    variable["identifier"]: variable
+                    for variable in program.get("context", {}).get("variables", [])
+                    if variable["pointer"].get("location") == "code"
+                }
+                with self.subTest(output=output_selection, contract=contract_name):
+                    self.assertEqual(set(code_variables), set(copies))
+                    for (name, references) in copies.items():
+                        variable = code_variables[name]
+                        self.assertIn(variable["type"]["id"], self.resources["types"])
+                        pointer = variable["pointer"]
+                        self.assertEqual(set(pointer), {"location", "offset", "length"})
+                        (start, length) = (int(pointer["offset"], 16), int(pointer["length"], 16))
+                        self.assertTrue(any(
+                            reference["start"] <= start and start + length <= reference["start"] + reference["length"]
+                            for reference in references
+                        ))
 
 
 class ResourcesTestSourcesTest(EthdebugTestCase):
