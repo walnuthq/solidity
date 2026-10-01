@@ -83,6 +83,7 @@
 
 #include <boost/algorithm/string/replace.hpp>
 
+#include <range/v3/algorithm/min_element.hpp>
 #include <range/v3/view/concat.hpp>
 #include <range/v3/view/map.hpp>
 
@@ -1214,13 +1215,23 @@ Json CompilerStack::ethdebug(Contract const& _contract, bool _runtime) const
 
 	std::map<std::string, unsigned> const sourceIndexMap = sourceIndices();
 	solAssert(sourceIndexMap.contains(_contract.contract->sourceUnitName()));
+
+	// The code generator names an immutable after the AST ID of its declaration;
+	// the creation code holds no copies.
+	std::map<int64_t, size_t> immutableOffsets;
+	if (_runtime)
+		for (VariableDeclaration const* immutable: ContractType(*_contract.contract).immutableVariables())
+			for (auto const& [name, codeOffsets]: object.immutableReferences | ranges::views::values)
+				if (name == std::to_string(immutable->id()) && !codeOffsets.empty())
+					immutableOffsets[immutable->id()] = *ranges::min_element(codeOffsets);
+
 	return evmasm::ethdebug::program(
 		_contract.contract->name(),
 		sourceIndexMap.at(_contract.contract->sourceUnitName()),
 		*assembly,
 		object,
 		ethdebug::programContext(
-			ethdebug::stateVariableScope(*_contract.contract, sourceIndexMap),
+			ethdebug::stateVariableScope(*_contract.contract, sourceIndexMap, immutableOffsets),
 			ethdebug::resources(*_contract.contract, sourceIndexMap)
 		)
 	);
