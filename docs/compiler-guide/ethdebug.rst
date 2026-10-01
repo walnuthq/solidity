@@ -22,7 +22,7 @@ Which Types Get a Document
 
 The resources of a contract contain a document for
 
-- the types of its state variables in storage and transient storage,
+- the types of its state variables in storage and transient storage and of its immutable variables,
 - the types of the parameters and return variables of every function and modifier compiled into the contract: the ones it defines, the ones it inherits, the free functions of the source units it references and the internal functions of the libraries in those source units,
 - and, transitively, every type these types are composed of.
 
