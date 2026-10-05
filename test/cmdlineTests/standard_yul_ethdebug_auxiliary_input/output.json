@@ -36,6 +36,10 @@
                                 "name": "C"
                             },
                             "environment": "create",
+                            "ethdebug": {
+                                "schema": "ethdebug/format/program",
+                                "version": "0.1.0-draft.1"
+                            },
                             "instructions": [
                                 {
                                     "context": {
@@ -447,6 +451,10 @@ object \"C_12_deployed\" {
                         "path": "C"
                     }
                 ]
+            },
+            "ethdebug": {
+                "schema": "ethdebug/format/info/resources",
+                "version": "0.1.0-draft.1"
             },
             "pointers": {
                 "storage_12_3": {

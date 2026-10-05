@@ -180,6 +180,7 @@ Json ethdebug::program(
 )
 {
 	return schema::Program{
+		.ethdebug = schema::data::Stamp{"ethdebug/format/program", std::string{SpecificationVersion}},
 		.compilation = std::nullopt,
 		.contract = {
 			.name = std::string{_name},
@@ -205,6 +206,7 @@ Json ethdebug::resources(
 )
 {
 	schema::info::Resources result;
+	result.ethdebug = schema::data::Stamp{"ethdebug/format/info/resources", std::string{SpecificationVersion}};
 	result.compilation = materialCompilation(_sources, _version);
 	result.types = std::move(_types);
 	result.pointers = std::move(_pointers);
