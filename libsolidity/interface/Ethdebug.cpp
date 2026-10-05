@@ -25,7 +25,10 @@
 
 #include <liblangutil/SemanticDebugData.h>
 
+#include <libsolutil/CommonData.h>
 #include <libsolutil/Numeric.h>
+
+#include <range/v3/view/map.hpp>
 
 #include <algorithm>
 #include <functional>
@@ -1026,6 +1029,23 @@ ethdebug::Resources ethdebug::resources(ContractDefinition const& _contract, std
 	result.types = types.takeDocuments();
 	result.pointers = templates.takeTemplates();
 	return result;
+}
+
+ethdebug::Resources ethdebug::resources(langutil::SemanticDebugDataTable const& _table)
+{
+	Resources result;
+	result.types = _table.types();
+	result.pointers = _table.pointerTemplates();
+	return result;
+}
+
+std::optional<schema::program::Context> ethdebug::programContext(langutil::SemanticDebugDataTable const& _table)
+{
+	langutil::SemanticDebugScope variables;
+	for (auto const& scope: _table.scopes() | ranges::views::values)
+		if (scope)
+			variables.variableDefinitions += scope->variableDefinitions;
+	return programContext(variables, resources(_table));
 }
 
 langutil::SemanticDebugDataTable ethdebug::semanticDebugDataTable(
