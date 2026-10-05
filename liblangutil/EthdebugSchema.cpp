@@ -230,6 +230,12 @@ void schema::data::to_json(Json& _json, Unsigned const& _unsigned)
 	}, _unsigned.value);
 }
 
+void schema::data::to_json(Json& _json, Stamp const& _stamp)
+{
+	_json["schema"] = _stamp.schema;
+	_json["version"] = _stamp.version;
+}
+
 void schema::materials::to_json(Json& _json, ID const& _id)
 {
 	std::visit(util::GenericVisitor{
@@ -611,6 +617,8 @@ void schema::program::to_json(Json& _json, Instruction const& _instruction)
 
 void schema::to_json(Json& _json, Program const& _program)
 {
+	if (_program.ethdebug)
+		_json["ethdebug"] = *_program.ethdebug;
 	if (_program.compilation)
 		_json["compilation"] = *_program.compilation;
 	_json["contract"] = _program.contract;
@@ -635,6 +643,8 @@ void schema::to_json(Json& _json, Program::Environment const& _environment)
 
 void schema::info::to_json(Json& _json, Resources const& _resources)
 {
+	if (_resources.ethdebug)
+		_json["ethdebug"] = *_resources.ethdebug;
 	_json["compilation"] = _resources.compilation;
 	_json["types"] = Json::object();
 	for (auto const& [id, type]: _resources.types)

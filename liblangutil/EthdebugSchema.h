@@ -45,6 +45,14 @@ struct HexValue
 	bytes value;
 };
 
+/// ethdebug/format/data/stamp: the schema an object conforms to and the
+/// version of the specification that defines it.
+struct Stamp
+{
+	std::string schema;
+	std::string version;
+};
+
 struct Unsigned
 {
 	template<std::unsigned_integral T>
@@ -545,6 +553,7 @@ struct Program
 		materials::SourceRange definition;
 	};
 
+	std::optional<data::Stamp> ethdebug;
 	std::optional<materials::Reference> compilation;
 	Contract contract;
 	Environment environment;
@@ -559,6 +568,7 @@ namespace info
 /// by the producer's template name.
 struct Resources
 {
+	std::optional<data::Stamp> ethdebug;
 	materials::Compilation compilation;
 	std::map<std::string, Type> types;
 	std::map<std::string, Pointer::Template> pointers;
@@ -570,6 +580,7 @@ namespace data
 {
 void to_json(Json& _json, HexValue const& _hexValue);
 void to_json(Json& _json, Unsigned const& _unsigned);
+void to_json(Json& _json, Stamp const& _stamp);
 }
 
 namespace materials

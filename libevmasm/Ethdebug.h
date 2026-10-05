@@ -41,7 +41,11 @@ struct Source
 	std::string language;
 };
 
-// returns ethdebug/format/program.
+/// The version of the ethdebug/format specification the outputs follow, which
+/// the stamps of the programs and of the resources name.
+constexpr std::string_view SpecificationVersion = "0.1.0-draft.1";
+
+// returns ethdebug/format/program, stamped with its schema and the specification version.
 Json program(
 	std::string_view _name,
 	unsigned _sourceID,
@@ -50,7 +54,7 @@ Json program(
 	std::optional<schema::program::Context> _programContext = std::nullopt
 );
 
-// returns ethdebug/format/info/resources
+// returns ethdebug/format/info/resources, stamped with its schema and the specification version.
 Json resources(
 	std::vector<Source> const& _sources,
 	std::string_view _version,
