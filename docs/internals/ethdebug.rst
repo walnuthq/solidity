@@ -169,3 +169,22 @@ Transient storage
 
 Slot arithmetic on literal slots is folded into the literals, so that the members of a struct at slot 3 are addressed as ``0x03``, ``0x04`` and so on rather than as sums.
 The test cases under ``test/libsolidity/ethdebugTests/resources/`` show the complete type and pointer tables for each of these layouts and are the reference for their exact shape.
+
+Scope Records
+=============
+
+``ethdebug::semanticDebugDataTable()`` builds the side table described in :doc:`ethdebug_internal_debug_info` from analysis results.
+It holds the scope records of a contract, all with instance 0:
+
+- the contract's own, keyed by its AST ID, with the state variables in storage and transient storage, located as in the program-level context,
+- one for every function and modifier compiled into the contract, keyed by its AST ID, with its parameters and return variables in declaration order.
+
+A scope without variables has no record.
+
+Parameters and return variables live on the stack.
+Their pointer is a ``stack`` region whose slot is a ``$$yulLocal`` expression naming the generated Yul local of the unoptimized IR, as ``IRVariable`` names it.
+A value with several stack slots, such as a calldata array or an external function, is a group of regions named after its stack items, such as ``offset`` and ``length``.
+A value without stack slots is optimized out.
+
+Immutables and local variables of blocks have no records yet.
+The test cases ``test/libsolidity/ethdebugTests/semantic_*.sol`` show the records.
