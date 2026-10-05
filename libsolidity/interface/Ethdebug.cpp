@@ -21,16 +21,19 @@
 #include <libsolidity/ast/AST.h>
 #include <libsolidity/ast/TypeProvider.h>
 #include <libsolidity/ast/Types.h>
+#include <libsolidity/codegen/ir/IRVariable.h>
 
 #include <liblangutil/SemanticDebugData.h>
 
 #include <libsolutil/Numeric.h>
 
 #include <algorithm>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -792,6 +795,108 @@ void registerCallableTypes(TypeRegistry& _types, CallableDeclaration const& _cal
 				_types.registerType(*returnParameter->annotation().type);
 }
 
+/// Calls @a _visit for every function and modifier compiled into @a _contract:
+/// those of its linearized base contracts, since inherited definitions are
+/// compiled into the most derived contract, and the free functions and the
+/// internal library functions of the source units it references.
+void forEachCompiledCallable(
+	ContractDefinition const& _contract,
+	std::function<void(CallableDeclaration const&)> const& _visit
+)
+{
+	for (ContractDefinition const* contract: _contract.annotation().linearizedBaseContracts)
+	{
+		for (FunctionDefinition const* function: contract->definedFunctions())
+			_visit(*function);
+		for (ModifierDefinition const* modifier: contract->functionModifiers())
+			_visit(*modifier);
+	}
+
+	// A library's external functions are compiled into the library itself.
+	SourceUnit const& sourceUnit = _contract.sourceUnit();
+	std::set<SourceUnit const*> sourceUnits = sourceUnit.referencedSourceUnits(true);
+	sourceUnits.insert(&sourceUnit);
+	for (SourceUnit const* unit: sourceUnits)
+		for (ASTPointer<ASTNode> const& node: unit->nodes())
+		{
+			if (auto const* freeFunction = dynamic_cast<FunctionDefinition const*>(node.get()))
+				_visit(*freeFunction);
+			else if (auto const* library = dynamic_cast<ContractDefinition const*>(node.get()); library && library->isLibrary())
+				for (FunctionDefinition const* function: library->definedFunctions())
+					if (function->visibility() <= Visibility::Internal)
+						_visit(*function);
+		}
+}
+
+/// The pointer of a value on the stack, held in the generated Yul locals of
+/// @a _variable, which stand in for stack slots until Yul is compiled to EVM:
+/// a region of the local for a value in one stack slot, the pointer of its
+/// only stack item for a value with one, otherwise a group of the pointers of
+/// its stack items, named after the items and prefixed with @a _name.
+/// @returns nothing for a value without stack slots.
+std::optional<Pointer> stackPointer(IRVariable const& _variable, std::optional<std::string> const& _name)
+{
+	std::vector<std::tuple<std::string, Type const*>> const& items = _variable.type().stackItems();
+	if (items.empty())
+		return std::nullopt;
+	if (items.size() == 1 && !std::get<1>(items.front()))
+		return region(
+			schema::Pointer::Location::Stack,
+			_name,
+			Expression{schema::Pointer::YulLocal{_variable.name()}}
+		);
+	if (items.size() == 1)
+		return stackPointer(_variable.part(std::get<0>(items.front())), _name);
+
+	std::vector<Pointer> members;
+	for (auto const& [itemName, itemType]: items)
+	{
+		solAssert(itemType && !itemName.empty(), "A stack item of a value in several slots has a name and a type.");
+		std::string const name = _name ? *_name + "-" + itemName : itemName;
+		if (std::optional<Pointer> member = stackPointer(_variable.part(itemName), identifier(name)))
+			members.emplace_back(std::move(*member));
+	}
+	if (members.empty())
+		return std::nullopt;
+	return group(std::move(members));
+}
+
+/// The record of a parameter or return variable: materialized in the Yul
+/// locals of its stack slots, or optimized out if it has none.
+langutil::SemanticDebugVariable stackVariableRecord(TypeRegistry& _types, VariableDeclaration const& _variable)
+{
+	solAssert(_variable.annotation().type);
+	langutil::SemanticDebugVariable record;
+	if (!_variable.name().empty())
+		record.identifier = identifier(_variable.name());
+	record.declarationASTID = _variable.id();
+	record.declarationSourceRange = _types.sourceRange(_variable.location());
+	if (_types.registerType(*_variable.annotation().type))
+		record.typeID = TypeRegistry::canonical(*_variable.annotation().type).identifier();
+	if (std::optional<Pointer> pointer = stackPointer(IRVariable{_variable}, std::nullopt))
+	{
+		record.phase = langutil::SemanticDebugVariablePhase::Materialized;
+		record.pointer = std::move(*pointer);
+	}
+	else
+		record.phase = langutil::SemanticDebugVariablePhase::OptimizedOut;
+	return record;
+}
+
+/// The scope record of a function or modifier: its parameters and return
+/// variables, in that order.
+langutil::SemanticDebugScope callableScope(TypeRegistry& _types, CallableDeclaration const& _callable)
+{
+	langutil::SemanticDebugScope scope;
+	for (ASTPointer<VariableDeclaration> const& parameter: _callable.parameters())
+		scope.variableDefinitions.emplace_back(stackVariableRecord(_types, *parameter));
+	// Modifiers have no return parameter list.
+	if (_callable.returnParameterList())
+		for (ASTPointer<VariableDeclaration> const& returnParameter: _callable.returnParameters())
+			scope.variableDefinitions.emplace_back(stackVariableRecord(_types, *returnParameter));
+	return scope;
+}
+
 }
 
 void ethdebug::Resources::merge(Resources _other)
@@ -914,33 +1019,38 @@ ethdebug::Resources ethdebug::resources(ContractDefinition const& _contract, std
 	for (VariableDeclaration const* variable: contractType->immutableVariables())
 		types.registerType(*variable->annotation().type);
 
-	// Inherited functions and modifiers are compiled into the most derived
-	// contract, so every linearized base contract contributes its types.
-	for (ContractDefinition const* contract: _contract.annotation().linearizedBaseContracts)
-	{
-		for (FunctionDefinition const* function: contract->definedFunctions())
-			registerCallableTypes(types, *function);
-		for (ModifierDefinition const* modifier: contract->functionModifiers())
-			registerCallableTypes(types, *modifier);
-	}
-
-	// Free functions and internal library functions reachable through imports
-	// are compiled into the contract as well.
-	SourceUnit const& sourceUnit = _contract.sourceUnit();
-	std::set<SourceUnit const*> sourceUnits = sourceUnit.referencedSourceUnits(true);
-	sourceUnits.insert(&sourceUnit);
-	for (SourceUnit const* unit: sourceUnits)
-		for (ASTPointer<ASTNode> const& node: unit->nodes())
-		{
-			if (auto const* freeFunction = dynamic_cast<FunctionDefinition const*>(node.get()))
-				registerCallableTypes(types, *freeFunction);
-			else if (auto const* library = dynamic_cast<ContractDefinition const*>(node.get()); library && library->isLibrary())
-				for (FunctionDefinition const* function: library->definedFunctions())
-					if (function->visibility() <= Visibility::Internal)
-						registerCallableTypes(types, *function);
-		}
+	forEachCompiledCallable(_contract, [&](CallableDeclaration const& _callable) {
+		registerCallableTypes(types, _callable);
+	});
 
 	result.types = types.takeDocuments();
 	result.pointers = templates.takeTemplates();
 	return result;
+}
+
+langutil::SemanticDebugDataTable ethdebug::semanticDebugDataTable(
+	ContractDefinition const& _contract,
+	std::map<std::string, unsigned> const& _sourceIndices
+)
+{
+	langutil::SemanticDebugDataTable table;
+	table.setContractName(_contract.name());
+
+	auto const setScope = [&](int64_t _astID, langutil::SemanticDebugScope _scope) {
+		// A scope without variables has nothing to describe.
+		if (!_scope.variableDefinitions.empty())
+			table.set({_astID, 0}, std::make_shared<langutil::SemanticDebugScope const>(std::move(_scope)));
+	};
+	setScope(_contract.id(), stateVariableScope(_contract, _sourceIndices));
+	TypeRegistry types{_sourceIndices};
+	forEachCompiledCallable(_contract, [&](CallableDeclaration const& _callable) {
+		setScope(_callable.id(), callableScope(types, _callable));
+	});
+
+	Resources contractResources = resources(_contract, _sourceIndices);
+	for (auto& [id, document]: contractResources.types)
+		table.setType(id, std::move(document));
+	for (auto& [id, pointerTemplate]: contractResources.pointers)
+		table.setPointerTemplate(id, std::move(pointerTemplate));
+	return table;
 }
