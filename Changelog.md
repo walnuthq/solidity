@@ -33,6 +33,7 @@ Language Features:
 
 Compiler Features:
 * Commandline Interface: Remove support for the experimental Language Server Protocol (LSP) mode.
+* Commandline Interface: Add the experimental `--ir-ethdebug` output and the assembler-mode `--ethdebug-input` option, which carry the semantic debug info of the Yul IR across a textual Yul boundary.
 * EVM: Deprecate support for "constantinople", "petersburg", "istanbul" and "berlin" EVM versions.
 * Evmasm Optimizer: Improve performance of block deduplicator.
 * General: Improve performance throughout the compiler using Boost's flat versions of unordered set and map.
@@ -40,6 +41,7 @@ Compiler Features:
 * General: Replace the current greedy stack shuffler in the experimental SSA CFG pipeline with a planning one.
 * SMTChecker: Emit a deprecation warning for the BMC engine.
 * SMTChecker: Support `block.slotnum`.
+* Standard JSON Interface: Add the experimental `irEthdebug` output and `auxiliaryInput.ethdebug` input, which carry the semantic debug info of the Yul IR across a textual Yul boundary.
 * Yul: Add the `@ast-id-instance` debug info annotation, which distinguishes Yul scopes cloned from the same Solidity definition.
 * Yul Optimizer: `LoopInvariantCodeMotion` can now move expressions depending on function parameters out of loops.
 * Yul Optimizer: `UnusedStoreEliminator` can now recognize redundant memory and storage operations whose start offset or length is a function parameter.
