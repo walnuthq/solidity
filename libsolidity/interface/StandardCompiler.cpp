@@ -23,6 +23,7 @@
 
 #include <libsolidity/interface/StandardCompiler.h>
 #include <libsolidity/interface/ImportRemapper.h>
+#include <libsolidity/interface/Ethdebug.h>
 
 #include <libsolidity/ast/ASTJsonExporter.h>
 #include <libyul/YulStack.h>
@@ -36,6 +37,7 @@
 #include <libsmtutil/Exceptions.h>
 
 #include <liblangutil/SourceReferenceFormatter.h>
+#include <liblangutil/SemanticDebugDataSerialization.h>
 
 #include <libsolutil/JSON.h>
 #include <libsolutil/Keccak256.h>
@@ -168,7 +170,7 @@ bool hashMatchesContent(std::string const& _hash, std::string const& _content)
 
 bool isArtifactRequested(Json const& _outputSelection, std::string const& _artifact, bool _wildcardMatchesExperimental)
 {
-	static std::set<std::string> experimental{"ir", "irAst", "irOptimized", "irOptimizedAst", "ethdebug"};
+	static std::set<std::string> experimental{"ir", "irAst", "irEthdebug", "irOptimized", "irOptimizedAst", "ethdebug"};
 	for (auto const& selectedArtifactJson: _outputSelection)
 	{
 		std::string const& selectedArtifact = selectedArtifactJson.get<std::string>();
@@ -177,7 +179,7 @@ bool isArtifactRequested(Json const& _outputSelection, std::string const& _artif
 			boost::algorithm::starts_with(_artifact, selectedArtifact + ".")
 		)
 		{
-			if (_artifact.find("ethdebug") != std::string::npos)
+			if (_artifact == "irEthdebug" || _artifact.find("ethdebug") != std::string::npos)
 				// only accept exact matches for ethdebug, e.g. evm.bytecode.ethdebug
 				return selectedArtifact == _artifact;
 			return true;
@@ -185,7 +187,7 @@ bool isArtifactRequested(Json const& _outputSelection, std::string const& _artif
 		else if (selectedArtifact == "*")
 		{
 			// TODO: everything ethdebug related is only experimental for now, so it should not be matched by "*".
-			if (_artifact.find("ethdebug") != std::string::npos)
+			if (_artifact == "irEthdebug" || _artifact.find("ethdebug") != std::string::npos)
 				return false;
 			// "ir", "irOptimized" can only be matched by "*" if activated.
 			if (experimental.count(_artifact) == 0 || _wildcardMatchesExperimental)
@@ -272,7 +274,7 @@ bool isBinaryRequested(Json const& _outputSelection)
 	// This does not include "evm.methodIdentifiers" on purpose!
 	static std::vector<std::string> const outputsThatRequireBinaries = std::vector<std::string>{
 		"*",
-		"ir", "irAst", "irOptimized", "irOptimizedAst",
+		"ir", "irAst", "irEthdebug", "irOptimized", "irOptimizedAst",
 		"evm.gasEstimates", "evm.legacyAssembly", "evm.assembly"
 	} + evmObjectComponents("bytecode") + evmObjectComponents("deployedBytecode");
 
@@ -321,7 +323,7 @@ bool isAnyEthdebugRequested(Json const& _outputSelection)
 		return false;
 
 	static std::array constexpr ethdebugArtifacts{
-		"evm.bytecode.ethdebug", "evm.deployedBytecode.ethdebug",
+		"irEthdebug", "evm.bytecode.ethdebug", "evm.deployedBytecode.ethdebug",
 		"ethdebug.resources", "ethdebug.compilation"
 	};
 
@@ -388,7 +390,8 @@ CompilerStack::ContractSelection pipelineConfig(
 					pipelineForContract.irCodegen ||
 					pipelineForContract.irOptimization ||
 					request == "ir" ||
-					request == "irAst";
+					request == "irAst" ||
+					request == "irEthdebug";
 				pipelineForContract.bytecode = isEvmBytecodeRequested(_jsonOutputSelection);
 			}
 			std::string key = (sourceUnitName == "*") ? "" : sourceUnitName;
@@ -475,7 +478,7 @@ std::optional<Json> checkSourceKeys(Json const& _input, std::string const& _name
 
 std::optional<Json> checkAuxiliaryInputKeys(Json const& _input)
 {
-	static std::set<std::string> keys{"smtlib2responses"};
+	static std::set<std::string> keys{"ethdebug", "smtlib2responses"};
 	return checkKeys(_input, keys, "auxiliaryInput");
 }
 
@@ -846,6 +849,26 @@ std::variant<StandardCompiler::InputsAndSettings, Json> StandardCompiler::parseI
 					);
 
 				ret.smtLib2Responses[hash] = response.get<std::string>();
+			}
+		}
+
+		if (auxInputs.contains("ethdebug"))
+		{
+			if (ret.language != "Yul")
+				return formatFatalError(
+					Error::Type::JSONError,
+					"'auxiliaryInput.ethdebug' can only be used for Yul input."
+				);
+			try
+			{
+				ret.semanticDebugData = semanticDebugDataFromJson(auxInputs["ethdebug"]);
+			}
+			catch (util::JsonValidationError const& _exception)
+			{
+				return formatFatalError(
+					Error::Type::JSONError,
+					"Invalid 'auxiliaryInput.ethdebug': " + stringOrDefault(_exception.comment())
+				);
 			}
 		}
 	}
@@ -1256,11 +1279,29 @@ std::variant<StandardCompiler::InputsAndSettings, Json> StandardCompiler::parseI
 		ret.modelCheckerSettings.timeout = modelCheckerSettings["timeout"].get<Json::number_unsigned_t>();
 	}
 
-	if ((ret.debugInfoSelection.has_value() && ret.debugInfoSelection->ethdebug) || isAnyEthdebugRequested(ret.outputSelection))
+	if (
+		(ret.debugInfoSelection.has_value() && ret.debugInfoSelection->ethdebug) ||
+		isAnyEthdebugRequested(ret.outputSelection) ||
+		ret.semanticDebugData.has_value()
+	)
 	{
 		if (ret.language != "Solidity" && ret.language != "Yul")
 			return formatFatalError(Error::Type::FatalError, "'settings.debug.debugInfo' 'ethdebug' is only supported for languages 'Solidity' and 'Yul'.");
 	}
+
+	// The sidecar carries the semantic debug info itself: requesting it or
+	// attaching one without the ethdebug debug info selection is an error,
+	// unlike the program outputs, which are simply empty.
+	static std::array constexpr semanticSidecarArtifacts{"irEthdebug"};
+	if (
+		(ret.semanticDebugData || areArtifactsRequested(ret.outputSelection, semanticSidecarArtifacts)) &&
+		!(ret.debugInfoSelection.has_value() && ret.debugInfoSelection->ethdebug)
+	)
+		return formatFatalError(
+			Error::Type::FatalError,
+			"'ethdebug' needs to be enabled in 'settings.debug.debugInfo' when using 'irEthdebug' or "
+			"'auxiliaryInput.ethdebug'."
+		);
 
 	if (isEthdebugProgramRequested(ret.outputSelection) && ret.language == "Solidity" && !ret.viaIR)
 		return formatFatalError(Error::Type::FatalError, "'evm.bytecode.ethdebug' or 'evm.deployedBytecode.ethdebug' can only be selected as output, if 'viaIR' was set.");
@@ -1611,6 +1652,14 @@ Json StandardCompiler::compileSolidity(StandardCompiler::InputsAndSettings _inpu
 		// IR
 		if (compilationSuccess && isArtifactRequested(_inputsAndSettings.outputSelection, file, name, "ir", wildcardMatchesExperimental))
 			contractData["ir"] = compilerStack.yulIR(contractName).value_or("");
+		if (compilationSuccess && isArtifactRequested(_inputsAndSettings.outputSelection, file, name, "irEthdebug", wildcardMatchesExperimental))
+		{
+			// The output requires ethdebug in the debug info selection, and the
+			// selection makes IR generation store the table on the contract.
+			auto const& semanticDebugData = compilerStack.yulSemanticDebugData(contractName);
+			solAssert(semanticDebugData, "Semantic debug info missing for contract " + contractName + ".");
+			contractData["irEthdebug"] = semanticDebugDataToJson(*semanticDebugData);
+		}
 		if (compilationSuccess && isArtifactRequested(_inputsAndSettings.outputSelection, file, name, "irAst", wildcardMatchesExperimental))
 			contractData["irAst"] = compilerStack.yulIRAst(contractName).value_or(Json{});
 		if (compilationSuccess && isArtifactRequested(_inputsAndSettings.outputSelection, file, name, "irOptimized", wildcardMatchesExperimental))
@@ -1783,8 +1832,19 @@ Json StandardCompiler::compileYul(InputsAndSettings _inputsAndSettings)
 	else
 	{
 		contractName = stack.parserResult()->name;
+		if (_inputsAndSettings.semanticDebugData)
+		{
+			stack.attachSemanticDebugData(*_inputsAndSettings.semanticDebugData);
+			stack.setEthdebugProgramContext(
+				_inputsAndSettings.semanticDebugData->contractName().value_or(contractName),
+				ethdebug::programContext(stack.semanticDebugData())
+			);
+		}
 		if (isArtifactRequested(_inputsAndSettings.outputSelection, sourceName, contractName, "ir", wildcardMatchesExperimental))
 			output["contracts"][sourceName][contractName]["ir"] = stack.print();
+		if (isArtifactRequested(_inputsAndSettings.outputSelection, sourceName, contractName, "irEthdebug", wildcardMatchesExperimental))
+			output["contracts"][sourceName][contractName]["irEthdebug"] = semanticDebugDataToJson(stack.semanticDebugData());
+
 		if (isArtifactRequested(_inputsAndSettings.outputSelection, sourceName, contractName, "ast", wildcardMatchesExperimental))
 		{
 			Json sourceResult;
@@ -1867,9 +1927,14 @@ Json StandardCompiler::compileYul(InputsAndSettings _inputsAndSettings)
 	if (isEthdebugGlobalOutputRequested(_inputsAndSettings.outputSelection, "ethdebug.resources"))
 	{
 		solAssert(_inputsAndSettings.experimental, "");
+		ethdebug::Resources resources;
+		if (_inputsAndSettings.semanticDebugData)
+			resources = ethdebug::resources(stack.semanticDebugData());
 		output["ethdebug"]["resources"] = evmasm::ethdebug::resources(
 			{{.id = 0, .path = sourceName, .contents = sourceContents, .language = "Yul"}},
-			VersionString
+			VersionString,
+			std::move(resources.types),
+			std::move(resources.pointers)
 		);
 	}
 	if (isEthdebugGlobalOutputRequested(_inputsAndSettings.outputSelection, "ethdebug.compilation"))
