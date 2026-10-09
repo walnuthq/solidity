@@ -163,3 +163,11 @@ The Programs
 A program (schema ``ethdebug/format/program``) describes one bytecode: the creation bytecode or the deployed bytecode of a contract.
 It names the ``contract`` and the source range of its definition, states the ``environment`` the bytecode runs in, ``create`` or ``call``, and lists its ``instructions``.
 Every instruction carries its byte ``offset`` in the bytecode, the ``operation`` with the ``mnemonic`` of the opcode and the ``arguments`` of a push, and, where the compiler knows it, a ``context`` with the source range of the code the instruction was generated from.
+
+The program of a contract with state variables in storage or transient storage also carries a program-level ``context`` listing them as ``variables``.
+Every such variable names its ``identifier`` and the source range of its ``declaration``, refers to its ``type`` by identifier into the type table and carries its ``pointer``: a single region for a value type, a reference to the template of its type with ``slot`` bound to the variable's slot for a struct, an array, ``bytes`` or ``string``, and the region of its base slot for a mapping, whose entries the mapping's template locates once a key is bound.
+
+The deployed program lists the immutable variables of the contract as well, after the variables in storage and transient storage.
+The deployed code holds a copy of the value of an immutable wherever the code reads it, so its pointer is a region of the ``code`` covering the value in one of those copies.
+The value takes the trailing bytes of the 32-byte copy, or the leading ones for a ``bytesN`` value, the way it is aligned on the stack.
+An immutable that the code never reads has no copy and is not listed, and neither is any immutable in the creation program, which holds the values in memory until it returns the deployed code.
