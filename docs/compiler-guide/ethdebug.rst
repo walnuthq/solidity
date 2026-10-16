@@ -10,7 +10,7 @@ It describes how the compiler derives the :ref:`ethdebug output <ethdebug>` from
 .. note::
     The debug info that is passed from the Solidity frontend through Yul is specified in :doc:`ethdebug_internal_debug_info`.
 
-The documents are modelled as data structures in ``libevmasm/EthdebugSchema.h``, one per schema, and serialized to JSON from there.
+The documents are modelled as data structures in ``liblangutil/EthdebugSchema.h``, one per schema, and serialized to JSON from there.
 The constructors of the parts assert the constraints of the schemas, so that the compiler cannot assemble a document that does not serialize.
 The frontend side, ``libsolidity/interface/Ethdebug.cpp``, builds the type documents and the pointer templates of a contract from its AST and types.
 
