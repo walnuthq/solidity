@@ -1166,8 +1166,6 @@ Json CompilerStack::interfaceSymbols(std::string const& _contractName) const
 Json CompilerStack::ethdebug() const
 {
 	solAssert(m_stackState >= AnalysisSuccessful, "Analysis was not successful.");
-	// The resource tables are derived from analysis results alone, so
-	// ethdebug.resources is available right after analysis.
 	ethdebug::Resources resources;
 	std::map<std::string, unsigned> const sourceIndexMap = sourceIndices();
 	for (auto const& [name, compiledContract]: m_contracts)
@@ -1610,9 +1608,9 @@ void CompilerStack::generateIR(ContractDefinition const& _contract, bool _unopti
 		*compiledContract.yulIR,
 		compiledContract.yulSemanticDebugData ? &*compiledContract.yulSemanticDebugData : nullptr
 	);
-	// The side table pairs with the unoptimized IR: attaching checks every
-	// pointer against it, and the table is kept as attached. The optimized IR,
-	// whose variable names differ, is not a supported pairing yet.
+	// The sidecar pairs with the unoptimized IR: attaching checks every pointer
+	// against it, and the table is kept as attached. The optimized IR, whose
+	// variable names differ, is not a supported sidecar input yet.
 	if (compiledContract.yulSemanticDebugData)
 		compiledContract.yulSemanticDebugData = stack.semanticDebugData();
 	if (!_unoptimizedOnly)
