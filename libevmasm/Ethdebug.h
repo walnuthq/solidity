@@ -25,6 +25,7 @@
 #include <libevmasm/LinkerObject.h>
 
 #include <map>
+#include <optional>
 
 namespace solidity::evmasm::ethdebug
 {
@@ -45,7 +46,13 @@ struct Source
 constexpr std::string_view SpecificationVersion = "0.1.0-draft.2";
 
 // returns ethdebug/format/program, stamped with its schema and the specification version.
-Json program(std::string_view _name, unsigned _sourceID, Assembly const& _assembly, LinkerObject const& _linkerObject);
+Json program(
+	std::string_view _name,
+	unsigned _sourceID,
+	Assembly const& _assembly,
+	LinkerObject const& _linkerObject,
+	std::optional<schema::program::Context> _programContext = std::nullopt
+);
 
 // returns ethdebug/format/info/resources, stamped with its schema and the specification version.
 Json resources(
