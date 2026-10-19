@@ -1,3 +1,5 @@
+.. index:: ethdebug; internal debug info
+
 ****************************
 ethdebug Internal Debug Info
 ****************************
