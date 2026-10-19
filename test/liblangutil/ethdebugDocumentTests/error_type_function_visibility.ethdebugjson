@@ -1,0 +1,3 @@
+{"types": {"t": {"kind": "function", "contains": {"parameters": {"type": {"kind": "tuple", "contains": []}}}}}}
+// ----
+// Error: resources.types.t must be either internal or external.

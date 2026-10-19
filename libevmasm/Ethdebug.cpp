@@ -18,7 +18,7 @@
 
 #include <libevmasm/Ethdebug.h>
 
-#include <libevmasm/EthdebugSchema.h>
+#include <liblangutil/EthdebugSchema.h>
 
 #include <libsolutil/Keccak256.h>
 

@@ -1,0 +1,5 @@
+{"format": "solidity-ethdebug-semantic-data", "version": 1, "scopes": {"1": {"0": {"variableDefinitions": [{"identifier": "", "phase": "computed"}]}}}}
+// ====
+// document: sidecar
+// ----
+// Error: sidecar.scopes.1.0.variableDefinitions[0].identifier must not be empty.
